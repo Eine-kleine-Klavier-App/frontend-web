@@ -12,7 +12,7 @@ export type Tool = 'select' | 'w' | 'h' | 'q' | '8' | '16' | 'rest' | 'tie';
  *  the common browser-tab convention (0 = the 10th slot, not "before 1"). `null` = an empty,
  *  reachable-but-unfilled slot — visually present with its hotkey label, functionally inert until
  *  something is dropped into it. The cursor/select tool is NOT one of these ten: it has its own
- *  fixed hotkey (Esc, see App.tsx) since it's not a "stamp" you fill/rearrange like the rest. */
+ *  fixed hotkey (Esc, see EditorScreen.tsx) since it's not a "stamp" you fill/rearrange like the rest. */
 export const HOTBAR_SLOT_COUNT = 10;
 /** the digit each slot index binds to — index 9 is '0' (the 10th key on the row), not a wraparound. */
 export function hotbarSlotKey(index: number): string {
@@ -71,7 +71,7 @@ interface EditorState {
 
   gateway: EditorGateway;
 
-  load: () => Promise<void>;
+  load: (scoreId: string) => Promise<void>;
   dispatch: (command: Command) => Promise<void>;
   deleteSelected: () => Promise<void>;
   undo: () => Promise<void>;
@@ -124,15 +124,24 @@ export const useEditor = create<EditorState>((set, get) => ({
   stemOverrides: {},
   gateway,
 
-  load: async () => {
+  load: async (scoreId) => {
+    set({ scoreId, loading: true, error: null });
     try {
-      const document = await get().gateway.load(get().scoreId);
-      set((s) => ({
+      const document = await get().gateway.load(scoreId);
+      // Always the first staff and first voice on a fresh load — the store is a single
+      // persistent instance for the whole SPA session (not re-created per route), so preserving
+      // the PREVIOUS draft's `currentStaff` (a staff id, not an index) here left it pointing at
+      // an id that doesn't exist in THIS document whenever navigating between two different
+      // drafts — neither Upper nor Lower then matched it, so the staff selector showed nothing
+      // active. Voices are already an index (usually still valid across documents), but resetting
+      // it too keeps the default deterministic rather than incidentally-preserved.
+      set({
         document,
         loading: false,
         error: null,
-        currentStaff: s.currentStaff || document.staffOrder[0] || '',
-      }));
+        currentStaff: document.staffOrder[0] || '',
+        currentVoice: 0,
+      });
     } catch (e) {
       set({ loading: false, error: (e as Error).message });
     }

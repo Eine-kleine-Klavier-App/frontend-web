@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import { Link, useParams } from 'react-router-dom';
 import { useEditor, hotbarSlotKey, HOTBAR_SLOT_COUNT } from '@/app/store';
 import { LeftPanel } from '@/features/editor/LeftPanel';
 import { Toolbar } from '@/features/editor/Toolbar';
@@ -6,6 +7,7 @@ import { EditorView } from '@/features/editor/EditorView';
 import { PropertiesPanel } from '@/features/editor/PropertiesPanel';
 import { PlaybackBar } from '@/features/playback/PlaybackBar';
 import { SegmentedControl } from '@/features/editor/SegmentedControl';
+import { BackIcon } from '@/features/editor/icons';
 import {
   locate,
   carrierIdOf,
@@ -20,14 +22,15 @@ const CANVAS_MODE_OPTIONS = [
   { value: 'page' as const, label: 'Page' },
 ];
 
-/** Arrow-key navigation's in-progress Shift-range state (App.tsx's keydown handler). `scopeId` is
- *  the carrier id (note-mode) or voice id (carrier-mode) the range is confined to — carried
- *  through only to identify the scope, nothing reads it back apart from re-threading it. `ids` is
- *  the ordered id list it's ranging over (a chord's own notes, or a voice's carriers); `anchorId`/
- *  `cursorId` are the range's fixed/moving ends; `appliedIds` is exactly what we last set
- *  `selectedIds` to, so the NEXT Shift+Arrow can tell whether the store's selection still matches
- *  what we produced, or something else changed it in between (e.g. a mouse click) — in which case
- *  the range restarts fresh instead of extending a now-stale anchor. */
+/** Arrow-key navigation's in-progress Shift-range state (EditorScreen's keydown handler).
+ *  `scopeId` is the carrier id (note-mode) or voice id (carrier-mode) the range is confined
+ *  to — carried through only to identify the scope, nothing reads it back apart from
+ *  re-threading it. `ids` is the ordered id list it's ranging over (a chord's own notes, or a
+ *  voice's carriers); `anchorId`/`cursorId` are the range's fixed/moving ends; `appliedIds` is
+ *  exactly what we last set `selectedIds` to, so the NEXT Shift+Arrow can tell whether the
+ *  store's selection still matches what we produced, or something else changed it in between
+ *  (e.g. a mouse click) — in which case the range restarts fresh instead of extending a
+ *  now-stale anchor. */
 interface NavRange {
   kind: 'note' | 'carrier';
   scopeId: string;
@@ -50,7 +53,10 @@ function LockIcon({ locked }: { locked: boolean }) {
   );
 }
 
-export default function App() {
+export default function EditorScreen() {
+  // the route is the source of truth for which draft is open — this component doesn't own
+  // that id, it just tells the store to load it (see App Router's `/edit/:draftId`).
+  const { draftId } = useParams<{ draftId: string }>();
   const load = useEditor((s) => s.load);
   const document = useEditor((s) => s.document);
   const error = useEditor((s) => s.error);
@@ -65,8 +71,8 @@ export default function App() {
   const navRangeRef = useRef<NavRange | null>(null);
 
   useEffect(() => {
-    void load();
-  }, [load]);
+    if (draftId) void load(draftId);
+  }, [load, draftId]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -211,8 +217,11 @@ export default function App() {
   return (
     <div className="app">
       <header className="topbar">
+        <Link to="/library" className="icon-btn back-link" title="Back to Library">
+          <BackIcon />
+        </Link>
         <div className="title">
-          Piano Studio
+          Eine kleine Klavierapp
           <small>{document.title || 'Untitled'} · draft</small>
         </div>
         <div className="spacer" />

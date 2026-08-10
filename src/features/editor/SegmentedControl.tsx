@@ -1,7 +1,7 @@
 import { motion } from 'motion/react';
 import { springSnappy } from '@/styles/motion';
 
-// The ONE shared "Segmented control" (DESIGN.md §7) — used for canvas mode (Line/Page, App.tsx)
+// The ONE shared "Segmented control" (DESIGN.md §7) — used for canvas mode (Line/Page, EditorScreen.tsx)
 // and the staff selector (Upper/Lower, Toolbar.tsx). A "raised active thumb that slides" between
 // options, not a per-button background swap: `.seg-thumb` is a single `motion.div` that only ever
 // renders inside the currently-active button, so switching options re-parents it — `motion/react`

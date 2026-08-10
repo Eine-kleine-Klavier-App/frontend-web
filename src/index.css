@@ -126,6 +126,11 @@ textarea,
   outline: 2px solid var(--color-focus-ring);
   outline-offset: 2px;
 }
+/* `.icon-btn` styles a <button> by default; `.back-link` reuses it on an <a> (react-router
+   `Link`), which needs its own underline suppressed. */
+.back-link {
+  text-decoration: none;
+}
 .zoom {
   display: flex;
   align-items: center;
@@ -392,13 +397,12 @@ textarea,
 }
 
 /* ---- canvas ---- */
-/* The score fills the whole canvas area edge-to-edge on ONE continuous white surface — there is no
-   longer a distinct white "paper card" floating on a warm backdrop. Rationale (experiment per the
-   product owner): the card's own box is a DIFFERENT size in line vs page mode, so switching modes
-   visibly resized/reshuffled that card — a jarring second thing moving on top of the score itself
-   reflowing. Making the canvas-area itself the white surface (`--color-paper`) and the `.paper`
-   node a transparent, unshadowed sizer means a mode switch changes only the SCORE's layout, never a
-   visible card around it. */
+/* The score fills the whole canvas area edge-to-edge on ONE continuous white surface — no distinct
+   white "paper card" floating on a warm backdrop. A card's own box would be a DIFFERENT size in
+   line vs page mode, so switching modes would visibly resize/reshuffle it — a second thing moving
+   on top of the score itself reflowing. The canvas-area itself is the white surface
+   (`--color-paper`); `.paper` stays a transparent, unshadowed sizer, so a mode switch changes only
+   the SCORE's layout, never a visible card around it. */
 .canvas-area {
   flex: 1;
   overflow: auto;
@@ -851,4 +855,1903 @@ textarea,
   padding: 3px 9px;
   border-radius: var(--radius-full);
   white-space: nowrap;
+}
+
+/* ---- score thumbnail (Explore cards / Library rows) — a "cover" square holding either a set
+   cover image or, as a placeholder until one is set, a centered notation excerpt on a plain
+   neutral field. No per-item color tint (removed — read as an unwanted "rainbow"). ---- */
+.score-thumbnail {
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  flex-shrink: 0;
+  background: var(--color-paper);
+}
+/* fluid mode — fills its parent completely (the parent tile sets width AND height, any aspect
+   ratio). Notation box is measured via ResizeObserver in the TSX. */
+.score-thumbnail--fill {
+  width: 100%;
+  height: 100%;
+}
+.score-thumbnail-image {
+  object-fit: cover;
+  display: block;
+}
+.score-thumbnail--fill.score-thumbnail-image {
+  height: 100%;
+}
+.score-thumbnail-notation {
+  position: relative;
+}
+.score-thumbnail-notation > div {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+.score-thumbnail-empty {
+  background: var(--color-paper);
+}
+
+/* ---- playable thumbnail (ScoreThumbnail + hover-reveal play button, Spotify pattern) ----
+   sizes come inline from PlayableThumbnail.tsx (scales with the thumbnail — see its own
+   comment on why a flat 32px broke on the 40x40 Library row size), CSS only handles state. */
+.playable-thumbnail {
+  position: relative;
+}
+.playable-thumbnail--fill {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+}
+/* darkens the art itself on hover, not just the button popping in — Spotify dims the whole
+   cover under a hovered play button, the button alone reads as a static UI chrome addition. */
+.playable-thumbnail::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-sm);
+  background: rgba(44, 36, 29, 0);
+  transition: background-color var(--motion-fast) var(--ease-standard);
+  pointer-events: none;
+}
+.playable-thumbnail:hover::after {
+  background: rgba(44, 36, 29, 0.28);
+}
+.thumbnail-play {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard);
+}
+.playable-thumbnail:hover .thumbnail-play,
+.thumbnail-play.playing {
+  opacity: 1;
+}
+.thumbnail-play:hover {
+  background: var(--color-accent-strong);
+}
+.thumbnail-play:active {
+  transform: scale(0.88);
+}
+.thumbnail-play:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.thumbnail-play svg {
+  width: 100%;
+  height: 100%;
+}
+
+/* ---- score detail (Spotify album page / flowkey song page pattern) — the page a score
+   card/row now lands on instead of immediately branching a draft; play/practice/edit is an
+   explicit choice here, not implied by the one click that used to fire the whole grid/list. ---- */
+.score-detail-screen {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-6);
+  background: var(--color-backdrop);
+}
+.score-detail-screen > * {
+  max-width: 900px;
+  margin-left: auto;
+  margin-right: auto;
+}
+/* `.score-detail-back` only adds the bottom margin this screen needs; the rest comes from the
+   shared `.back-link` (see below) — no more separate color/size/gap definitions. */
+.score-detail-back {
+  margin-bottom: var(--space-5);
+}
+.score-detail-hero {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-6);
+}
+@media (min-width: 640px) {
+  .score-detail-hero {
+    flex-direction: row;
+    align-items: flex-end;
+  }
+}
+.score-detail-hero .score-thumbnail {
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+}
+.score-detail-info {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.score-detail-eyebrow {
+  font-size: var(--text-xs);
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--color-ink-faint);
+}
+.score-detail-title {
+  font-family: var(--font-reading);
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--color-ink);
+  margin: 0;
+  line-height: 1.15;
+}
+.score-detail-composer {
+  font-size: var(--text-md);
+  color: var(--color-ink-muted);
+}
+.score-detail-actions {
+  display: flex;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
+.score-detail-action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border-strong);
+  color: var(--color-ink);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+.score-detail-action svg {
+  width: 18px;
+  height: 18px;
+}
+.score-detail-action:hover:not(:disabled) {
+  background: var(--color-accent-subtle);
+}
+.score-detail-action:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.score-detail-action:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.score-detail-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.score-detail-action.primary {
+  background: var(--color-accent);
+  border-color: transparent;
+  color: #fff;
+}
+.score-detail-action.primary:hover:not(:disabled) {
+  background: var(--color-accent-strong);
+}
+
+/* ---- library screen ---- */
+.library-screen {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-6);
+  background: var(--color-backdrop);
+}
+.library-screen > * {
+  max-width: 1200px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.library-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-6);
+}
+.library-header h1 {
+  font-size: var(--text-xl);
+  color: var(--color-ink);
+  margin: 0;
+}
+.library-error {
+  font-size: var(--text-sm);
+  color: var(--color-danger);
+  background: var(--color-danger-subtle);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-4);
+}
+.library-section {
+  margin-bottom: var(--space-7);
+}
+.library-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--space-4);
+}
+.library-section-header h2 {
+  font-size: var(--text-lg);
+  font-weight: 650;
+  color: var(--color-ink);
+  margin: 0;
+}
+.library-count {
+  font-size: var(--text-sm);
+  color: var(--color-ink-faint);
+}
+/* The ONE inline icon+text "back" link, shared by Library's collection back-nav AND the score
+   detail screen (was two near-duplicate blocks — `.library-section-back` vs `.score-detail-back`
+   — differing only in font-size/color/gap for no real reason; standing rule, DESIGN.md §3.5:
+   equivalent controls always share one primitive). */
+.back-link {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-height: 32px;
+  font-size: var(--text-lg);
+  font-weight: 650;
+  color: var(--color-ink);
+}
+.back-link svg {
+  width: 18px;
+  height: 18px;
+  color: var(--color-ink-faint);
+}
+.back-link:hover {
+  color: var(--color-accent-deep);
+}
+.back-link:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* Collections — the primary organizing unit for "Your scores" (was one flat dump). This inline
+   tile grid is the NARROW-only presentation (no sidebar there to hold the tree) — hidden at
+   >=768px, see `.library-section-collections-mobile` below. Folder glyph carries the metaphor
+   instead of color-coding (color reserved for the accent already in use elsewhere). */
+.library-section-collections-mobile {
+  /* narrow default: visible, same as any other section */
+}
+@media (min-width: 768px) {
+  .library-section-collections-mobile {
+    display: none;
+  }
+}
+.collection-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--space-3);
+}
+.collection-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-height: 44px;
+  padding: var(--space-4);
+  background: var(--color-paper);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-1);
+  color: var(--color-ink);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    box-shadow var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+.collection-tile svg {
+  width: 22px;
+  height: 22px;
+  color: var(--color-ink-faint);
+}
+.collection-tile-name {
+  font-family: var(--font-reading);
+  font-size: var(--text-md);
+  font-weight: 700;
+}
+.collection-tile-count {
+  font-size: var(--text-xs);
+  color: var(--color-ink-faint);
+}
+.collection-tile:hover {
+  box-shadow: var(--shadow-2);
+  transform: translateY(-1px);
+}
+.collection-tile:active {
+  box-shadow: var(--shadow-1);
+  transform: translateY(0);
+}
+.collection-tile:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.collection-tile.active {
+  border-color: var(--color-accent);
+}
+.collection-tile.active svg {
+  color: var(--color-accent-deep);
+}
+.library-loading,
+.library-empty {
+  color: var(--color-ink-faint);
+  font-size: var(--text-md);
+  padding: var(--space-4) 0;
+}
+
+/* ---- app shell (Explore/Library nav chrome — the Editor is NOT wrapped in this, see
+   AppRouter.tsx) — bottom tab bar under 768px; a persistent LEFT SIDEBAR at/above it. Full
+   layout redo (ui-ux-pro-max's own "File Manager & Transfer" product-type match names exactly
+   this shape: "N/A — file tree focused"): a flat top-bar with two tabs was tried and rejected
+   as unearned chrome — a sidebar only justifies itself once it carries real navigational
+   content, which the collections tree now does. 768px is a plain iPad-portrait-ish width,
+   a deliberate starting choice — DESIGN.md has no breakpoint convention yet. ---- */
+.app-shell {
+  position: relative; /* anchors `.preview-panel` (position: absolute, floats over content
+    during its own open/close motion — see AppShell.tsx) to the shell, not the viewport. */
+  height: 100vh;
+  display: flex;
+  flex-direction: column-reverse; /* nav below content, narrow */
+  overflow: hidden; /* the shell itself never scrolls — only the content pane does. Without
+                       this a too-wide child (e.g. a horizontal carousel) scrolls the whole
+                       page sideways and drags the sidebar off-screen ("left panel falls out
+                       of view" bug). */
+}
+.app-shell-content {
+  flex: 1;
+  min-height: 0;
+  /* min-width:0 is the load-bearing one — flex items default to min-width:auto and refuse to
+     shrink below their content's intrinsic width, so a wide child forces the whole row wider
+     and pushes the sidebar out. This lets the content pane clip instead. */
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+/* the fixed search bar — ONE place on every browse screen; stays put while the screen below it
+   scrolls */
+.shell-topbar {
+  flex-shrink: 0;
+  padding: var(--space-5) var(--space-7);
+  border-bottom: 1px solid var(--color-border);
+}
+.shell-topbar .scoped-search {
+  max-width: 520px;
+}
+.shell-outlet {
+  position: relative; /* anchors .shell-page's absolute overlap during a crossfade */
+  flex: 1;
+  min-height: 0;
+  overflow: hidden; /* the screen inside owns its own scroll */
+}
+/* absolutely positioned so the outgoing and incoming screen can overlap during the crossfade
+   without doubling the flex layout's height (the old "mode=wait" avoided this by never letting
+   them coexist — which is exactly what produced a blank frame between screens). */
+.shell-page {
+  position: absolute;
+  inset: 0;
+}
+.app-nav {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: row;
+  justify-content: space-around;
+  align-items: center;
+  height: 56px;
+  background: var(--color-surface-raised);
+  border-top: 1px solid var(--color-border);
+}
+.app-nav-brand {
+  display: none; /* narrow: bottom tab bar has no room for a wordmark, icons speak for themselves */
+}
+.app-nav-tabs {
+  display: flex;
+  flex: 1;
+  justify-content: space-around;
+}
+.app-nav-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding: 6px 14px;
+  color: var(--color-ink-faint);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  text-decoration: none;
+  border-radius: var(--radius-md);
+  /* 44x44 minimum touch target (ui-ux-pro-max, Touch & Interaction — CRITICAL) — the icon
+     glyph itself stays 20px, the target grows around it via padding/min-size, not the glyph. */
+  min-width: 44px;
+  min-height: 44px;
+  justify-content: center;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+.app-nav-item svg {
+  width: 20px;
+  height: 20px;
+}
+.app-nav-item:hover {
+  color: var(--color-ink-muted);
+}
+.app-nav-item:active {
+  transform: scale(0.94);
+}
+.app-nav-item:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.app-nav-item.active {
+  color: var(--color-ink);
+  font-weight: 750;
+}
+/* narrow: no room in the bottom tab bar for a tree — Library's own page renders an inline
+   collection tile grid instead (`.library-section-collections-mobile`). Without this, the
+   tree still MOUNTS (AppShell.tsx doesn't viewport-gate it) and rendered as unstyled links
+   stacked below the tab bar, since its real styling only exists in the >=768px block below. */
+.app-nav-tree {
+  display: none;
+}
+
+@media (min-width: 768px) {
+  .app-shell {
+    flex-direction: row; /* sidebar left, content right */
+  }
+  .app-nav {
+    flex-direction: column;
+    align-items: stretch;
+    justify-content: flex-start;
+    width: 240px;
+    height: 100%;
+    padding: var(--space-5) var(--space-4);
+    gap: var(--space-2);
+    border-top: none;
+    border-right: 1px solid var(--color-border);
+    overflow-y: auto;
+  }
+  .app-nav-brand {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--color-accent-deep);
+    flex-shrink: 0;
+    padding: 0 var(--space-2);
+    margin-bottom: var(--space-4);
+  }
+  .app-nav-brand svg {
+    width: 22px;
+    height: 22px;
+  }
+  .app-nav-wordmark {
+    font-size: var(--text-md);
+    font-weight: 700;
+    color: var(--color-ink);
+    letter-spacing: -0.01em;
+  }
+  .app-nav-tabs {
+    flex: none; /* base rule sets flex:1 for the narrow bottom-bar row — must not carry over
+                   here, or it grows to fill the sidebar and shoves the tree to the bottom */
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+  }
+  .app-nav-item {
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: var(--space-3);
+    padding: 0 var(--space-2);
+    min-height: 40px;
+  }
+  .app-nav-item.active {
+    position: relative;
+    background: var(--color-surface);
+  }
+  /* a thin accent marker (not an orange fill) anchors the active item for the eye */
+  .app-nav-item.active::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 3px;
+    height: 60%;
+    border-radius: var(--radius-full);
+    background: var(--color-accent);
+  }
+  /* the account item sits row-aligned at the bottom; keep the marker off it (it's not a section) */
+  .app-nav-account.active::before {
+    display: none;
+  }
+
+  /* the collections tree — only rendered when Library is the active section (AppShell.tsx).
+     Plain text rows, not cards: a tree is read top-to-bottom, not scanned as tiles. */
+  .app-nav-tree {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    margin-top: var(--space-5);
+    padding-top: var(--space-4);
+    border-top: 1px solid var(--color-border);
+  }
+  .app-nav-tree-heading {
+    padding: 0 var(--space-2);
+    margin-bottom: var(--space-1);
+    font-size: var(--text-xs);
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--color-ink-faint);
+  }
+  .app-nav-tree-item {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    min-height: 34px;
+    padding: 0 var(--space-2);
+    border-radius: var(--radius-sm);
+    color: var(--color-ink-muted);
+    font-size: var(--text-sm);
+    font-weight: 550;
+    text-decoration: none;
+    transition: background-color var(--motion-fast) var(--ease-standard);
+  }
+  .app-nav-tree-item svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+    color: var(--color-ink-faint);
+  }
+  .app-nav-tree-item:hover {
+    background: var(--color-surface);
+  }
+  .app-nav-tree-item:focus-visible {
+    outline: 2px solid var(--color-focus-ring);
+    outline-offset: 2px;
+  }
+  .app-nav-tree-item.active {
+    background: var(--color-accent-subtle);
+    color: var(--color-accent-deep);
+    font-weight: 650;
+  }
+  .app-nav-tree-item.active svg {
+    color: var(--color-accent-deep);
+  }
+}
+
+/* ============================================================================
+   BROWSE REDESIGN (Explore / Library / preview panel) — docs/browse-redesign.md
+   Signature = the engraved title plate. One card language across both screens.
+   ============================================================================ */
+
+/* --- Right preview panel: same mechanic as the editor's `.left-panel`/`.lp-content`, mirrored for
+   the right edge. TWO layers, one rigid visual unit:
+   1. `.preview-panel` — the REAL flex item. Its `width` is the CLAMPED, strictly-monotonic
+      `layout` value (critically damped, PreviewPanel.tsx) — the ONLY thing `.app-shell-content`
+      next to it ever reacts to, so the content column reflows smoothly with zero bounce, never a
+      second decorative reaction layered on top. No separate gap div — this element's own width IS
+      the reservation, same as `.left-panel` needs none next to the editor canvas.
+   2. `.preview-panel-inner` — a fixed-372px box (never reflows) whose `x`-transform carries the
+      UNCLAMPED, bouncy `visual` value. Everything on the panel (close button, cover, actions)
+      lives inside it and rides that same transform as one rigid unit — the panel's own kick/
+      overshoot, nothing else's.
+   `.preview-panel` is `overflow: visible` + a raised z-index so that bounce (which can extend a
+   few px past the panel's current clamped slot) paints over the content instead of being clipped. */
+.preview-panel {
+  position: relative;
+  z-index: 20; /* panels tier, DESIGN.md §3.6 z-scale — matches `.left-panel` */
+  flex: none;
+  overflow: visible;
+  /* `height: 0` here, `100%` only from >=768px below — it's a MAIN-AXIS size in `.app-shell`'s
+     narrow `column-reverse` layout, where an unconditional height would starve
+     `.app-shell-content` of space; `PreviewPanel` can still be mounted on narrow (a preview opened
+     wide, then the viewport resized down) at `width: 0`. */
+  height: 0;
+  /* No background — nothing should be visible in this reserved column until
+     `.preview-panel-inner` (background AND border together) slides into it, so the panel and its
+     content arrive as one rigid unit, never a box appearing before what's inside it. */
+}
+.preview-panel-inner {
+  position: relative;
+  width: 372px; /* PANEL_W in PreviewPanel.tsx — fixed, never reflows */
+  height: 100%;
+  box-sizing: border-box;
+  overflow-y: auto;
+  /* Promotes this element to its own compositor layer — an animating `transform` on a scrollable
+     box full of shadowed/rounded child content would otherwise risk repainting per-frame instead
+     of compositing as one texture. */
+  will-change: transform;
+  background: var(--color-surface-raised);
+  border-left: 1px solid var(--color-border);
+  /* No box-shadow — a blurred shadow riding this element's bounce (it can overshoot past rest,
+     `overflow: visible` on the parent lets it paint there on purpose) would move a soft region
+     around during the animation. A border alone, matching `.lp-content`'s own precedent, still
+     separates the panel from the content without that. */
+  padding: var(--space-5) var(--space-5) var(--space-7);
+}
+/* `.preview-panel`'s real height only matters (and is only safe — see its own base-rule comment)
+   from >=768px; placed HERE, immediately after the base rule, on purpose — a same-specificity
+   override earlier in the file loses to a later base rule regardless of its `@media` condition,
+   so source position is load-bearing for an override like this: keep it adjacent to the rule it
+   overrides, not merely "inside a `@media (min-width: 768px)` block somewhere". */
+@media (min-width: 768px) {
+  .preview-panel {
+    height: 100%;
+  }
+}
+/* the close button anchors to THE PANEL itself, not a dedicated header row — it overlaps the
+   top-right corner of the cover directly below it, the same "controls float on the artwork"
+   language the cover's own play button already uses, with a solid paper background + shadow so it
+   stays legible over any composer tint. */
+.preview-panel-close {
+  position: absolute;
+  top: var(--space-4);
+  right: var(--space-4);
+  z-index: 2;
+  border-radius: var(--radius-full);
+  border-color: var(--color-border);
+  background: var(--color-paper);
+  box-shadow: var(--shadow-2);
+}
+.preview-panel-close svg {
+  width: 16px;
+  height: 16px;
+}
+.preview-panel-loading,
+.preview-panel-empty {
+  color: var(--color-ink-muted);
+  font-size: var(--text-md);
+  padding: var(--space-6) var(--space-2);
+}
+.preview-panel-cover {
+  width: 100%;
+  margin-bottom: var(--space-4);
+}
+.preview-panel-titleblock {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-bottom: var(--space-5);
+}
+.preview-panel-title {
+  font-family: var(--font-reading);
+  font-size: var(--text-2xl);
+  line-height: 1.2;
+  color: var(--color-ink);
+}
+.preview-panel-composer {
+  font-size: var(--text-md);
+  color: var(--color-ink-muted);
+  font-style: italic;
+}
+.preview-panel-signals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin-bottom: var(--space-5);
+}
+.preview-panel-signal {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.preview-panel-signal-label,
+.hero-signal-label {
+  font-size: var(--text-xs);
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-faint);
+}
+.preview-panel-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+.preview-panel-note,
+.preview-panel-error {
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  color: var(--color-ink-muted);
+  margin-bottom: var(--space-4);
+}
+.preview-panel-error {
+  color: var(--color-danger);
+}
+.preview-panel-more {
+  width: 100%;
+  padding: var(--space-3);
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--color-ink-faint);
+  font-size: var(--text-sm);
+  font-family: var(--font-ui);
+  cursor: not-allowed;
+}
+.branch-list {
+  margin-top: var(--space-6);
+  border-top: 1px solid var(--color-border);
+  padding-top: var(--space-4);
+}
+.branch-list-head {
+  font-family: var(--font-reading);
+  font-size: var(--text-lg);
+  color: var(--color-ink);
+  margin-bottom: var(--space-3);
+}
+.branch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) 0;
+}
+.branch-row-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.branch-row-title {
+  font-size: var(--text-md);
+  color: var(--color-ink);
+  font-weight: 600;
+}
+.branch-row-author {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+
+/* --- Buttons (first shared button set — DESIGN.md has none yet) --- */
+/* The ONE labeled-button primitive (DESIGN.md §7), via `src/ui/Button.tsx`. `.btn` is shape only;
+   `.btn-{variant}` is color only — a variant never redeclares padding/height/radius. */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  min-height: var(--control-h);
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  font-weight: 650;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard),
+    filter var(--motion-fast) var(--ease-standard);
+}
+.btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+/* press = 120ms scale to 0.97 + darken (§7), fires on pointer-DOWN via plain CSS :active — the
+   "respond on pointer-down, never on release" contract (§3.5 №8) for free. */
+.btn:active:not(:disabled) {
+  transform: scale(0.97);
+  filter: brightness(0.96);
+}
+.btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.btn-primary {
+  background: var(--color-accent);
+  color: var(--color-paper);
+  box-shadow: var(--shadow-1);
+}
+.btn-primary:hover {
+  background: var(--color-accent-strong);
+}
+/* secondary: a bordered neutral surface — the visible-but-not-loud second action (was `.btn-ghost`
+   before the accent-load pass; renamed to match what it actually looks like, per DESIGN.md §7). */
+.btn-secondary {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border-strong);
+  color: var(--color-ink);
+}
+.btn-secondary:hover {
+  background: var(--color-surface);
+}
+/* ghost: transparent until touched — DESIGN.md §7's actual ghost spec (ADDED — no call site yet,
+   defined so a future low-emphasis action doesn't reinvent it). */
+.btn-ghost {
+  background: transparent;
+  color: var(--color-ink);
+}
+.btn-ghost:hover {
+  background: var(--color-accent-subtle);
+}
+.preview-play:focus-visible,
+.shelf-arrow:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* --- Browse screens shared chrome --- */
+.explore,
+.library-screen,
+.author-screen,
+.you-screen {
+  height: 100%;
+  overflow-y: auto;
+  padding: var(--space-6) var(--space-7) var(--space-8);
+}
+.browse-topbar {
+  margin-bottom: var(--space-6);
+  max-width: 560px;
+}
+.scoped-search {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-h);
+  padding: 0 var(--space-4);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  color: var(--color-ink-faint);
+}
+.scoped-search:focus-within {
+  border-color: var(--color-border-strong);
+  box-shadow: 0 0 0 3px var(--color-focus-ring);
+}
+.scoped-search svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+.scoped-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  color: var(--color-ink);
+  outline: none;
+}
+.scoped-search-input::placeholder {
+  color: var(--color-ink-faint);
+}
+.scoped-search-clear {
+  border: none;
+  background: transparent;
+  color: var(--color-ink-faint);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+.browse-loading,
+.browse-result-count {
+  color: var(--color-ink-muted);
+  font-size: var(--text-md);
+}
+.browse-result-count {
+  display: block;
+  margin-bottom: var(--space-4);
+}
+.browse-empty {
+  text-align: center;
+  padding: var(--space-8) var(--space-4);
+  max-width: 440px;
+  margin: var(--space-8) auto 0;
+}
+.browse-empty-mark {
+  font-size: 28px;
+  letter-spacing: 0.3em;
+  color: var(--color-ink-faint);
+  margin-bottom: var(--space-4);
+}
+.browse-empty h2 {
+  font-family: var(--font-reading);
+  font-size: var(--text-xl);
+  color: var(--color-ink);
+  margin-bottom: var(--space-2);
+}
+.browse-empty p {
+  color: var(--color-ink-muted);
+  line-height: 1.55;
+}
+
+/* --- Featured hero --- */
+/* the featured band: the pick's own composer tint fills the width, so the space to the right of
+   the text is intentional colour, not an empty box; a big faint clef watermark anchors it */
+.hero {
+  position: relative;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: var(--space-7);
+  align-items: center;
+  padding: var(--space-6);
+  margin-bottom: var(--space-8);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  background: var(--plate-0);
+}
+.hero.plate-tint-0 { background: var(--plate-0); }
+.hero.plate-tint-1 { background: var(--plate-1); }
+.hero.plate-tint-2 { background: var(--plate-2); }
+.hero.plate-tint-3 { background: var(--plate-3); }
+.hero.plate-tint-4 { background: var(--plate-4); }
+.hero.plate-tint-5 { background: var(--plate-5); }
+.hero-watermark {
+  position: absolute;
+  right: -3%;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 150%;
+  opacity: 0.07;
+  pointer-events: none;
+}
+.hero-watermark path {
+  fill: var(--color-ink);
+}
+.hero > .hero-cover,
+.hero > .hero-body {
+  position: relative;
+  z-index: 1;
+}
+.hero-cover {
+  width: 300px;
+  cursor: pointer;
+  border-radius: var(--radius-md);
+}
+.hero-cover:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 3px;
+}
+.hero-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.hero-eyebrow {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+}
+.hero-title {
+  font-family: var(--font-reading);
+  font-size: var(--text-3xl);
+  line-height: 1.15;
+  color: var(--color-ink);
+}
+/* the hero cover sits on the same-tint band — give it a paper ground + lift so it reads as a
+   distinct plate, not a blob of the band colour */
+.hero .hero-cover .score-cover {
+  background: var(--color-paper);
+  box-shadow: var(--shadow-3);
+}
+.hero-composer {
+  font-size: var(--text-md);
+  color: var(--color-ink-muted);
+  font-style: italic;
+}
+.hero-signals {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  margin: var(--space-2) 0;
+}
+.hero-actions {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+/* --- Shelves (horizontal carousels) --- */
+.shelf-stack {
+  display: flex;
+  flex-direction: column;
+}
+/* clear section separation: a hairline rule + generous space between shelves (children are
+   motion wrappers, so target direct children, not `.shelf + .shelf`) */
+.shelf-stack > * {
+  padding-top: var(--space-7);
+}
+.shelf-stack > * + * {
+  border-top: 1px solid var(--color-border);
+}
+.shelf-head {
+  margin-bottom: var(--space-4);
+}
+.shelf-title {
+  font-family: var(--font-reading);
+  font-size: var(--text-2xl);
+  color: var(--color-ink);
+}
+.shelf-subtitle {
+  display: block;
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+  margin-top: 2px;
+}
+/* carousel: the track scrolls, with big arrows overlaid on the row edges (Netflix/Spotify idiom)
+   that fade in on hover — far more reachable than tiny buttons up in the header */
+.shelf-viewport {
+  position: relative;
+}
+.shelf-track {
+  display: flex;
+  gap: var(--space-4);
+  overflow-x: auto;
+  /* No `scroll-snap-type` — it re-snaps the scroll position whenever this track's own width
+     changes (e.g. the preview panel opening next to it), visibly shifting every shelf's cards a
+     few px left even though nothing about the scroll itself was touched. */
+  /* breathing room so a hovered/selected card's lift + border + shadow aren't clipped */
+  padding: var(--space-2);
+  margin: 0 calc(var(--space-2) * -1);
+  scrollbar-width: thin;
+}
+.shelf-track > .piece-card {
+  flex: 0 0 190px;
+}
+.shelf-arrow {
+  position: absolute;
+  top: 42%;
+  transform: translateY(-50%);
+  z-index: 3;
+  width: 44px;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-full);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow-2);
+  opacity: 0;
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    background-color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+.shelf-viewport:hover .shelf-arrow,
+.shelf-arrow:focus-visible {
+  opacity: 1;
+}
+.shelf-arrow:hover {
+  background: var(--color-surface);
+}
+.shelf-arrow:active {
+  transform: translateY(-50%) scale(0.92);
+}
+.shelf-arrow--left {
+  left: calc(var(--space-3) * -1);
+}
+.shelf-arrow--right {
+  right: calc(var(--space-3) * -1);
+}
+/* touch/narrow: no hover to reveal edge arrows — rely on swipe, hide them */
+@media (max-width: 767px) {
+  .shelf-arrow {
+    display: none;
+  }
+}
+
+/* --- Search results / library / profile grid (shared by Library, Explore search, author
+   profiles) --- */
+/* Column count is FIXED (not `auto-fill`) from >=768px — the width where the preview panel can
+   ever be open. 3 columns, sized for the width available WITH the panel open (~764px content
+   column at a typical 1440px viewport) — opening/closing the panel changes nothing about this
+   grid's layout, only how much of it is visible next to the panel. Cards use `1fr` (not capped to
+   a max px width) so 3 columns still fill the row completely, just wider than the cap on a wide
+   monitor with the panel closed. Below 768px the panel never opens at all, so plain `auto-fill`
+   is still correct and responsive there. */
+.piece-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 200px));
+  gap: var(--space-5) var(--space-4);
+}
+@media (min-width: 768px) {
+  .piece-grid {
+    grid-template-columns: repeat(3, minmax(170px, 1fr));
+  }
+}
+
+/* --- Piece card (shelf + grid) --- */
+/* No card padding/frame: the cover is edge-to-edge and thus the SAME size in every state — a
+   hover background inset would make it look smaller than its neighbours. Hover/selected are shown
+   by lift + shadow + an outline on the cover, none of which change the cover's size. */
+.piece-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  cursor: pointer;
+  text-align: left;
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+.piece-card:hover {
+  transform: translateY(-2px);
+}
+.piece-card:hover .score-cover {
+  box-shadow: var(--shadow-3);
+}
+.piece-card:active {
+  transform: scale(0.98);
+}
+.piece-card:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 4px;
+  border-radius: var(--radius-md);
+}
+.piece-card.active .score-cover {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+/* wraps the cover just to anchor the optional relation tag to its corner — no size/layout effect
+   of its own */
+.piece-card-cover-slot {
+  position: relative;
+}
+/* "already yours" tag — saved in a collection, or authored by you (Explore only, see
+   PieceCard.tsx's doc comment). A quiet neutral chip, not a fit/status colour — this is
+   informational, not a judgement about the piece. */
+.piece-card-relation {
+  position: absolute;
+  top: var(--space-2);
+  left: var(--space-2);
+  background: var(--color-paper);
+  color: var(--color-ink-muted);
+  border: 1px solid var(--color-border);
+  box-shadow: var(--shadow-1);
+}
+.piece-card-relation--mine {
+  color: var(--color-accent-deep);
+  border-color: transparent;
+  background: var(--color-accent-subtle);
+}
+/* card body: title + composer, standardized here (NOT baked into the cover) so a user image
+   drops into the cover slot cleanly */
+.piece-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: 0 var(--space-1);
+  min-width: 0;
+}
+.piece-card-title {
+  font-family: var(--font-reading);
+  font-weight: 600;
+  font-size: var(--text-md);
+  line-height: 1.3;
+  color: var(--color-ink);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  /* always reserve two lines so 1-line and 2-line titles keep composer + meta aligned across a row */
+  min-height: calc(1.3em * 2);
+}
+.piece-card-composer {
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.piece-card-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 0 var(--space-1);
+}
+
+/* --- "Your Scores" own cards (AuthorProfileScreen, MyScoresContent) — the standard
+   `.piece-card-meta` (FitBadge + StarRating) stays as-is; a view count sits below it, and a
+   visibility-move action below that — `.btn-ghost`, sized down to `--control-h-sm` since
+   `--control-h`'s default 44px reads too heavy as a card footer action. --- */
+.author-score-views {
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+}
+.author-score-toggle {
+  align-self: flex-start;
+  /* `.btn`'s own `min-height: var(--control-h)` (44px) wins over a plain `height` override —
+     `min-height` is the one that actually has to be overridden here. */
+  min-height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  margin: 0 var(--space-1);
+}
+
+/* --- The score cover: composer-tinted notation excerpt, or a user image --- */
+.score-cover {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  width: 100%;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  /* lift covers off the flat backdrop — depth tier 3 (rail / content / covers) */
+  box-shadow: var(--shadow-2);
+  border: 1px solid rgba(74, 56, 40, 0.06);
+  background: var(--plate-0);
+  transition: box-shadow var(--motion-fast) var(--ease-standard);
+}
+.score-cover.plate-tint-0 { background: var(--plate-0); }
+.score-cover.plate-tint-1 { background: var(--plate-1); }
+.score-cover.plate-tint-2 { background: var(--plate-2); }
+.score-cover.plate-tint-3 { background: var(--plate-3); }
+.score-cover.plate-tint-4 { background: var(--plate-4); }
+.score-cover.plate-tint-5 { background: var(--plate-5); }
+.score-cover-art {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.score-cover-image {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+/* colophon cover art — one real engraved glyph (VexFlow/Bravura), tint carries identity.
+   FIXED height (not % of the cover) so the emblem is exactly the same size for every cover in a
+   context, even when grid cells differ in width. Per-context sizes below. */
+.score-colophon {
+  width: auto;
+  height: 84px;
+}
+.score-colophon path {
+  fill: var(--color-ink);
+  opacity: 0.42;
+}
+.hero .score-colophon {
+  height: 128px;
+}
+.preview-panel-cover .score-colophon {
+  height: 120px;
+}
+.work-card-thumb .score-colophon {
+  height: 34px;
+}
+/* dim the art under a revealed play button — the Spotify idiom, one consistent hover behaviour
+   across every PLAYABLE cover (cards / hero / panel; not the play-less work-card thumbs) */
+.score-cover-art::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(44, 36, 29, 0.12);
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+  pointer-events: none;
+}
+.piece-card:hover .score-cover-art::after,
+.hero-cover:hover .score-cover-art::after,
+.preview-panel-cover .score-cover:hover .score-cover-art::after {
+  opacity: 1;
+}
+.score-cover-play {
+  position: absolute;
+  right: var(--space-3);
+  bottom: var(--space-3);
+  z-index: 2;
+  opacity: 0;
+  transform: translateY(var(--space-1));
+  transition:
+    opacity var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+.score-cover:hover .score-cover-play,
+.piece-card:hover .score-cover-play,
+.piece-card:focus-visible .score-cover-play,
+.hero-cover:hover .score-cover-play,
+.hero-cover:focus-visible .score-cover-play,
+.score-cover-play:focus-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* --- Preview play button --- */
+.preview-play {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--color-accent);
+  color: var(--color-paper);
+  cursor: pointer;
+  box-shadow: var(--shadow-2);
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+.preview-play:hover {
+  background: var(--color-accent-strong);
+}
+.preview-play:active {
+  transform: scale(0.94);
+}
+.preview-play--sm {
+  width: 38px;
+  height: 38px;
+}
+.preview-play--sm svg {
+  width: 18px;
+  height: 18px;
+}
+/* labeled play shares its color with .btn-secondary (one neutral-button definition, no drift)
+   while keeping its own shape (it's a toggle with an icon, not a Button instance). */
+.preview-play--labeled {
+  height: var(--control-h);
+  padding: 0 var(--space-5);
+  font-family: var(--font-ui);
+  font-size: var(--text-md);
+  font-weight: 650;
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-ink);
+  border: 1px solid var(--color-border-strong);
+  box-shadow: none;
+}
+.preview-play--labeled:hover {
+  background: var(--color-surface);
+}
+.preview-play--labeled svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* --- The ONE pill/tag primitive: shared shape for every small colour-coded label (fit badge,
+   activity-kind chip, and any future status tag). `.pill` is shape only; a modifier class
+   (`.fit--*`, `.kind-*`) carries only colour — same split as `.btn`/`.btn-{variant}`. --- */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 3px var(--space-2);
+  border-radius: var(--radius-full);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* --- Fit badge: colour + word (comfortable → within reach → a stretch) --- */
+.fit-badge-dot {
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-full);
+  background: currentColor;
+}
+.fit--comfortable {
+  color: var(--color-success);
+  background: var(--color-success-subtle);
+}
+.fit--reach {
+  color: var(--color-warning);
+  background: var(--color-warning-subtle);
+}
+.fit--stretch {
+  color: var(--color-danger);
+  background: var(--color-danger-subtle);
+}
+
+/* --- YouScreen: skill mastery rows — a qualitative TREND, not a static bar or any number.
+   `.skill-row-trend` reuses `.pill` (shape) with a 3-way colour split, SAME vocabulary as
+   `.fit--*`/`.comfort-legend` (success=growing, danger=declining, neutral=flat) so "trending well"
+   reads the same way everywhere in the app. --- */
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+.skill-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+.skill-row-label {
+  font-size: var(--text-sm);
+  font-weight: 650;
+  color: var(--color-ink);
+}
+.skill-row-trend {
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+.skill-row-trend--up {
+  color: var(--color-success);
+  background: var(--color-success-subtle);
+}
+.skill-row-trend--down {
+  color: var(--color-danger);
+  background: var(--color-danger-subtle);
+}
+.skill-row-trend--flat {
+  color: var(--color-ink-muted);
+  background: var(--color-border);
+}
+
+/* --- YouScreen: comfort-zone breakdown — one segmented bar in the SAME three colours as
+   `.fit--*` (never a second palette for the same meaning), sized by count via flex-grow. --- */
+.comfort-bar {
+  display: flex;
+  height: 10px;
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  background: var(--color-border);
+}
+.comfort-bar-segment {
+  display: block;
+  min-width: 2px;
+  /* solid, not `.fit--*`'s own pale "subtle" wash — a distribution bar needs segments that read
+     clearly against each other, not three washes of the same pale intensity. */
+  background: currentColor;
+}
+.comfort-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-5);
+  margin-top: var(--space-3);
+}
+.comfort-legend-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+}
+.comfort-legend-dot {
+  width: var(--space-2);
+  height: var(--space-2);
+  border-radius: var(--radius-full);
+  background: currentColor;
+}
+
+/* --- Star rating --- */
+.star-rating {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.star-rating-stars {
+  position: relative;
+  display: inline-block;
+  font-size: var(--text-sm);
+  line-height: 1;
+  letter-spacing: 1px;
+}
+.star-rating-base {
+  color: var(--color-border-strong);
+}
+.star-rating-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  color: var(--color-warning);
+}
+.star-rating-value {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- Library "Jump back in" + sort --- */
+.library-section-header h2 {
+  font-family: var(--font-reading);
+  font-size: var(--text-2xl);
+}
+.library-section-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+.library-sort {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+}
+.library-sort-label {
+  color: var(--color-ink-faint);
+}
+/* --- Custom dropdown (replaces native <select>) --- */
+.dropdown {
+  position: relative;
+}
+.dropdown-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-h-sm);
+  padding: 0 var(--space-3);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--color-ink);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+.dropdown-trigger:hover {
+  background: var(--color-surface);
+  border-color: var(--color-border-strong);
+}
+.dropdown-trigger:active {
+  transform: scale(0.97);
+}
+.dropdown-trigger:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.dropdown-trigger svg {
+  width: 16px;
+  height: 16px;
+  color: var(--color-ink-faint);
+}
+.dropdown-menu {
+  position: absolute;
+  right: 0;
+  top: calc(var(--control-h-sm) + var(--space-1));
+  z-index: 20;
+  min-width: 180px;
+  padding: var(--space-1);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-3);
+  list-style: none;
+}
+.dropdown-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  color: var(--color-ink);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  text-align: left;
+}
+.dropdown-option:hover {
+  background: var(--color-surface);
+}
+.dropdown-option.selected {
+  color: var(--color-accent-deep);
+  font-weight: 650;
+}
+.dropdown-option.selected::after {
+  content: '✓';
+}
+.jump-track {
+  display: flex;
+  gap: var(--space-4);
+  overflow-x: auto;
+  padding-bottom: var(--space-2);
+}
+.work-card {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex: 0 0 300px;
+  padding: var(--space-3);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  text-align: left;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    transform var(--motion-fast) var(--ease-standard);
+}
+.work-card:hover {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border-strong);
+  transform: translateY(-2px);
+}
+.work-card:active {
+  transform: scale(0.98);
+}
+.work-card:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+.work-card-thumb {
+  width: 68px;
+  flex-shrink: 0;
+}
+.work-card-main {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.work-card-title {
+  font-family: var(--font-reading);
+  font-size: var(--text-md);
+  font-weight: 600;
+  color: var(--color-ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.work-card-kind {
+  align-self: flex-start;
+}
+.kind-edit {
+  color: var(--color-ink);
+  background: var(--color-border);
+}
+.kind-practice {
+  color: var(--color-success);
+  background: var(--color-success-subtle);
+}
+.kind-listen {
+  color: var(--color-voice-2);
+  background: var(--color-listen-subtle);
+}
+.work-card-progress {
+  display: block;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--color-border);
+  overflow: hidden;
+  margin: 3px 0 1px;
+}
+.work-card-progress-fill {
+  display: block;
+  height: 100%;
+  background: var(--color-accent);
+}
+.work-card-when {
+  font-size: var(--text-xs);
+  color: var(--color-ink-faint);
+}
+
+/* --- Responsive: hero stacks, tighter padding on narrow --- */
+@media (max-width: 767px) {
+  .explore,
+  .library-screen,
+  .author-screen,
+  .you-screen {
+    padding: var(--space-5) var(--space-4) var(--space-8);
+  }
+  .shell-topbar {
+    padding: var(--space-3) var(--space-4);
+  }
+  .hero {
+    grid-template-columns: 1fr;
+  }
+  .hero-cover {
+    width: 100%;
+    max-width: 240px;
+  }
+  .library-section-header {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+}
+
+
+/* ============================================================================
+   AUTHOR PROFILE (/authors/:id) + account entry — docs/browse-redesign.md
+   ============================================================================ */
+.author-hero {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--space-6);
+  padding: var(--space-6);
+  margin-bottom: var(--space-7);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-2);
+  background: var(--plate-0);
+}
+.author-hero.plate-tint-0 { background: var(--plate-0); }
+.author-hero.plate-tint-1 { background: var(--plate-1); }
+.author-hero.plate-tint-2 { background: var(--plate-2); }
+.author-hero.plate-tint-3 { background: var(--plate-3); }
+.author-hero.plate-tint-4 { background: var(--plate-4); }
+.author-hero.plate-tint-5 { background: var(--plate-5); }
+.author-avatar {
+  flex-shrink: 0;
+  width: 92px;
+  height: 92px;
+  border-radius: var(--radius-full);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-family: var(--font-reading);
+  font-size: var(--text-3xl);
+  font-weight: 600;
+  box-shadow: var(--shadow-2);
+}
+.author-hero-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.author-hero-eyebrow {
+  font-size: var(--text-sm);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--color-ink-muted);
+}
+.author-hero-name {
+  font-family: var(--font-reading);
+  font-size: var(--text-3xl);
+  line-height: 1.1;
+  color: var(--color-ink);
+}
+.author-hero-handle {
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+}
+.author-hero-bio {
+  margin-top: var(--space-2);
+  max-width: 52ch;
+  color: var(--color-ink);
+  line-height: 1.5;
+}
+.author-hero-stat {
+  margin-top: var(--space-2);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  color: var(--color-ink-muted);
+}
+/* --- YouScreen: quiet exit link, out of the hero entirely — a secondary nav action, not this
+   page's main job, so it stays text-link weight, same visual language as
+   `.preview-panel-author`/`.branch-row-author` rather than a `.btn`. Only renders when
+   `hasAuthored` — no link into an empty catalog. --- */
+.you-scores-link {
+  /* resets the native <button> UA chrome (border/background/padding/font) — without this it
+     renders as a bordered box, not a plain text link. */
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  margin: var(--space-2) 0 var(--space-6);
+  color: var(--color-ink-muted);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.you-scores-link:hover {
+  color: var(--color-ink);
+}
+.you-scores-link:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+.author-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
+}
+.author-section-title {
+  font-family: var(--font-reading);
+  font-size: var(--text-2xl);
+  color: var(--color-ink);
+}
+.author-search {
+  flex: 1;
+  max-width: 320px;
+}
+
+/* author links (preview panel, branch rows) */
+.preview-panel-author,
+.preview-panel-author,
+.branch-row-author {
+  color: var(--color-ink);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  font-size: var(--text-sm);
+}
+.preview-panel-author {
+  margin-top: var(--space-1);
+}
+
+/* rail account entry — pinned to the bottom on the wide rail */
+.app-nav-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-full);
+  background: var(--color-accent-subtle);
+  color: var(--color-accent-deep);
+  font-weight: 700;
+  font-size: var(--text-sm);
+}
+@media (min-width: 768px) {
+  .app-nav-account {
+    margin-top: auto;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: var(--space-3);
+  }
+}
+@media (max-width: 767px) {
+  .author-hero {
+    flex-direction: column;
+    align-items: flex-start;
+    text-align: left;
+  }
+  .author-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  .author-search {
+    max-width: none;
+  }
 }

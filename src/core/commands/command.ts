@@ -1,5 +1,5 @@
 // The intent of an edit — the boundary to the backend mutation engine. The gateway
-// ships each command to `/scores/{id}/edit/...` and returns the resulting document.
+// ships each command to `/drafts/{draftId}/edit/...` and returns the resulting document.
 
 export type Command =
   | {

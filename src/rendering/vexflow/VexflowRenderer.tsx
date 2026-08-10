@@ -689,9 +689,12 @@ export function VexflowRenderer({
             // out (breathing room for real notes before the barline) and would skew the dash
             // left of the measure's true visual center.
             const cx = (noteStartX + (x + w)) / 2;
-            // one half-line above dead-center (line 2 = the exact middle line) — matches the
-            // reference engraving, which sits the dash slightly above center, not on it.
-            const cy = info.staff.getYForLine(1.5);
+            // standard whole-rest position: a filled bar hanging directly below the staff's
+            // SECOND line from the top (VexFlow line index 1, 0-indexed top-down) — not centered
+            // on the middle line, which read as floating too low/generic. `cy` is the rect's own
+            // center (`fillRect` below), so it's offset down by half the bar's own thickness from
+            // that line so the bar's TOP edge sits flush against it.
+            const cy = info.staff.getYForLine(1) + DASH_THICK / 2;
             ctx.save();
             ctx.setFillStyle(inkColor);
             ctx.fillRect(cx - DASH_W / 2, cy - DASH_THICK / 2, DASH_W, DASH_THICK);

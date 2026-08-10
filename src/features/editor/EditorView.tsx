@@ -154,7 +154,7 @@ export function EditorView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoom]);
 
-  // Keep the selection in view, smoothly — arrow-key carrier navigation (App.tsx) can move the
+  // Keep the selection in view, smoothly — arrow-key carrier navigation (EditorScreen.tsx) can move the
   // selection past the edge of what's currently scrolled into view, in both line and page mode.
   // Same idea as the zoom-center fix above (animate `.canvas-area`'s scroll, don't jump it), same
   // spring preset as everything else chrome-weight (`SPRING_SMOOTH`, §3.5) — deliberately a ONE-

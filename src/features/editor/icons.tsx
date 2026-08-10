@@ -72,6 +72,81 @@ function svg(children: React.ReactNode) {
   );
 }
 
+// filled, not stroked — matches `select`'s solid-triangle precedent above: a play/pause glyph's
+// legibility at small (browse-card) size comes from its silhouette, not an outline.
+export function PlayIcon() {
+  return svg(<polygon points="7 4 20 12 7 20 7 4" fill="currentColor" />);
+}
+export function PauseIcon() {
+  return svg(
+    <>
+      <rect x="7" y="4" width="4" height="16" rx="1" fill="currentColor" />
+      <rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor" />
+    </>,
+  );
+}
+
+export function ExploreIcon() {
+  return svg(
+    <>
+      <circle cx="11" cy="11" r="7" {...STROKE} />
+      <path d="m21 21-4.3-4.3" {...STROKE} />
+    </>,
+  );
+}
+export function LibraryIcon() {
+  return svg(
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" {...STROKE} />
+      <path d="M3 9h18" {...STROKE} />
+    </>,
+  );
+}
+/** Dismiss a contextual overlay/panel (PreviewPanel's close) — an "X", not a chevron: this
+ *  panel goes away entirely (modal-like dismiss), unlike LeftPanel's collapse-to-a-rail (◂/▸),
+ *  which stays reachable via its own reveal tab. Same `.icon-btn` treatment as the editor's
+ *  toggle either way — only the glyph differs, matching what each action actually does. */
+export function CloseIcon() {
+  return svg(<path d="M6 6l12 12M18 6L6 18" {...STROKE} />);
+}
+export function BackIcon() {
+  return svg(<path d="M15 5 8 12l7 7" {...STROKE} />);
+}
+export function FolderIcon() {
+  return svg(<path d="M3 6.5a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-11Z" {...STROKE} />);
+}
+export function EditIcon() {
+  return svg(
+    <>
+      <path d="M14.5 4.5 19.5 9.5 8 21H3v-5L14.5 4.5Z" {...STROKE} />
+      <path d="M12.5 6.5l4 4" {...STROKE} />
+    </>,
+  );
+}
+export function PracticeIcon() {
+  return svg(
+    <>
+      <path d="M8 20h8l-2.5-14h-3L8 20Z" {...STROKE} />
+      <path d="M12 6V4" {...STROKE} />
+      <path d="M12 10l3 7" {...STROKE} />
+    </>,
+  );
+}
+
+// a paired-eighth-notes glyph (♫) — the app's brand mark. Replaces an empty flat-color square
+// that had nothing inside it (design-audit Phase 2 finding). Noteheads filled solid (same
+// silhouette-over-outline logic as Play/Pause above), beam stroked.
+export function BrandMark() {
+  return svg(
+    <>
+      <circle cx="7" cy="17" r="3" fill="currentColor" />
+      <circle cx="16" cy="15" r="3" fill="currentColor" />
+      <path d="M10 17V6l9-2v11" {...STROKE} />
+      <path d="M10 8.5 19 6.5" {...STROKE} />
+    </>,
+  );
+}
+
 export function ToolIcon({ id }: { id: Tool }) {
   if (isDurationTool(id)) return <VexDurationIcon duration={id} />;
 

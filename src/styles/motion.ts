@@ -28,6 +28,16 @@ export const springGentle = { type: 'spring', ...SPRING_GENTLE } as const;
  * before sliding left / grows past open before settling back" character actually reads; moved
  * here (was inlined in LeftPanel.tsx) so every spring config lives in the one place §11 requires. */
 export const SPRING_PANEL_BOUNCE = { stiffness: 220, damping: 18 } as const;
+/** Transition-shaped wrapper of `SPRING_PANEL_BOUNCE`, for `motion.div`'s declarative `transition`
+ *  prop (the `SPRING_*` form is `SpringOptions`, for `useSpring`/imperative `animate()`; this is
+ *  the `spring*` form, matching the naming split above). Reused by any panel/surface that wants
+ *  LeftPanel's macOS-window "bounce" character WITHOUT the full `useLayoutSafeSpring` machinery —
+ *  that machinery exists specifically because LeftPanel's bounce drives a layout-affecting `width`
+ *  next to a sibling that must never be nudged by the overshoot; a panel that only animates its
+ *  own `transform`/`opacity` (no sibling reflow hazard) can use this directly. Cross-surface parity
+ *  for "panel show/hide" (DESIGN.md §3.5, settled 2026-08-09) — the editor's LeftPanel and browse's
+ *  PreviewPanel now share this exact config rather than each picking their own feel. */
+export const springPanelBounce = { type: 'spring', ...SPRING_PANEL_BOUNCE } as const;
 
 // ---------------------------------------------------------------------------------------------
 // useLayoutSafeSpring — THE pattern for "this element has a springy/bouncy open-close feel, and

@@ -33,6 +33,9 @@
   /* Focus */
   --color-focus-ring: rgba(224, 120, 86, 0.45);
 
+  /* Soft teal wash behind the "Listened" activity chip (paired with --color-voice-2 text) */
+  --color-listen-subtle: #e3efec;
+
   /* Voice colors — index 0 = ink (main voice reads as plain engraving); 1..3 tinted */
   --color-voice-1: #4e7cb8;
   --color-voice-2: #4e9b8f;
@@ -41,6 +44,20 @@
 
   /* Playback */
   --color-playback-cursor: #c75f3e;
+
+  /* Title-plate tints — the engraved-cover signature (docs/browse-redesign.md). A deterministic
+     wash per composer so every card reads distinct without any color claiming meaning (genre is
+     mock). All warm, low-chroma, in-family with the sand/clay/terracotta palette — NEVER a new
+     hue. Engraving ink stays --color-ink on every one. */
+  /* Cover tints — WIDE warm spread so a grid of covers has rhythm instead of one repeating wash
+     (round 7; slice-3/5 values were still too close). All warm, ink stays readable. Earlier
+     pale set kept to revert: 0 #efe4d3 1 #f2e1d5 2 #fae9df 3 #ebe1d0 4 #e9eddf 5 #f4ecd7 */
+  --plate-0: #e7cfa2; /* deep gold-sand */
+  --plate-1: #ecc4ac; /* warm clay */
+  --plate-2: #eeb69c; /* terracotta */
+  --plate-3: #cfcaa4; /* olive-taupe */
+  --plate-4: #c7d6ab; /* warm sage */
+  --plate-5: #f0d194; /* ochre */
 
   /* Elevation — warm shadows */
   --shadow-1: 0 1px 2px rgba(74, 56, 40, 0.08);
@@ -66,6 +83,11 @@
 
   /* Type */
   --font-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* Reading face for score/composer titles only (Explore/Library) — E-Ink/Paper direction,
+     chosen explicitly by the user over the default UI sans (DESIGN.md has no serif token yet,
+     this is the first one; system stack, no webfont/network dependency). UI chrome (buttons,
+     nav, labels) stays --font-ui. */
+  --font-reading: Georgia, 'Times New Roman', serif;
 
   /* Type scale (DESIGN.md §3.2) — size / paired line-height in the name's comment; components
      consume the font-size var, and set line-height explicitly only where the block needs one. */
@@ -74,6 +96,15 @@
   --text-md: 14px; /* 20px line — default UI */
   --text-lg: 16px; /* 24px line — panel titles */
   --text-xl: 20px; /* 28px line — document title, empty states */
+  --text-2xl: 24px; /* 30px line — section/shelf display titles (browse) */
+  --text-3xl: 32px; /* 38px line — the featured hero title */
+
+  /* Control heights — THREE standard sizes (DESIGN.md §3.3, revised 2026-08-08): 44 = touch target
+     (primary actions, search, touch surfaces) / 32 = desktop default / 26 = dense working controls.
+     Every control derives from one of these; none hardcodes its own height. */
+  --control-h: 44px;
+  --control-h-sm: 32px;
+  --control-h-dense: 26px;
 
   /* Motion — for the CSS MICRO-FEEDBACK layer only (hover/press/focus/selection washes). All
      spatial/state-driven motion (panels, zoom, mode switch) is spring-driven from JS now — see
