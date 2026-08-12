@@ -117,48 +117,54 @@ export function Toolbar() {
           </button>
 
           {voicePopoverOpen && currentVoiceId && (
-            <div className="deck-voice-popover">
-              <div className="deck-voice-popover-header">
-                <span
-                  className="deck-voice-popover-dot"
-                  style={{ '--vc': resolveVoiceColor(currentVoiceId, currentVoice, voiceColors) } as CSSProperties}
-                />
-                Voice {currentVoice + 1}
-              </div>
-              <span className="lp-sublabel">Color</span>
-              <div className="voice-swatch-row">
-                {DEFAULT_VOICE_COLORS.map((c) => (
-                  <button
-                    key={c}
-                    className="voice-swatch"
-                    style={{ '--vc': c } as CSSProperties}
-                    title={c}
-                    onClick={() => setVoiceColor(currentVoiceId, c)}
+            <div className="deck-voice-popover glass">
+              <div className="glass-lens" />
+              <div className="glass-tint" />
+              <div className="glass-specular" />
+              <div className="glass-rim" />
+              <div className="glass-content">
+                <div className="deck-voice-popover-header">
+                  <span
+                    className="deck-voice-popover-dot"
+                    style={{ '--vc': resolveVoiceColor(currentVoiceId, currentVoice, voiceColors) } as CSSProperties}
                   />
-                ))}
-                <label className="voice-swatch voice-swatch-custom" title="Custom color">
-                  <input
-                    type="color"
-                    value={resolveVoiceColor(currentVoiceId, currentVoice, voiceColors)}
-                    onChange={(e) => setVoiceColor(currentVoiceId, e.target.value)}
-                  />
-                </label>
+                  Voice {currentVoice + 1}
+                </div>
+                <span className="lp-sublabel">Color</span>
+                <div className="voice-swatch-row">
+                  {DEFAULT_VOICE_COLORS.map((c) => (
+                    <button
+                      key={c}
+                      className="voice-swatch"
+                      style={{ '--vc': c } as CSSProperties}
+                      title={c}
+                      onClick={() => setVoiceColor(currentVoiceId, c)}
+                    />
+                  ))}
+                  <label className="voice-swatch voice-swatch-custom" title="Custom color">
+                    <input
+                      type="color"
+                      value={resolveVoiceColor(currentVoiceId, currentVoice, voiceColors)}
+                      onChange={(e) => setVoiceColor(currentVoiceId, e.target.value)}
+                    />
+                  </label>
+                </div>
+                <button
+                  className="icon-btn deck-voice-select-all"
+                  onClick={() => {
+                    // carrier granularity, not note granularity — every carrier in the voice counts
+                    // as "selected as a whole" (stem-context UI, etc.), matching double-click/arrow-
+                    // key whole-carrier selection, not a plain multi-note pick (see
+                    // [[note-vs-carrier-selection-granularity]]). `selectedIds` still needs every
+                    // individual note id too (that's what actually tints each note on the score).
+                    const carrierIds = orderedVoiceCarrierIds(doc, currentVoiceId);
+                    selectMany(voiceCarrierIds(doc, currentVoiceId), false, carrierIds);
+                    setVoicePopoverOpen(false);
+                  }}
+                >
+                  Select all in voice
+                </button>
               </div>
-              <button
-                className="icon-btn deck-voice-select-all"
-                onClick={() => {
-                  // carrier granularity, not note granularity — every carrier in the voice counts
-                  // as "selected as a whole" (stem-context UI, etc.), matching double-click/arrow-
-                  // key whole-carrier selection, not a plain multi-note pick (see
-                  // [[note-vs-carrier-selection-granularity]]). `selectedIds` still needs every
-                  // individual note id too (that's what actually tints each note on the score).
-                  const carrierIds = orderedVoiceCarrierIds(doc, currentVoiceId);
-                  selectMany(voiceCarrierIds(doc, currentVoiceId), false, carrierIds);
-                  setVoicePopoverOpen(false);
-                }}
-              >
-                Select all in voice
-              </button>
             </div>
           )}
         </div>

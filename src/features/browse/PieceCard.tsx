@@ -32,6 +32,7 @@ export function PieceCard({
       className={'piece-card' + (active ? ' active' : '')}
       onClick={() => onOpen(score)}
       onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onOpen(score);

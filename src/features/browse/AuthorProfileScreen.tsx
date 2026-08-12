@@ -1,17 +1,27 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { libraryGateway } from '@/core/gateway/defaultLibraryGateway';
+import { requireAuth } from '@/core/auth/authPrompt';
 import { CURRENT_AUTHOR_ID } from '@/core/gateway/authorId';
 import type { Author, ScoreSummary } from '@/core/gateway/LibraryGateway';
 import { PieceCard } from './PieceCard';
 import { ScoreCover } from './ScoreCover';
-import { ScopedSearch } from './ScopedSearch';
 import { StarRating } from './StarRating';
 import { FitBadge } from './FitBadge';
 import { plateTintClass } from './plateTint';
-import { useIsWide } from './useIsWide';
 import { Button } from '@/ui/Button';
 import { FadeSwap } from '@/ui/FadeSwap';
+import { useAuthStore } from '@/core/auth/authStore';
+import {
+  BROWSE_QUERY_KEYS,
+  authorQueryKey,
+  authorScoresQueryKey,
+  invalidateBrowseQueries,
+  updateBrowseQuery,
+  useBrowseQuery,
+  type BrowseQueryScope,
+} from '@/core/gateway/browseQueryCache';
+import { DelayedLoading } from '@/ui/DelayedLoading';
 
 /** Author profile (`/authors/:authorId`) — every arrangement an author has published; reached by
  *  clicking an author's name, or via a "Your Scores" link from `/you` when it's your own. Two
@@ -25,92 +35,96 @@ import { FadeSwap } from '@/ui/FadeSwap';
 export default function AuthorProfileScreen() {
   const { authorId = '' } = useParams();
   const navigate = useNavigate();
-  const wide = useIsWide();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [author, setAuthor] = useState<Author | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [scores, setScores] = useState<ScoreSummary[] | null>(null);
-  const [query, setQuery] = useState(''); // other-author view only — see the `q` note below
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const authStatus = useAuthStore((s) => s.status);
+  const canSeePrivate = authStatus === 'authed' && authorId === CURRENT_AUTHOR_ID;
+  const queryScope: BrowseQueryScope = canSeePrivate ? 'private' : 'public';
+  const authorKey = authorQueryKey(authorId);
+  const scoresKey = authorScoresQueryKey(authorId);
+  const { data: author, status: authorStatus } = useBrowseQuery(
+    queryScope,
+    authorKey,
+    () => libraryGateway.getAuthor(authorId),
+  );
+  const { data: scores } = useBrowseQuery(
+    queryScope,
+    scoresKey,
+    async () => {
+      const items = await libraryGateway.listAuthorScores(authorId);
+      return canSeePrivate ? items : items.filter((item) => item.isPublic);
+    },
+  );
 
   const previewId = searchParams.get('preview');
-  // Your own scores read the SHELL's `?q` (`AppShell` gives this route the same shared search as
-  // Explore/Library); another author's profile keeps its own local `query` state and inline
-  // `ScopedSearch` — a different surface with a different job.
+  // Every author profile reads the shell's one `?q`. Public profiles and your own scores therefore
+  // keep search in exactly the same fixed topbar position as Explore and Library.
   const q = searchParams.get('q') ?? '';
 
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    setAuthor(null);
-    setScores(null);
-    void libraryGateway.getAuthor(authorId).then((a) => {
-      if (!cancelled) {
-        setAuthor(a);
-        setLoading(false);
+  const open = (s: ScoreSummary) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('preview', s.id);
+    setSearchParams(next);
+  };
+
+  const newScore = () =>
+    requireAuth(async () => {
+      if (busy) return;
+      setBusy(true);
+      setError(null);
+      try {
+        const { draftId } = await libraryGateway.createDraft();
+        invalidateBrowseQueries('private', BROWSE_QUERY_KEYS.myDrafts);
+        navigate(`/edit/${draftId}`);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : 'Failed to create a draft.');
+      } finally {
+        setBusy(false);
       }
     });
-    void libraryGateway.listAuthorScores(authorId).then((s) => !cancelled && setScores(s));
-    return () => {
-      cancelled = true;
-    };
-  }, [authorId]);
 
-  const open = (s: ScoreSummary) => {
-    if (wide) {
-      const next = new URLSearchParams(searchParams);
-      next.set('preview', s.id);
-      setSearchParams(next);
-    } else {
-      navigate(`/scores/${s.id}`);
-    }
-  };
-
-  const newScore = async () => {
-    if (busy) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const { draftId } = await libraryGateway.createDraft();
-      navigate(`/edit/${draftId}`);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to create a draft.');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const isMe = author?.isMe ?? authorId === CURRENT_AUTHOR_ID;
-  const activeQuery = isMe ? q : query;
+  const isMe = authStatus === 'authed' && (author?.isMe ?? authorId === CURRENT_AUTHOR_ID);
+  const activeQuery = q;
   const visible = useMemo(() => {
     if (!scores) return null;
+    // Effects clear/refetch after paint. Filter against the CURRENT auth state as well so a
+    // sign-out cannot expose one stale render of private scores from the previous authed state.
+    const accessible = isMe ? scores : scores.filter((score) => score.isPublic);
     const needle = activeQuery.trim().toLowerCase();
-    if (!needle) return scores;
-    return scores.filter((s) => s.title.toLowerCase().includes(needle) || (s.composer?.toLowerCase().includes(needle) ?? false));
-  }, [scores, activeQuery]);
+    if (!needle) return accessible;
+    return accessible.filter(
+      (s) => s.title.toLowerCase().includes(needle) || (s.composer?.toLowerCase().includes(needle) ?? false),
+    );
+  }, [scores, activeQuery, isMe]);
 
   // Optimistic — the mock can't fail, so no revert-on-error branch (nothing to add error handling FOR).
   const toggleVisibility = (score: ScoreSummary) => {
     const nextPublic = !score.isPublic;
-    setScores((prev) => prev?.map((s) => (s.id === score.id ? { ...s, isPublic: nextPublic } : s)) ?? prev);
+    const updateScore = (items: ScoreSummary[]) =>
+      items.map((item) => (item.id === score.id ? { ...item, isPublic: nextPublic } : item));
+    updateBrowseQuery('private', scoresKey, updateScore);
+    updateBrowseQuery('private', BROWSE_QUERY_KEYS.myScores, updateScore);
+    invalidateBrowseQueries('public', BROWSE_QUERY_KEYS.publicScores, scoresKey);
+    invalidateBrowseQueries('private', BROWSE_QUERY_KEYS.recommendations);
     void libraryGateway.setScoreVisibility(score.id, nextPublic);
   };
 
   const initial = author?.name.trim().charAt(0).toUpperCase() || '?';
+  const loading = authorStatus !== 'success';
   const stateKey = loading ? 'loading' : !author ? 'not-found' : 'profile';
 
   return (
     <div className="author-screen">
       <FadeSwap stateKey={stateKey}>
         {loading ? (
-          <div className="browse-loading">Loading profile…</div>
+          <DelayedLoading>Loading profile…</DelayedLoading>
         ) : !author ? (
           <div className="browse-empty">
             <h2>Author not found</h2>
             <p>This profile doesn’t exist yet.</p>
           </div>
-        ) : author.isMe ? (
+        ) : isMe ? (
           <MyScoresContent
             scores={scores}
             visible={visible}
@@ -127,8 +141,6 @@ export default function AuthorProfileScreen() {
             author={author}
             scores={scores}
             visible={visible}
-            query={query}
-            setQuery={setQuery}
             previewId={previewId}
             open={open}
             initial={initial}
@@ -144,8 +156,6 @@ function AuthorProfileContent({
   author,
   scores,
   visible,
-  query,
-  setQuery,
   previewId,
   open,
   initial,
@@ -153,8 +163,6 @@ function AuthorProfileContent({
   author: Author;
   scores: ScoreSummary[] | null;
   visible: ScoreSummary[] | null;
-  query: string;
-  setQuery: (v: string) => void;
   previewId: string | null;
   open: (s: ScoreSummary) => void;
   initial: string;
@@ -176,14 +184,11 @@ function AuthorProfileContent({
 
       <div className="author-toolbar">
         <h2 className="author-section-title">Arrangements</h2>
-        <div className="author-search">
-          <ScopedSearch value={query} onChange={setQuery} scope={`${author.name}’s scores`} />
-        </div>
       </div>
 
       <FadeSwap stateKey={!visible ? 'loading' : visible.length === 0 ? 'empty' : 'content'}>
         {!visible ? (
-          <div className="browse-loading">Loading…</div>
+          <DelayedLoading>Loading…</DelayedLoading>
         ) : visible.length === 0 ? (
           <div className="library-empty">Nothing published yet.</div>
         ) : (
@@ -216,7 +221,7 @@ function MyScoresContent({
   previewId: string | null;
   open: (s: ScoreSummary) => void;
   busy: boolean;
-  newScore: () => Promise<void>;
+  newScore: () => void;
   error: string | null;
   toggleVisibility: (s: ScoreSummary) => void;
   searching: boolean;
@@ -237,7 +242,7 @@ function MyScoresContent({
 
       <FadeSwap stateKey={!visible ? 'loading' : 'content'}>
         {!visible || !publicScores || !privateScores ? (
-          <div className="browse-loading">Loading…</div>
+          <DelayedLoading>Loading…</DelayedLoading>
         ) : (
           <>
             <ScoreVisibilitySection
@@ -321,6 +326,7 @@ function AuthorScoreCard({
       className={'piece-card' + (active ? ' active' : '')}
       onClick={() => onOpen(score)}
       onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault();
           onOpen(score);

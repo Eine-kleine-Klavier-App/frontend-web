@@ -1,9 +1,13 @@
-import type { ScoreSummary, DraftSummary } from '@/core/gateway/LibraryGateway';
-import { previewPlayer, usePreviewPlayingId } from '@/core/audio/PreviewPlayer';
+import {
+  previewControlPhase,
+  previewPlayer,
+  usePreviewPlayback,
+  type PreviewTrack,
+} from '@/core/audio/PreviewPlayer';
 import { scoreToEvents } from '@/core/audio/scoreToEvents';
-import { PlayIcon, PauseIcon } from '@/features/editor/icons';
+import { PauseIcon, PlayIcon, ReplayIcon } from '@/ui/icons';
 
-type Previewable = Pick<ScoreSummary | DraftSummary, 'id' | 'title' | 'previewDocument'>;
+type Previewable = PreviewTrack;
 
 /** The one preview play/pause control, reused by plates, the hero, and the right panel —
  *  playback lives everywhere now, not just the editor (docs/browse-redesign.md). Renders
@@ -20,24 +24,37 @@ export function PreviewPlayButton({
   label?: boolean;
   className?: string;
 }) {
-  const playingId = usePreviewPlayingId();
-  const isPlaying = playingId === score.id;
+  const playback = usePreviewPlayback();
+  const phase = previewControlPhase(playback, score.id);
+  const isPlaying = phase === 'playing';
+  const isPaused = phase === 'paused';
+  const canReplay = phase === 'replay';
   if (!score.previewDocument) return null;
 
   const toggle = (e: React.MouseEvent) => {
     e.stopPropagation();
-    void previewPlayer.play(score.id, scoreToEvents(score.previewDocument!));
+    void previewPlayer.play(score, scoreToEvents(score.previewDocument!));
   };
 
   return (
     <button
       type="button"
-      className={`preview-play preview-play--${size}${label ? ' preview-play--labeled' : ''}${isPlaying ? ' playing' : ''} ${className}`}
+      className={`preview-play preview-play--${size}${label ? ' preview-play--labeled' : ''}${canReplay ? ' restart' : ''}${isPlaying ? ' playing' : ''} ${className}`}
       onClick={toggle}
-      aria-label={isPlaying ? `Pause preview of ${score.title}` : `Play preview of ${score.title}`}
+      aria-label={
+        isPlaying
+          ? `Pause preview of ${score.title}`
+          : isPaused
+            ? `Resume preview of ${score.title}`
+          : canReplay
+            ? `Replay preview of ${score.title}`
+            : `Play preview of ${score.title}`
+      }
     >
-      {isPlaying ? <PauseIcon /> : <PlayIcon />}
-      {label && <span>{isPlaying ? 'Pause preview' : 'Play preview'}</span>}
+      {isPlaying ? <PauseIcon /> : canReplay ? <ReplayIcon /> : <PlayIcon />}
+      {label && (
+        <span>{isPlaying ? 'Pause preview' : isPaused ? 'Resume preview' : canReplay ? 'Replay preview' : 'Play preview'}</span>
+      )}
     </button>
   );
 }

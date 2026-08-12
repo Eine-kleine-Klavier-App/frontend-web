@@ -7,11 +7,14 @@ export function StarRating({ rating, showValue = true }: { rating: number; showV
     <span className="star-rating" role="img" aria-label={`Arrangement rated ${clamped.toFixed(1)} of 5`}>
       <span className="star-rating-stars" aria-hidden="true">
         <span className="star-rating-fill" style={{ width: `${(clamped / 5) * 100}%` }}>
-          ★★★★★
+          {Array.from({ length: 5 }, (_, index) => <StarIcon key={index} />)}
         </span>
-        <span className="star-rating-base">★★★★★</span>
+        <span className="star-rating-base">
+          {Array.from({ length: 5 }, (_, index) => <StarIcon key={index} />)}
+        </span>
       </span>
       {showValue && <span className="star-rating-value">{clamped.toFixed(1)}</span>}
     </span>
   );
 }
+import { StarIcon } from '@/ui/icons';

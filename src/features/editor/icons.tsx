@@ -85,6 +85,19 @@ export function PauseIcon() {
     </>,
   );
 }
+export function StopIcon() {
+  return svg(<rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" />);
+}
+export function ReplayIcon() {
+  return svg(
+    <>
+      {/* Lucide RotateCcw geometry (ISC): a continuous, balanced replay arc authored for this
+          exact 24×24 stroke grid rather than a hand-spliced ellipse and arrowhead. */}
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" {...STROKE} />
+      <path d="M3 3v5h5" {...STROKE} />
+    </>,
+  );
+}
 
 export function ExploreIcon() {
   return svg(
@@ -109,8 +122,28 @@ export function LibraryIcon() {
 export function CloseIcon() {
   return svg(<path d="M6 6l12 12M18 6L6 18" {...STROKE} />);
 }
+/** Collapse a right-edge contextual panel while keeping its underlying context alive. The edge
+ *  is shown as an actual panel frame; the inward arrow describes minimizing that right column
+ *  without looking like Back navigation or Close's destructive X. */
+export function CollapsePanelIcon() {
+  return svg(
+    <>
+      <rect x="3" y="4" width="18" height="16" rx="2" {...STROKE} />
+      <path d="M15 4v16" {...STROKE} />
+      <path d="m9 9 3 3-3 3" {...STROKE} />
+    </>,
+  );
+}
 export function BackIcon() {
   return svg(<path d="M15 5 8 12l7 7" {...STROKE} />);
+}
+export function SignOutIcon() {
+  return svg(
+    <>
+      <path d="M10 5H5v14h5" {...STROKE} />
+      <path d="M13 8l4 4-4 4M8 12h9" {...STROKE} />
+    </>,
+  );
 }
 export function FolderIcon() {
   return svg(<path d="M3 6.5a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-11Z" {...STROKE} />);

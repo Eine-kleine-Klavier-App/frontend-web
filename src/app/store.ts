@@ -5,6 +5,19 @@ import type { Command } from '@/core/commands/command';
 import type { EditorGateway } from '@/core/gateway/EditorGateway';
 import { HttpGateway } from '@/core/gateway/HttpGateway';
 import { QueuedGateway } from '@/core/gateway/QueuedGateway';
+import { AuthRequiredError } from '@/core/auth/authorizedFetch';
+import { useAuthPrompt } from '@/core/auth/authPrompt';
+
+/** Turns a gateway failure into the editor's `error` string — EXCEPT an `AuthRequiredError`
+ *  (anonymous, or the token expired and couldn't refresh): that opens the login modal and, on a
+ *  successful sign-in, retries the very operation that hit the wall. No scary inline error then. */
+function toEditorError(e: unknown, retry: () => void): string | null {
+  if (e instanceof AuthRequiredError) {
+    useAuthPrompt.getState().open(retry);
+    return null;
+  }
+  return e instanceof Error ? e.message : String(e);
+}
 
 export type Tool = 'select' | 'w' | 'h' | 'q' | '8' | '16' | 'rest' | 'tie';
 
@@ -143,7 +156,7 @@ export const useEditor = create<EditorState>((set, get) => ({
         currentVoice: 0,
       });
     } catch (e) {
-      set({ loading: false, error: (e as Error).message });
+      set({ loading: false, error: toEditorError(e, () => void get().load(scoreId)) });
     }
   },
 
@@ -152,7 +165,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       const document = await get().gateway.apply(get().scoreId, command);
       set({ document, error: null });
     } catch (e) {
-      set({ error: (e as Error).message });
+      set({ error: toEditorError(e, () => void get().dispatch(command)) });
     }
   },
 
@@ -197,7 +210,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       const document = await get().gateway.undo(get().scoreId);
       set({ document, error: null });
     } catch (e) {
-      set({ error: (e as Error).message });
+      set({ error: toEditorError(e, () => void get().undo()) });
     }
   },
 
@@ -206,7 +219,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       const document = await get().gateway.redo(get().scoreId);
       set({ document, error: null });
     } catch (e) {
-      set({ error: (e as Error).message });
+      set({ error: toEditorError(e, () => void get().redo()) });
     }
   },
 

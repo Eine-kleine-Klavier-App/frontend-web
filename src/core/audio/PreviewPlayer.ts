@@ -1,9 +1,33 @@
 import * as Tone from 'tone';
 import { useSyncExternalStore } from 'react';
+import type { ScoreDocument } from '@/core/model/score';
 import type { PlaybackEvent } from './scoreToEvents';
 
 const BPM = 100;
 const SECONDS_PER_BEAT = 60 / BPM;
+
+/** The display identity of the preview currently owning the global player. Keeping it beside the
+ *  transport state makes background playback immediately renderable without a second catalog
+ *  request (and without the Now Playing surface depending on whichever card started it). */
+export interface PreviewTrack {
+  id: string;
+  /** A branch keeps its canonical/root score as the panel context even when playback is collapsed. */
+  parentScoreId?: string;
+  title: string;
+  composer?: string | null;
+  coverImageUrl: string | null;
+  previewDocument: ScoreDocument | null;
+}
+
+export type PreviewPlaybackPhase = 'idle' | 'playing' | 'paused' | 'replay';
+
+/** The one public playback truth. Track identity and transport phase change atomically, so every
+ *  card, panel and dock observes the same render snapshot rather than combining separate hooks. */
+export type PreviewPlaybackSnapshot =
+  | { track: null; phase: 'idle' }
+  | { track: PreviewTrack; phase: 'playing' | 'paused' | 'replay' };
+
+const EMPTY_SNAPSHOT: PreviewPlaybackSnapshot = { track: null, phase: 'idle' };
 
 /**
  * One global preview player, independent of the editor's own `PlaybackController`
@@ -20,7 +44,15 @@ const SECONDS_PER_BEAT = 60 / BPM;
 class PreviewPlayerImpl {
   private synth: Tone.PolySynth | null = null;
   private timeouts: ReturnType<typeof setTimeout>[] = [];
-  private currentId: string | null = null;
+  /** Replaced as one immutable object on every public transition — required by
+   *  `useSyncExternalStore` and prevents track/phase tearing between consumers. */
+  private snapshot: PreviewPlaybackSnapshot = EMPTY_SNAPSHOT;
+  private events: PlaybackEvent[] = [];
+  private elapsedMs = 0;
+  private totalMs = 0;
+  private startedAtMs: number | null = null;
+  /** Invalidates an async `Tone.start()` continuation when another play/stop wins first. */
+  private generation = 0;
   private listeners = new Set<() => void>();
 
   private ensureSynth(): Tone.PolySynth {
@@ -28,48 +60,128 @@ class PreviewPlayerImpl {
     return this.synth;
   }
 
-  /** Starts `id`'s preview, replacing whatever was already playing. Toggling the SAME id (a
-   *  second click on the card that's already playing) stops it instead — a plain pause. Requires
+  /** Starts `track`'s preview, replacing whatever was already playing. Toggling the SAME id
+   *  pauses/resumes from the current position; only dismissing the player discards the timeline. Requires
    *  a user gesture (`Tone.start()`'s browser-autoplay-policy requirement), so this must be
    *  called from a click/hover handler, never on mount/effect. */
-  async play(id: string, events: PlaybackEvent[]): Promise<void> {
-    const wasPlaying = this.currentId === id;
-    this.stop();
-    if (wasPlaying) return;
-
-    await Tone.start();
-    const synth = this.ensureSynth();
-    this.currentId = id;
-    this.notify();
-
-    for (const event of events) {
-      const delayMs = event.startBeat * SECONDS_PER_BEAT * 1000;
-      const durationSec = event.durationBeats * SECONDS_PER_BEAT;
-      this.timeouts.push(setTimeout(() => synth.triggerAttackRelease(event.note, durationSec), delayMs));
+  async play(track: PreviewTrack, events: PlaybackEvent[]): Promise<void> {
+    const sameTrack = this.snapshot.track?.id === track.id;
+    if (sameTrack && this.snapshot.phase === 'playing') {
+      this.pause();
+      return;
+    }
+    if (!sameTrack || this.snapshot.phase === 'replay') {
+      this.cancelScheduledAudio();
+      this.events = events;
+      this.elapsedMs = 0;
+      this.totalMs = events.length
+        ? Math.max(...events.map((event) => (event.startBeat + event.durationBeats) * SECONDS_PER_BEAT * 1000))
+        : 0;
     }
 
-    const totalMs = events.length
-      ? Math.max(...events.map((e) => (e.startBeat + e.durationBeats) * SECONDS_PER_BEAT * 1000))
-      : 0;
+    // Playback intent is UI state and lands in the input frame; audio initialization catches up
+    // asynchronously. This makes the button and Now Playing dock respond immediately even on the
+    // first browser gesture, while `generation` prevents an older start from stealing a newer one.
+    const generation = this.generation;
+    this.snapshot = { track, phase: 'playing' };
+    this.notify();
+    try {
+      await Tone.start();
+    } catch {
+      if (this.generation === generation) this.finish();
+      return;
+    }
+    if (this.generation !== generation || this.snapshot.track?.id !== track.id) return;
+
+    const synth = this.ensureSynth();
+    this.startedAtMs = performance.now();
+
+    for (const event of this.events) {
+      const startMs = event.startBeat * SECONDS_PER_BEAT * 1000;
+      const endMs = (event.startBeat + event.durationBeats) * SECONDS_PER_BEAT * 1000;
+      if (endMs <= this.elapsedMs) continue;
+      const audibleStartMs = Math.max(startMs, this.elapsedMs);
+      const delayMs = audibleStartMs - this.elapsedMs;
+      const durationSec = (endMs - audibleStartMs) / 1000;
+      this.timeouts.push(
+        setTimeout(() => {
+          if (this.generation === generation) synth.triggerAttackRelease(event.note, durationSec);
+        }, delayMs),
+      );
+    }
+
     this.timeouts.push(
       setTimeout(() => {
-        if (this.currentId === id) this.stop();
-      }, totalMs + 60),
+        if (
+          this.generation === generation &&
+          this.snapshot.phase === 'playing' &&
+          this.snapshot.track?.id === track.id
+        ) {
+          this.finish();
+        }
+      }, Math.max(0, this.totalMs - this.elapsedMs) + 60),
     );
   }
 
-  stop(): void {
-    for (const t of this.timeouts) clearTimeout(t);
-    this.timeouts = [];
-    this.synth?.releaseAll();
-    if (this.currentId !== null) {
-      this.currentId = null;
+  /** Suspends the active schedule while retaining its exact elapsed position for resume. */
+  pause(): void {
+    if (this.snapshot.phase !== 'playing') return;
+    const track = this.snapshot.track;
+    if (this.startedAtMs !== null) {
+      this.elapsedMs = Math.min(this.totalMs, this.elapsedMs + performance.now() - this.startedAtMs);
+    }
+    this.cancelScheduledAudio();
+    this.snapshot = { track, phase: 'paused' };
+    this.notify();
+  }
+
+  /** Closes both playback and its retained Now Playing context — the only full-stop action. */
+  dismiss(): void {
+    const hadContext = this.snapshot.track !== null;
+    this.cancelScheduledAudio();
+    this.resetTimeline();
+    if (hadContext) {
+      this.snapshot = EMPTY_SNAPSHOT;
       this.notify();
     }
   }
 
-  getCurrentId(): string | null {
-    return this.currentId;
+  /** A completed preview is only useful while that same piece remains the selected context.
+   *  Choosing a different piece clears the stale Replay affordance, but deliberately leaves an
+   *  actively playing preview alone — background playback is a separate, established behavior. */
+  clearReplayForSelection(scoreId: string): void {
+    if (this.snapshot.phase !== 'replay') return;
+    const { track } = this.snapshot;
+    if (track.id !== scoreId && track.parentScoreId !== scoreId) this.dismiss();
+  }
+
+  private finish(): void {
+    const track = this.snapshot.track;
+    this.cancelScheduledAudio();
+    this.resetTimeline();
+    if (track) {
+      this.snapshot = { track, phase: 'replay' };
+      this.notify();
+    }
+  }
+
+  private cancelScheduledAudio(): void {
+    this.generation += 1;
+    for (const t of this.timeouts) clearTimeout(t);
+    this.timeouts = [];
+    this.startedAtMs = null;
+    this.synth?.releaseAll();
+  }
+
+  private resetTimeline(): void {
+    this.events = [];
+    this.elapsedMs = 0;
+    this.totalMs = 0;
+    this.startedAtMs = null;
+  }
+
+  getSnapshot(): PreviewPlaybackSnapshot {
+    return this.snapshot;
   }
 
   subscribe(listener: () => void): () => void {
@@ -84,11 +196,20 @@ class PreviewPlayerImpl {
 
 export const previewPlayer = new PreviewPlayerImpl();
 
-/** The id of the card currently playing (or null) — re-renders whichever card's play button
- *  needs to flip icon when this changes, without every card polling. */
-export function usePreviewPlayingId(): string | null {
+/** The only React subscription to preview playback. Consumers derive their local presentation
+ *  from this exact object, so Now Playing and every transport control update in one notification. */
+export function usePreviewPlayback(): PreviewPlaybackSnapshot {
   return useSyncExternalStore(
     (cb) => previewPlayer.subscribe(cb),
-    () => previewPlayer.getCurrentId(),
+    () => previewPlayer.getSnapshot(),
   );
+}
+
+/** Maps the global snapshot to the transport phase for one score. A different selected track is
+ *  simply idle for this control; the retained selected track consistently exposes Replay. */
+export function previewControlPhase(
+  snapshot: PreviewPlaybackSnapshot,
+  scoreId: string,
+): PreviewPlaybackPhase {
+  return snapshot.track?.id === scoreId ? snapshot.phase : 'idle';
 }

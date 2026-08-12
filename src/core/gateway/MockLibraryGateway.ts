@@ -14,6 +14,7 @@ import type {
 } from './LibraryGateway';
 import { API_BASE } from './apiBase';
 import { CURRENT_AUTHOR_ID } from './authorId';
+import { authorizedFetch } from '@/core/auth/authorizedFetch';
 
 /** Builds a short multi-measure, one-voice, one-staff preview from a handful of staff steps —
  *  enough of an excerpt to read as a real snippet on the cover (a single measure looked bare).
@@ -271,6 +272,7 @@ export class MockLibraryGateway implements LibraryGateway {
     const branches: BranchSummary[] = variants.slice(0, count).map((v, i) => ({
       ...base,
       id: `${scoreId}-branch-${i}`,
+      parentScoreId: scoreId,
       title: `${base.title} ${v.suffix}`,
       author: v.author,
       authorId: v.author,
@@ -313,7 +315,7 @@ export class MockLibraryGateway implements LibraryGateway {
     const url = fromScoreId
       ? `${API_BASE}/drafts/from-score/${encodeURIComponent(fromScoreId)}`
       : `${API_BASE}/drafts`;
-    const res = await fetch(url, { method: 'POST', headers: { 'X-Author-Id': CURRENT_AUTHOR_ID } });
+    const res = await authorizedFetch(url, { method: 'POST' });
     if (!res.ok) {
       const body: unknown = await res.json().catch(() => null);
       const detail =

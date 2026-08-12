@@ -12,5 +12,3 @@ export const EXPLORE_CARD_THUMB = { width: 220, height: 220 } as const;
 export const HERO_DRAFT_THUMB = { width: 128, height: 128 } as const;
 export const DRAFT_ROW_THUMB = { width: 48, height: 48 } as const;
 export const SCORE_ROW_THUMB = { width: 48, height: 48 } as const;
-// The score detail page's own larger cover (see ScoreDetailScreen.tsx).
-export const DETAIL_COVER_THUMB = { width: 240, height: 240 } as const;

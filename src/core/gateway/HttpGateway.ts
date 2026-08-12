@@ -3,14 +3,16 @@ import type { ScoreDocument } from '@/core/model/score';
 import type { Command } from '@/core/commands/command';
 import { fromView, type ScoreView } from '@/core/model/fromView';
 import { API_BASE } from './apiBase';
-import { CURRENT_AUTHOR_ID } from './authorId';
-
-const AUTHOR_HEADER = 'X-Author-Id';
+import { authorizedFetch } from '@/core/auth/authorizedFetch';
 
 /** Talks to the backend draft/edit endpoints (`/drafts/{draft_id}`, `/drafts/{draft_id}/edit/...`)
  *  and maps the render view into the client model. Every response wraps the view under a
  *  `document` key (`GetDraftResponse` / `ScoreEditedResponse`, both `{ document: ScoreView }`) —
- *  see PianoAppBackend's `adapters/inbound/http/score/{draft,edit}/router.py`. */
+ *  see PianoAppBackend's `adapters/inbound/http/score/{draft,edit}/router.py`.
+ *
+ *  Every call goes through `authorizedFetch` — the backend guards these routes with a Bearer
+ *  access token (`Depends(current_user)`); an anonymous/expired request surfaces as an
+ *  `AuthRequiredError` the editor catches to prompt sign-in. */
 export class HttpGateway implements EditorGateway {
   private draftUrl(draftId: string): string {
     return `${API_BASE}/drafts/${encodeURIComponent(draftId)}`;
@@ -21,7 +23,7 @@ export class HttpGateway implements EditorGateway {
   }
 
   load(draftId: string): Promise<ScoreDocument> {
-    return this.asDocument(draftId, fetch(this.draftUrl(draftId), { headers: this.headers() }));
+    return this.asDocument(draftId, authorizedFetch(this.draftUrl(draftId)));
   }
 
   apply(draftId: string, command: Command): Promise<ScoreDocument> {
@@ -30,9 +32,9 @@ export class HttpGateway implements EditorGateway {
       case 'insertNote':
         return this.asDocument(
           draftId,
-          fetch(`${base}/notes`, {
+          authorizedFetch(`${base}/notes`, {
             method: 'POST',
-            headers: this.headers({ 'content-type': 'application/json' }),
+            headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
               voice_id: command.voiceId,
               staff_id: command.staffId,
@@ -50,9 +52,9 @@ export class HttpGateway implements EditorGateway {
         // Flat `entity_ids` — the backend resolves + classifies each id (note vs carrier) itself.
         return this.asDocument(
           draftId,
-          fetch(`${base}/batch-delete`, {
+          authorizedFetch(`${base}/batch-delete`, {
             method: 'POST',
-            headers: this.headers({ 'content-type': 'application/json' }),
+            headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ entity_ids: command.entityIds }),
           }),
         );
@@ -60,21 +62,11 @@ export class HttpGateway implements EditorGateway {
   }
 
   undo(draftId: string): Promise<ScoreDocument> {
-    return this.asDocument(
-      draftId,
-      fetch(`${this.editUrl(draftId)}/undo`, { method: 'POST', headers: this.headers() }),
-    );
+    return this.asDocument(draftId, authorizedFetch(`${this.editUrl(draftId)}/undo`, { method: 'POST' }));
   }
 
   redo(draftId: string): Promise<ScoreDocument> {
-    return this.asDocument(
-      draftId,
-      fetch(`${this.editUrl(draftId)}/redo`, { method: 'POST', headers: this.headers() }),
-    );
-  }
-
-  private headers(extra?: Record<string, string>): Record<string, string> {
-    return { [AUTHOR_HEADER]: CURRENT_AUTHOR_ID, ...extra };
+    return this.asDocument(draftId, authorizedFetch(`${this.editUrl(draftId)}/redo`, { method: 'POST' }));
   }
 
   private async asDocument(draftId: string, pending: Promise<Response>): Promise<ScoreDocument> {

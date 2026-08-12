@@ -1,23 +1,29 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useLayoutEffect, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Link, NavLink, useLocation, useOutlet, useSearchParams } from 'react-router-dom';
-import { BrandMark, ExploreIcon, FolderIcon, LibraryIcon } from '@/features/editor/icons';
+import { Link, NavLink, useLocation, useNavigate, useOutlet, useSearchParams } from 'react-router-dom';
+import { BrandMark, CompassIcon, FolderIcon, LibraryIcon } from '@/ui/icons';
 import { libraryGateway } from '@/core/gateway/defaultLibraryGateway';
-import type { Collection } from '@/core/gateway/LibraryGateway';
 import { collectionParamToId, collectionIdToSearchParams } from '@/features/library/collectionParam';
 import { CURRENT_AUTHOR_ID } from '@/core/gateway/authorId';
 import { PreviewPanel } from '@/features/browse/PreviewPanel';
+import { NowPlayingBar } from '@/features/browse/NowPlayingBar';
+import { AccountNav } from '@/features/auth/AccountNav';
+import { useAuthStore } from '@/core/auth/authStore';
 import { ScopedSearch } from '@/features/browse/ScopedSearch';
-import { useIsWide } from '@/features/browse/useIsWide';
 import { springGentle, springSmooth } from '@/styles/motion';
+import { withPreview } from '@/features/browse/previewRoute';
+import { useAuthPrompt } from '@/core/auth/authPrompt';
+import { previewPlayer } from '@/core/audio/PreviewPlayer';
+import { useAuthSceneTransitionActive } from '@/features/auth/authSceneTransition';
+import { BROWSE_QUERY_KEYS, useBrowseQuery } from '@/core/gateway/browseQueryCache';
 
-function collectionHref(id: string | null | undefined): string {
+function collectionHref(id: string | null | undefined, previewId: string | null): string {
   const qs = new URLSearchParams(collectionIdToSearchParams(id)).toString();
-  return qs ? `/library?${qs}` : '/library';
+  return withPreview(qs ? `/library?${qs}` : '/library', previewId);
 }
 
 const NAV_ITEMS = [
-  { to: '/explore', label: 'Explore', Icon: ExploreIcon },
+  { to: '/explore', label: 'Explore', Icon: CompassIcon },
   { to: '/library', label: 'Library', Icon: LibraryIcon },
 ];
 
@@ -31,23 +37,47 @@ const NAV_ITEMS = [
  *  route, not nested here — keeps its own chrome untouched. */
 export function AppShell() {
   const location = useLocation();
+  const navigate = useNavigate();
   const outlet = useOutlet();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [collections, setCollections] = useState<Collection[] | null>(null);
+  const [previewPanelMoving, setPreviewPanelMoving] = useState(false);
+  const [nowPlayingMoving, setNowPlayingMoving] = useState(false);
+  const authSceneTransitionActive = useAuthSceneTransitionActive();
   const isLibrary = location.pathname.startsWith('/library');
+  // Collections are personal — neither their nav tree nor any Library surface mounts before the
+  // route-level auth gate has admitted a signed-in user.
+  const authStatus = useAuthStore((s) => s.status);
+  const openLogin = useAuthPrompt((s) => s.open);
+  const authed = authStatus === 'authed';
+  const { data: collections } = useBrowseQuery(
+    'private',
+    BROWSE_QUERY_KEYS.myCollections,
+    () => libraryGateway.listMyCollections(),
+    authed,
+  );
+  const libraryBlocked = isLibrary && !authed;
   const openCollectionId = collectionParamToId(searchParams.get('collection'));
 
-  // Desktop-only right preview panel, driven by `?preview=<scoreId>` (a URL param, not a store —
-  // shareable, survives back/forward, and the browse screens set it on card click; below the
-  // breakpoint they navigate to /scores/:id instead). It's a real grid column, so the content
-  // reflows narrower when it opens and never gets overlapped (docs/browse-redesign.md, round 3).
-  const wide = useIsWide();
+  // The one score-context surface, driven by `?preview=<scoreId>` (a URL param, not a store —
+  // shareable and stable across back/forward). CSS presents the same panel as a reflowing column
+  // on wide screens and a right-side drawer below that, so card clicks never fork into a second
+  // detail-page interaction model.
   const previewId = searchParams.get('preview');
-  const panelOpen = wide && !!previewId;
-  const closePanel = () => {
+  const panelOpen = !!previewId;
+  // A finished preview belongs to the piece that just finished, not to the next piece selected.
+  // Clear that retained Replay state before paint when context changes; active background audio
+  // intentionally survives because `clearReplayForSelection` ignores the playing phase.
+  useLayoutEffect(() => {
+    if (previewId) previewPlayer.clearReplayForSelection(previewId);
+  }, [previewId]);
+  const collapsePanel = () => {
     const next = new URLSearchParams(searchParams);
     next.delete('preview');
     setSearchParams(next, { replace: true });
+  };
+  const closePanelAndPlayer = () => {
+    previewPlayer.dismiss();
+    collapsePanel();
   };
   // Keeps the last-open piece's content mounted while the panel slides away — masked, not
   // squeezed/removed (the real macOS sidebar-collapse lesson, DESIGN.md §3.5): the panel closing
@@ -57,14 +87,32 @@ export function AppShell() {
     if (previewId) setLastPreviewId(previewId);
   }, [previewId]);
 
+  // Main tabs change the catalog underneath the selected score, not the score context itself.
+  // Carry ONLY `preview`: `q` and `collection` are local state of their current destination and
+  // must not leak across Explore/Library.
+  const tabHref = (pathname: string) => withPreview(pathname, previewId);
+
   // Search lives in ONE fixed place — this shell top bar — on every browse screen, not moved
   // around per screen. It stays contextual via the scope label + the `?q` URL param the screens
-  // read; only the scope changes per surface, not the position. Other authors' profiles are NOT
-  // in this list — they keep their own inline `ScopedSearch`, a different surface with a
-  // different job (a public read-only introduction, not a personal catalog).
+  // read; only the scope changes per surface, not the position. Author profiles use this same
+  // topbar too — no screen inserts a second search field inside its content.
   const isExplore = location.pathname.startsWith('/explore');
-  const isYourScores = location.pathname === `/authors/${CURRENT_AUTHOR_ID}`;
-  const searchScope = isExplore ? 'all pieces' : isLibrary ? 'your library' : isYourScores ? 'your scores' : null;
+  const isAuthorProfile = location.pathname.startsWith('/authors/');
+  const isYourScores = authed && location.pathname === `/authors/${CURRENT_AUTHOR_ID}`;
+  const openCollection = collections?.find((collection) => collection.id === openCollectionId);
+  const librarySearchScope =
+    openCollectionId === undefined ? 'your library' : openCollectionId === null ? 'Unsorted' : (openCollection?.name ?? 'this collection');
+  const searchScope = libraryBlocked
+    ? null
+    : isExplore
+      ? 'all pieces'
+      : isLibrary
+        ? librarySearchScope
+        : isYourScores
+          ? 'your scores'
+          : isAuthorProfile
+            ? 'this author’s scores'
+            : null;
   const q = searchParams.get('q') ?? '';
   const setQ = (v: string) => {
     const next = new URLSearchParams(searchParams);
@@ -73,16 +121,14 @@ export function AppShell() {
     setSearchParams(next, { replace: true });
   };
 
-  useEffect(() => {
-    let cancelled = false;
-    void libraryGateway.listMyCollections().then((r) => !cancelled && setCollections(r));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
   return (
-    <div className={'app-shell' + (panelOpen ? ' has-panel' : '')}>
+    <div
+      className={
+        'app-shell' +
+        (panelOpen ? ' has-panel' : '') +
+        (previewPanelMoving || nowPlayingMoving ? ' panels-moving' : '')
+      }
+    >
       <nav className="app-nav" aria-label="Main">
         <div className="app-nav-brand">
           <BrandMark />
@@ -90,7 +136,18 @@ export function AppShell() {
         </div>
         <div className="app-nav-tabs">
           {NAV_ITEMS.map(({ to, label, Icon }) => (
-            <NavLink key={to} to={to} className={({ isActive }) => 'app-nav-item' + (isActive ? ' active' : '')}>
+            <NavLink
+              key={to}
+              to={tabHref(to)}
+              className={({ isActive }) =>
+                'app-nav-item' + (isActive && !(to === '/library' && !authed) ? ' active' : '')
+              }
+              onClick={(event) => {
+                if (to !== '/library' || authed) return;
+                event.preventDefault();
+                if (authStatus === 'anonymous') openLogin(() => navigate(tabHref('/library')));
+              }}
+            >
               <Icon />
               <span>{label}</span>
             </NavLink>
@@ -100,7 +157,7 @@ export function AppShell() {
         {/* Travels a real distance (its own height) downward from under the tabs — a real slide,
             not a fade with a small positional nudge — matching `PreviewPanel`'s own slide below. */}
         <AnimatePresence initial={false}>
-          {isLibrary && (
+          {isLibrary && authed && (
             <motion.div
               key="collections-tree"
               className="app-nav-tree"
@@ -111,7 +168,7 @@ export function AppShell() {
             >
               <span className="app-nav-tree-heading">Collections</span>
               <Link
-                to={collectionHref(undefined)}
+                to={collectionHref(undefined, previewId)}
                 className={'app-nav-tree-item' + (openCollectionId === undefined ? ' active' : '')}
               >
                 All scores
@@ -119,7 +176,7 @@ export function AppShell() {
               {collections?.map((c) => (
                 <Link
                   key={c.id}
-                  to={collectionHref(c.id)}
+                  to={collectionHref(c.id, previewId)}
                   className={'app-nav-tree-item' + (openCollectionId === c.id ? ' active' : '')}
                 >
                   <FolderIcon />
@@ -127,7 +184,7 @@ export function AppShell() {
                 </Link>
               ))}
               <Link
-                to={collectionHref(null)}
+                to={collectionHref(null, previewId)}
                 className={'app-nav-tree-item' + (openCollectionId === null ? ' active' : '')}
               >
                 <FolderIcon />
@@ -137,12 +194,9 @@ export function AppShell() {
           )}
         </AnimatePresence>
 
-        {/* Lands on the progress dashboard, not the score catalog — the catalog is one click away
-            from there, at `/authors/:id`. */}
-        <NavLink to="/you" className={({ isActive }) => 'app-nav-item app-nav-account' + (isActive ? ' active' : '')}>
-          <span className="app-nav-avatar" aria-hidden="true">Y</span>
-          <span>You</span>
-        </NavLink>
+        {/* Account: sign-in prompt for anonymous visitors, else the personal "You" area (progress
+            dashboard; catalog is one click on at `/authors/:id`) + sign out. */}
+        <AccountNav />
       </nav>
       <main className="app-shell-content">
         {searchScope && (
@@ -162,26 +216,33 @@ export function AppShell() {
             <motion.div
               key={location.pathname}
               className="shell-page"
-              initial={{ opacity: 0, y: 10 }}
+              initial={authSceneTransitionActive ? false : { opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
+              exit={authSceneTransitionActive ? undefined : { opacity: 0, y: -6 }}
               transition={springGentle}
             >
               {outlet}
             </motion.div>
           </AnimatePresence>
         </div>
+        <NowPlayingBar hidden={panelOpen} onMotionChange={setNowPlayingMoving} />
       </main>
-      {/* The panel is the ONLY space-reserving element here — no separate gap div. It's a real
-          flex sibling of `<main>` whose own `width` IS the reservation, mirroring `LeftPanel`'s
-          mechanism (editor) for the right edge; `PreviewPanel.tsx` owns the motion itself, so this
-          shell just renders it with an `open` intent, same as `<LeftPanel />` needs no wrapper in
-          the editor. Mounted unconditionally from this shell's very first render
+      {/* The panel is a real flex sibling of `<main>` on wide screens, where its own `width` is the
+          reservation; CSS turns that same element into an overlay drawer below 1080px. There is
+          no second detail component or motion wrapper. `PreviewPanel.tsx` owns the motion itself,
+          so this shell only renders it with an `open` intent. Mounted unconditionally from this
+          shell's very first render
           (`scoreId={lastPreviewId}`, starting `null`) rather than gated on a piece being selected
           — see `PreviewPanel.tsx`'s own doc comment for why that gate matters. No
           `AnimatePresence` mount/unmount — the panel's own internal motion handles open and
           close, nothing left for this shell to orchestrate. */}
-      <PreviewPanel scoreId={lastPreviewId} open={panelOpen} onClose={closePanel} />
+      <PreviewPanel
+        scoreId={lastPreviewId}
+        open={panelOpen}
+        onCollapse={collapsePanel}
+        onClose={closePanelAndPlayer}
+        onMotionChange={setPreviewPanelMoving}
+      />
     </div>
   );
 }

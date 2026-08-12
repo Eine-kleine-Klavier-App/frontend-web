@@ -87,7 +87,7 @@ export interface SkillMastery {
  *  (`Material Versioning & Publication`). Same card shape as a score plus the `author` who made
  *  the branch (the distinguishing fact — same piece, someone else's take). Listing is mocked;
  *  MAKING a branch is real (`createDraft(fromScoreId)` forks straight into the editor). */
-export type BranchSummary = ScoreSummary & { author: string };
+export type BranchSummary = ScoreSummary & { author: string; parentScoreId: string };
 
 /** A working draft, as listed in Library's "Continue editing". `refScoreId` is the canon
  *  score it was branched from, or null for a from-scratch draft. */
@@ -138,7 +138,7 @@ export interface LibraryGateway {
   /** Recently listened-to (preview-played) pieces for Library's "Jump back in" (shallow mock). */
   listRecentListens(): Promise<ListenSummary[]>;
   listMyCollections(): Promise<Collection[]>;
-  /** A single score for the detail page (`/scores/:id`) — null if no such score. */
+  /** A single score for the contextual preview panel — null if no such score. */
   getScore(id: string): Promise<ScoreSummary | null>;
   /** An author's public profile (`/authors/:id`) — null if unknown. */
   getAuthor(id: string): Promise<Author | null>;

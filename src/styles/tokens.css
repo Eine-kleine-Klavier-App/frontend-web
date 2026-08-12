@@ -64,6 +64,9 @@
   --shadow-2: 0 2px 8px rgba(74, 56, 40, 0.1);
   --shadow-3: 0 8px 28px rgba(74, 56, 40, 0.16);
   --shadow-paper: 0 1px 3px rgba(74, 56, 40, 0.1), 0 8px 32px rgba(74, 56, 40, 0.08);
+  /* momentary flatten on :active — a press settles the element back into the surface rather than
+     just scaling down mid-air. Contact only, no ambient layer. */
+  --shadow-press: 0 1px 1px rgba(74, 56, 40, 0.08);
 
   /* Radius */
   --radius-sm: 6px;

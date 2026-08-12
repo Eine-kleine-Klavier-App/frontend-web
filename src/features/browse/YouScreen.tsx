@@ -1,12 +1,24 @@
-import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useMemo } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { libraryGateway } from '@/core/gateway/defaultLibraryGateway';
 import { CURRENT_AUTHOR_ID } from '@/core/gateway/authorId';
-import type { Author, ListenSummary, PracticeSummary, ScoreSummary, SkillMastery } from '@/core/gateway/LibraryGateway';
 import { ScoreCover, type Coverable } from './ScoreCover';
 import { plateTintClass } from './plateTint';
 import { fitTier } from './FitBadge';
 import { FadeSwap } from '@/ui/FadeSwap';
+import { useAuthStore } from '@/core/auth/authStore';
+import { SignInPrompt } from '@/features/auth/SignInPrompt';
+import { Button } from '@/ui/Button';
+import { ArrowRightIcon, MinusIcon, SignOutIcon, TrendingDownIcon, TrendingUpIcon } from '@/ui/icons';
+import { withPreview } from './previewRoute';
+import { runAuthSceneTransition } from '@/features/auth/authSceneTransition';
+import {
+  BROWSE_QUERY_KEYS,
+  authorQueryKey,
+  authorScoresQueryKey,
+  useBrowseQuery,
+} from '@/core/gateway/browseQueryCache';
+import { DelayedLoading } from '@/ui/DelayedLoading';
 
 /** Your progress — a stats dashboard, deliberately separate from "Your Scores"
  *  (`AuthorProfileScreen`, `/authors/:id`, which keeps the searchable/editable catalog job) — this
@@ -17,29 +29,66 @@ import { FadeSwap } from '@/ui/FadeSwap';
  *  real thing, mocked until the engine lands. */
 export default function YouScreen() {
   const navigate = useNavigate();
-  const [author, setAuthor] = useState<Author | null>(null);
-  const [skills, setSkills] = useState<SkillMastery[] | null>(null);
-  const [scores, setScores] = useState<ScoreSummary[] | null>(null);
-  const [practice, setPractice] = useState<PracticeSummary[] | null>(null);
-  const [listens, setListens] = useState<ListenSummary[] | null>(null);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const authStatus = useAuthStore((s) => s.status);
+  const username = useAuthStore((s) => s.username);
+  const signOut = useAuthStore((s) => s.signOut);
+  const authed = authStatus === 'authed';
+  const { data: author, status: authorStatus } = useBrowseQuery(
+    'private',
+    authorQueryKey(CURRENT_AUTHOR_ID),
+    () => libraryGateway.getAuthor(CURRENT_AUTHOR_ID),
+    authed,
+  );
+  const { data: skills } = useBrowseQuery(
+    'private',
+    BROWSE_QUERY_KEYS.skillMastery,
+    () => libraryGateway.listSkillMastery(),
+    authed,
+  );
+  const { data: scores } = useBrowseQuery(
+    'private',
+    BROWSE_QUERY_KEYS.myScores,
+    () => libraryGateway.listMyScores(),
+    authed,
+  );
+  const { data: practice } = useBrowseQuery(
+    'private',
+    BROWSE_QUERY_KEYS.recentPractice,
+    () => libraryGateway.listRecentPractice(),
+    authed,
+  );
+  const { data: listens } = useBrowseQuery(
+    'private',
+    BROWSE_QUERY_KEYS.recentListens,
+    () => libraryGateway.listRecentListens(),
+    authed,
+  );
   // Separate from `scores` (`listMyScores` — everything in your library, not just what you wrote)
   // — this is specifically "have you authored anything at all", the gate for the "Your Scores"
   // link below: most users never author a score, so a link into an empty catalog is worse than no
   // link at all.
-  const [hasAuthored, setHasAuthored] = useState<boolean | null>(null);
+  const { data: authoredScores } = useBrowseQuery(
+    'private',
+    authorScoresQueryKey(CURRENT_AUTHOR_ID),
+    () => libraryGateway.listAuthorScores(CURRENT_AUTHOR_ID),
+    authed,
+  );
+  const hasAuthored = authoredScores ? authoredScores.length > 0 : null;
+  const previewId = searchParams.get('preview');
 
-  useEffect(() => {
-    let cancelled = false;
-    void libraryGateway.getAuthor(CURRENT_AUTHOR_ID).then((a) => !cancelled && setAuthor(a));
-    void libraryGateway.listSkillMastery().then((r) => !cancelled && setSkills(r));
-    void libraryGateway.listMyScores().then((r) => !cancelled && setScores(r));
-    void libraryGateway.listRecentPractice().then((r) => !cancelled && setPractice(r));
-    void libraryGateway.listRecentListens().then((r) => !cancelled && setListens(r));
-    void libraryGateway.listAuthorScores(CURRENT_AUTHOR_ID).then((r) => !cancelled && setHasAuthored(r.length > 0));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const openScore = (scoreId: string) => {
+    const next = new URLSearchParams(searchParams);
+    next.set('preview', scoreId);
+    setSearchParams(next);
+  };
+
+  const handleSignOut = () => {
+    runAuthSceneTransition('sign-out', () => {
+      signOut();
+      navigate(withPreview('/explore', previewId), { replace: true });
+    });
+  };
 
   const comfortZone = useMemo(() => {
     if (!scores) return null;
@@ -65,34 +114,70 @@ export default function YouScreen() {
     return items.sort((a, b) => b.when - a.when);
   }, [practice, listens]);
 
-  const initial = author?.name.trim().charAt(0).toUpperCase() || '?';
-  const loading = !author;
+  // Prefer the REAL signed-in username (the browse identity below it is still mock — see
+  // [[auth-product-model]]); fall back to the mock author name until /auth/me resolves.
+  const displayName = username ?? author?.name ?? 'You';
+  const initial = displayName.trim().charAt(0).toUpperCase() || '?';
+  const loading = authorStatus !== 'success' || !author;
   const stateKey = loading ? 'loading' : 'content';
   const totalScored = comfortZone ? comfortZone.comfortable + comfortZone.reach + comfortZone.stretch : 0;
+
+  // "You" is your personal progress space — logged-in only. A direct hit while anonymous (the nav
+  // otherwise prompts sign-in) offers the same prompt rather than rendering an empty dashboard.
+  if (authStatus === 'loading') {
+    return (
+      <div className="you-screen">
+        <div className="browse-loading">Restoring your session…</div>
+      </div>
+    );
+  }
+
+  if (authStatus === 'anonymous') {
+    return (
+      <div className="you-screen">
+        <SignInPrompt
+          title="You"
+          subtitle="Sign in to see your progress, comfort zone, and the pieces you keep coming back to."
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="you-screen">
       <FadeSwap stateKey={stateKey}>
         {loading ? (
-          <div className="browse-loading">Loading your progress…</div>
+          <DelayedLoading>Loading your progress…</DelayedLoading>
         ) : (
           <>
-            {/* Pure identity — no action here. A single lone button in a tinted band would read
-                as this page's main action, but it's a secondary exit link, not this screen's job
-                — see the "Your Scores" link below instead, which only renders once you've
-                authored something. */}
-            <header className={'author-hero ' + plateTintClass(author.name)}>
+            {/* Account identity and its account-level exit live together. Sign out uses the same
+                labeled-button primitive as the rest of browse, but the quiet close-control accent
+                treatment keeps it secondary to this progress page's actual content. */}
+            <header className={'author-hero you-hero ' + plateTintClass(author.name)}>
               <div className="author-avatar" aria-hidden="true">{initial}</div>
               <div className="author-hero-body">
                 <span className="author-hero-eyebrow">Your progress</span>
-                <h1 className="author-hero-name">{author.name}</h1>
-                <span className="author-hero-handle">{author.handle}</span>
+                <h1 className="author-hero-name">{displayName}</h1>
+                <span className="author-hero-handle">{username ? `@${username}` : author.handle}</span>
               </div>
+              <Button
+                variant="secondary"
+                className="you-signout"
+                icon={<SignOutIcon />}
+                onClick={handleSignOut}
+              >
+                Sign out
+              </Button>
             </header>
 
             {hasAuthored && (
-              <button type="button" className="you-scores-link" onClick={() => navigate(`/authors/${CURRENT_AUTHOR_ID}`)}>
-                View your scores →
+              <button
+                type="button"
+                className="you-scores-link"
+                onClick={() => navigate(withPreview(`/authors/${CURRENT_AUTHOR_ID}`, previewId))}
+              >
+                <span>View your scores</span>
+                <ArrowRightIcon />
               </button>
             )}
 
@@ -101,7 +186,7 @@ export default function YouScreen() {
                 <h2>Skill mastery</h2>
               </div>
               {!skills ? (
-                <div className="browse-loading">Loading…</div>
+                <DelayedLoading>Loading…</DelayedLoading>
               ) : (
                 <div className="skill-list">
                   {skills.map((s) => {
@@ -109,13 +194,14 @@ export default function YouScreen() {
                     // as fake precision from a mocked skill model. `level`/`levelMonthAgo` only
                     // ever feed this comparison, never render as text.
                     const trend = s.level > s.levelMonthAgo ? 'up' : s.level < s.levelMonthAgo ? 'down' : 'flat';
-                    const arrow = trend === 'up' ? '▲' : trend === 'down' ? '▼' : '–';
+                    const TrendIcon = trend === 'up' ? TrendingUpIcon : trend === 'down' ? TrendingDownIcon : MinusIcon;
                     const label = trend === 'up' ? 'Improving' : trend === 'down' ? 'Needs attention' : 'Steady';
                     return (
                       <div key={s.skill} className="skill-row">
                         <span className="skill-row-label">{s.skill}</span>
                         <span className={'pill skill-row-trend skill-row-trend--' + trend}>
-                          {arrow} {label}
+                          <TrendIcon />
+                          <span>{label}</span>
                         </span>
                       </div>
                     );
@@ -130,7 +216,7 @@ export default function YouScreen() {
                 {comfortZone && <span className="library-count">{totalScored} scores</span>}
               </div>
               {!comfortZone ? (
-                <div className="browse-loading">Loading…</div>
+                <DelayedLoading>Loading…</DelayedLoading>
               ) : totalScored === 0 ? (
                 <div className="library-empty">No scores yet — save a few to see how they fit you.</div>
               ) : (
@@ -172,11 +258,11 @@ export default function YouScreen() {
                       role="button"
                       tabIndex={0}
                       className="work-card"
-                      onClick={() => navigate(`/scores/${f.cover.id}`)}
+                      onClick={() => openScore(f.cover.id)}
                       onKeyDown={(e) => {
                         if (e.key === 'Enter' || e.key === ' ') {
                           e.preventDefault();
-                          navigate(`/scores/${f.cover.id}`);
+                          openScore(f.cover.id);
                         }
                       }}
                     >

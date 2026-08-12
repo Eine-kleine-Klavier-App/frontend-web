@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
+import { CheckIcon, ChevronDownIcon } from '@/ui/icons';
 
 export interface DropdownOption<T extends string> {
   value: T;
@@ -53,29 +54,34 @@ export function Dropdown<T extends string>({
         onClick={() => setOpen((v) => !v)}
       >
         <span>{current?.label ?? ''}</span>
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="m6 9 6 6 6-6" />
-        </svg>
+        <ChevronDownIcon />
       </button>
       {open && (
-        <ul className="dropdown-menu" role="listbox" id={listId} aria-label={label}>
-          {options.map((o) => (
-            <li key={o.value}>
-              <button
-                type="button"
-                role="option"
-                aria-selected={o.value === value}
-                className={'dropdown-option' + (o.value === value ? ' selected' : '')}
-                onClick={() => {
-                  onChange(o.value);
-                  setOpen(false);
-                }}
-              >
-                {o.label}
-              </button>
-            </li>
-          ))}
-        </ul>
+        <div className="dropdown-menu glass">
+          <div className="glass-lens" />
+          <div className="glass-tint" />
+          <div className="glass-specular" />
+          <div className="glass-rim" />
+          <ul className="dropdown-menu-list" role="listbox" id={listId} aria-label={label}>
+            {options.map((o) => (
+              <li key={o.value}>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={o.value === value}
+                  className={'dropdown-option' + (o.value === value ? ' selected' : '')}
+                  onClick={() => {
+                    onChange(o.value);
+                    setOpen(false);
+                  }}
+                >
+                  <span>{o.label}</span>
+                  {o.value === value && <CheckIcon />}
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
     </div>
   );

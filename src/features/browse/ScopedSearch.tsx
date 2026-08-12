@@ -1,16 +1,9 @@
+import { CloseIcon, SearchIcon } from '@/ui/icons';
+
 /** Scope-aware search field (docs/browse-redesign.md, round 1/2). Search is contextual, not one
  *  fixed global box: the same component searches the whole catalog on Explore, a single
  *  collection inside that collection, an author's scores on their profile. The `scope` label is
  *  shown in the placeholder so the user always knows what they're searching. */
-function SearchIcon() {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" aria-hidden="true">
-      <circle cx="11" cy="11" r="7" />
-      <path d="m21 21-4.3-4.3" />
-    </svg>
-  );
-}
-
 export function ScopedSearch({
   value,
   onChange,
@@ -34,7 +27,7 @@ export function ScopedSearch({
       />
       {value && (
         <button type="button" className="scoped-search-clear" onClick={() => onChange('')} aria-label="Clear search">
-          ×
+          <CloseIcon />
         </button>
       )}
     </div>
