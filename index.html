@@ -4,6 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Eine kleine Klavierapp</title>
+    <!-- Pre-paint theme: runs before any CSS or module loads, so the very first frame already has
+         the right theme and backdrop (no white flash, no empty dark frame). The single source of the
+         theme choice: `?theme=dark|light` sets it and is remembered; otherwise localStorage; default
+         light. The two backdrop literals mirror --color-backdrop in src/styles/tokens.css (they
+         exist only for the frames before that stylesheet arrives). -->
+    <script>
+      (function () {
+        var theme = 'light';
+        try {
+          var asked = new URLSearchParams(location.search).get('theme');
+          if (asked === 'dark' || asked === 'light') localStorage.setItem('theme', asked);
+          var stored = localStorage.getItem('theme');
+          if (stored === 'dark' || stored === 'light') theme = stored;
+        } catch (e) {}
+        var root = document.documentElement;
+        root.dataset.theme = theme;
+        root.style.colorScheme = theme;
+        root.style.backgroundColor = theme === 'dark' ? '#17141a' : '#e8e5ea';
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
