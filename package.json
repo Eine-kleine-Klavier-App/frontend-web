@@ -6,14 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "lint:px": "node scripts/check-px.mjs"
   },
   "dependencies": {
+    "js-synthesizer": "1.13.0",
     "motion": "^12.42.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^7.18.2",
-    "tone": "^15.1.22",
     "vexflow": "^4.2.4",
     "zustand": "^4.5.5"
   },
