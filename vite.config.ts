@@ -14,6 +14,7 @@ export default defineConfig({
       '/api': {
         target: 'http://127.0.0.1:8000',
         changeOrigin: true,
+        ws: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
         // The backend scopes its refresh cookie to Path=/auth (deliberate, kept for prod). But we
         // strip /api before proxying, so the browser sees the response as coming from /api/auth/*

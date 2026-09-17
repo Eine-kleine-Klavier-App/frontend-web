@@ -5,6 +5,10 @@ import { useAuthStore } from './core/auth/authStore';
 import './styles/tokens.css';
 import './index.css';
 
+// The theme is applied before first paint by the inline script in index.html (the single source).
+// Its backdrop literal only bridges the frames before the stylesheet; from here the tokens own it.
+document.documentElement.style.removeProperty('background-color');
+
 // Kick off the one-shot silent refresh before first paint: a returning user with a live refresh
 // cookie is restored to `authed` without any interaction; everyone else settles to `anonymous`.
 // Fire-and-forget — the store drives the UI off `status` as it resolves.
