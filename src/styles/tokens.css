@@ -1,127 +1,259 @@
 /* Design tokens — the single source of truth for color, type, spacing, elevation, motion.
    See DESIGN.md. Components consume these variables only; a hardcoded hex/px/ms is a defect.
-   Light theme now; a dark theme lands as a second block here (components never change). */
+   Palette: P1 "Heather & Plum" (owner's choice, 2026-10-24). Light is the default; the dark block
+   below re-lights the same roles behind `:root[data-theme='dark']`. Editor and browse read the
+   same names, so both switch together. `.theme-copy` is the day/night switch's static copy of the
+   page (ui/theme.ts): it carries its own `data-theme`, so both ladders also apply to it. */
 
-:root {
-  /* Neutrals — warm sand/taupe (never grey) */
-  --color-backdrop: #f4eee4;
-  --color-surface: #fbf8f2;
-  --color-surface-raised: #fffdf9;
-  --color-paper: #ffffff;
-  --color-border: #e6dccc;
-  --color-border-strong: #d5c7b2;
+:root,
+.theme-copy {
+  /* Neutrals — one cool-mauve grey family at very low chroma (reads as stone, not pink) */
+  --color-backdrop: #e8e5ea; /* floor: the desk everything rests on */
+  --waterfall-sky-black: #020209; /* the waterfall's sky: deep black, or the app's dark grey */
+  --waterfall-sky-grey: #17141a;
+  /* The waterfall's canvas paint — the same in both themes (the roll is always lit at night). Read
+     once by the scene (features/playback/waterfall/waterfallPalette.ts); alphas stay in the code. */
+  --waterfall-bed: #100e19; /* the floor under the roll */
+  --waterfall-strip-default: #26183f; /* the keyboard strip light until one is picked */
+  --waterfall-strip-base: #07070a; /* the strip where its light does not reach */
+  --waterfall-rail-top: #292830; /* the rail under the keys, top to bottom */
+  --waterfall-rail-upper: #211e28;
+  --waterfall-rail-lower: #08070d;
+  --waterfall-rail-bottom: #040309;
+  --waterfall-mist: #181738; /* the haze over the horizon, centre to edge */
+  --waterfall-mist-edge: #090912;
+  --waterfall-guide-far: #a6b5d2; /* octave lines, from the horizon to the keys */
+  --waterfall-guide-mid: #abbdd7;
+  --waterfall-guide-near: #becce2;
+  --waterfall-bar-line: #9ca4bd; /* the line across the roll at a measure start */
+  --waterfall-mark: #bdc3d8; /* measure-line ends, the pedal lane and its label */
+  --waterfall-sheen: #ffffff; /* the lit side of a falling note */
+  --waterfall-shadow: #000000; /* its shaded side */
+  --waterfall-burn: #fbf0ff; /* where a note reaches the keys, rising to white */
+  --waterfall-burn-hot: #fff9ff;
+  --waterfall-burn-white: #fffbff;
+  --waterfall-core-light: #faf4ff; /* the white of the hottest spots */
+  --waterfall-crest-idle: #aaa8cd; /* the crest over the keys where nothing sounds */
+  --waterfall-crest-glow: #baa4da; /* the crest's soft outline */
+  --waterfall-crest-line: #f5edff; /* its bright edge */
+  --waterfall-footprint: #f9f4ff; /* a struck key's footprint on the crest, rising to white */
+  --waterfall-footprint-white: #fefbff;
+  --waterfall-grain: #b2a2db; /* a dust grain, centre to edge */
+  --waterfall-grain-mid: #8578ba;
+  --waterfall-grain-edge: #56498e;
+  --color-surface: #f3f1f4; /* plate: panels, inspector, pills */
+  --color-surface-raised: #ffffff; /* keycap: anything you press, the raised choice */
+  --color-paper: #ffffff; /* the score sheet — white in every theme */
+  --color-border: #dad5dd;
+  --color-border-strong: #c3bcc7;
+  --well: #e1dde4; /* recessed track holding a set of choices */
 
-  /* Ink — warm near-black text ramp */
-  --color-ink: #2c241d;
-  --color-ink-muted: #6f6153;
-  --color-ink-faint: #a5967f;
+  /* Ink */
+  --color-ink: #211c25;
+  --color-ink-muted: #5d5664;
+  --color-ink-faint: #8f8796;
 
-  /* Accent — terracotta coral */
-  --color-accent: #e07856;
-  --color-accent-strong: #c75f3e;
-  --color-accent-deep: #a34b2f;
-  --color-accent-subtle: #fae9df;
+  /* Accent — deep plum. ONLY for the primary action, selection and focus; never a chrome wash. */
+  --color-accent: #8a4a7b;
+  --color-accent-strong: #733d67;
+  --color-accent-deep: #5e3155;
+  --color-accent-subtle: #efe3ec;
+  --color-on-accent: #ffffff; /* text/glyphs sitting on an accent fill */
 
   /* Semantic — softened, never pure hues */
-  --color-danger: #a94456;
-  --color-danger-subtle: #f7e4e6;
-  --color-success: #5f8a68;
-  --color-success-subtle: #e7f0e7;
-  --color-warning: #b98a3a;
-  --color-warning-subtle: #f7edd8;
+  --color-danger: #a8323e;
+  --color-danger-subtle: #f6e1e3;
+  --color-success: #3f7c5c;
+  --color-success-subtle: #e2efe7;
+  --color-warning: #9c7426;
+  --color-warning-subtle: #f3ead6;
 
   /* Focus */
-  --color-focus-ring: rgba(224, 120, 86, 0.45);
+  --color-focus-ring: rgba(115, 61, 103, 0.5);
 
   /* Soft teal wash behind the "Listened" activity chip (paired with --color-voice-2 text) */
-  --color-listen-subtle: #e3efec;
+  --color-listen-subtle: #dfeeeb;
 
-  /* Voice colors — index 0 = ink (main voice reads as plain engraving); 1..3 tinted */
-  --color-voice-1: #4e7cb8;
-  --color-voice-2: #4e9b8f;
-  --color-voice-3: #8b6fb8;
-  --color-voice-4: #c25e8f;
+  /* Voice colors — blue / teal / indigo / sienna: kept clear of the plum accent (indigo is
+     blue-violet, plum is red-violet). Mirrored in core/model/voiceColors.ts — change both. */
+  --color-voice-1: #4a6fb3;
+  --color-voice-2: #2f8579;
+  --color-voice-3: #6a5cb8;
+  --color-voice-4: #b3683a;
 
   /* Playback */
-  --color-playback-cursor: #c75f3e;
+  --color-playback-cursor: #733d67;
 
-  /* Title-plate tints — the engraved-cover signature (docs/browse-redesign.md). A deterministic
-     wash per composer so every card reads distinct without any color claiming meaning (genre is
-     mock). All warm, low-chroma, in-family with the sand/clay/terracotta palette — NEVER a new
-     hue. Engraving ink stays --color-ink on every one. */
-  /* Cover tints — WIDE warm spread so a grid of covers has rhythm instead of one repeating wash
-     (round 7; slice-3/5 values were still too close). All warm, ink stays readable. Earlier
-     pale set kept to revert: 0 #efe4d3 1 #f2e1d5 2 #fae9df 3 #ebe1d0 4 #e9eddf 5 #f4ecd7 */
-  --plate-0: #e7cfa2; /* deep gold-sand */
-  --plate-1: #ecc4ac; /* warm clay */
-  --plate-2: #eeb69c; /* terracotta */
-  --plate-3: #cfcaa4; /* olive-taupe */
-  --plate-4: #c7d6ab; /* warm sage */
-  --plate-5: #f0d194; /* ochre */
+  /* The paper is a light island in every theme: engraving ink, the accent used on it and the
+     measure-selection wash are pinned there (index.css `.paper`), never re-lit by the dark block */
+  --score-ink: #211c25;
+  --score-ink-muted: #5d5664;
+  --score-accent: #8a4a7b;
+  --score-accent-deep: #5e3155;
+  --score-wash: #efe3ec;
 
-  /* Elevation — warm shadows */
-  --shadow-1: 0 1px 2px rgba(74, 56, 40, 0.08);
-  --shadow-2: 0 2px 8px rgba(74, 56, 40, 0.1);
-  --shadow-3: 0 8px 28px rgba(74, 56, 40, 0.16);
-  --shadow-paper: 0 1px 3px rgba(74, 56, 40, 0.1), 0 8px 32px rgba(74, 56, 40, 0.08);
-  /* momentary flatten on :active — a press settles the element back into the surface rather than
-     just scaling down mid-air. Contact only, no ambient layer. */
-  --shadow-press: 0 1px 1px rgba(74, 56, 40, 0.08);
+  /* Cover plate tints — one low-chroma family, ink stays readable on every one */
+  --plate-0: #d9cfdc;
+  --plate-1: #c9d3df;
+  --plate-2: #d6dacb;
+  --plate-3: #e0d6cc;
+  --plate-4: #cfd9d6;
+  --plate-5: #ddd0d6;
+
+  /* Shadow tint (r, g, b) — every shadow, wash and scrim is this colour at some alpha */
+  --tint: 40, 30, 48;
+
+  /* Elevation — the ONE depth ladder (floor → plate → keycap → float; well is recessed).
+     Rings live inside the shadow, so surfaces need no borders. No inset highlights. */
+  --elev-plate: 0 0 0 1px rgba(var(--tint), 0.07), 0 1px 2px rgba(var(--tint), 0.05), 0 8px 24px rgba(var(--tint), 0.05);
+  --elev-sheet: 0 0 0 1px rgba(var(--tint), 0.06), 0 1px 3px rgba(var(--tint), 0.08), 0 8px 24px rgba(var(--tint), 0.07);
+  --elev-keycap: 0 0 0 1px rgba(var(--tint), 0.11), 0 1px 1px rgba(var(--tint), 0.1), 0 1px 3px rgba(var(--tint), 0.06);
+  --elev-keycap-hover: 0 0 0 1px rgba(var(--tint), 0.15), 0 1px 1px rgba(var(--tint), 0.1), 0 2px 6px rgba(var(--tint), 0.09);
+  --elev-keycap-press: 0 0 0 1px rgba(var(--tint), 0.15);
+  --elev-well: inset 0 1px 2px rgba(var(--tint), 0.1), inset 0 0 0 1px rgba(var(--tint), 0.05);
+  --elev-float: 0 0 0 1px rgba(var(--tint), 0.08), 0 4px 12px rgba(var(--tint), 0.08), 0 16px 40px rgba(var(--tint), 0.12);
+
+  /* Legacy shadow names, re-expressed on the same ladder (browse still consumes them) */
+  --shadow-1: 0 1px 2px rgba(var(--tint), 0.08);
+  --shadow-2: 0 2px 8px rgba(var(--tint), 0.1);
+  --shadow-3: var(--elev-float);
+  --shadow-paper: var(--elev-sheet);
+  --shadow-press: var(--elev-keycap-press);
+
+  /* Interaction washes — neutral; the accent stays reserved for CTA / selection / focus */
+  --wash-hover: rgba(var(--tint), 0.06);
+  --wash-press: rgba(var(--tint), 0.11);
+  --scrim: rgba(var(--tint), 0.35);
+  --scrim-soft: rgba(var(--tint), 0.12);
+  --press-travel: 1px; /* every press: settle 1px, shadow shrinks to its ring — never a scale */
+
+  /* Base unit — every length is a multiple of it, so the whole UI follows the reader's font size
+     (0.25rem = 4px at the default 16px). Ratios and fractions over literal pixels (AGENTS.md). */
+  --u: 0.25rem;
 
   /* Radius */
-  --radius-sm: 6px;
-  --radius-md: 10px;
-  --radius-lg: 14px;
-  --radius-full: 9999px; /* pills, color dots */
+  --radius-sm: calc(var(--u) * 1.5);
+  --radius-md: calc(var(--u) * 2.5);
+  --radius-lg: calc(var(--u) * 3.5);
+  --radius-full: 9999px; /* px: "fully round" sentinel, not a length that is ever seen */
+  --well-pad: calc(var(--u) * 0.75); /* well = option + 2 x well-pad */
+  --radius-option: calc(var(--radius-md) - var(--well-pad)); /* concentric inside a well */
 
-  /* Spacing (base 4px) */
-  --space-1: 4px;
-  --space-2: 8px;
-  --space-3: 12px;
-  --space-4: 16px;
-  --space-5: 20px;
-  --space-6: 24px;
-  --space-7: 32px;
-  --space-8: 40px;
+  /* Spacing — multiples of the base unit */
+  --space-1: var(--u);
+  --space-2: calc(var(--u) * 2);
+  --space-3: calc(var(--u) * 3);
+  --space-4: calc(var(--u) * 4);
+  --space-5: calc(var(--u) * 5);
+  --space-6: calc(var(--u) * 6);
+  --space-7: calc(var(--u) * 8);
+  --space-8: calc(var(--u) * 10);
 
-  /* Type */
-  --font-ui: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
-  /* Reading face for score/composer titles only (Explore/Library) — E-Ink/Paper direction,
-     chosen explicitly by the user over the default UI sans (DESIGN.md has no serif token yet,
-     this is the first one; system stack, no webfont/network dependency). UI chrome (buttons,
-     nav, labels) stays --font-ui. */
+  /* Type — the system UI face (SF on Mac); no webfont is loaded, so none is named */
+  --font-ui: system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* Reading face for score/composer titles only (Explore/Library). UI chrome stays --font-ui. */
   --font-reading: Georgia, 'Times New Roman', serif;
 
-  /* Type scale (DESIGN.md §3.2) — size / paired line-height in the name's comment; components
-     consume the font-size var, and set line-height explicitly only where the block needs one. */
-  --text-xs: 12px; /* 16px line — badges, kbd hints */
-  --text-sm: 13px; /* 18px line — secondary UI, dense panels */
-  --text-md: 14px; /* 20px line — default UI */
-  --text-lg: 16px; /* 24px line — panel titles */
-  --text-xl: 20px; /* 28px line — document title, empty states */
-  --text-2xl: 24px; /* 30px line — section/shelf display titles (browse) */
-  --text-3xl: 32px; /* 38px line — the featured hero title */
+  /* Type scale (DESIGN.md §3.2) — size / paired line-height in the name's comment */
+  --text-xs: 0.75rem; /* 1rem line — badges, kbd hints */
+  --text-sm: 0.8125rem; /* 1.125rem line — secondary UI, dense panels */
+  --text-md: 0.875rem; /* 1.25rem line — default UI */
+  --text-lg: 1rem; /* 1.5rem line — panel titles */
+  --text-xl: 1.25rem; /* 1.75rem line — document title, empty states */
+  --text-2xl: 1.5rem; /* 1.875rem line — section/shelf display titles (browse) */
+  --text-3xl: 2rem; /* 2.375rem line — the featured hero title */
 
-  /* Control heights — THREE standard sizes (DESIGN.md §3.3, revised 2026-08-08): 44 = touch target
-     (primary actions, search, touch surfaces) / 32 = desktop default / 26 = dense working controls.
-     Every control derives from one of these; none hardcodes its own height. */
-  --control-h: 44px;
-  --control-h-sm: 32px;
-  --control-h-dense: 26px;
+  /* Control heights — touch / desktop default / dense */
+  --control-h: calc(var(--u) * 11);
+  --control-h-sm: calc(var(--u) * 8);
+  --control-h-dense: calc(var(--u) * 6.5);
+  --icon-size: calc(var(--u) * 4.5);
 
   /* Motion — for the CSS MICRO-FEEDBACK layer only (hover/press/focus/selection washes). All
-     spatial/state-driven motion (panels, zoom, mode switch) is spring-driven from JS now — see
-     `src/styles/motion.ts` and DESIGN.md §3.5. */
+     spatial/state-driven motion is spring-driven from JS — see `src/styles/motion.ts`. */
   --motion-fast: 120ms;
   --motion-base: 180ms;
+  --motion-instant: 0ms; /* a press lands on pointer-down */
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --ease-exit: cubic-bezier(0.3, 0, 1, 1);
-  /* DEPRECATED (DESIGN.md §3.5): spatial motion belongs to springs now. `--motion-slow` (fixed
-     durations don't retarget mid-flight) and `--ease-anticipate` (a faked impulse plays identically
-     every time — honest overshoot only emerges from real spring velocity). Kept only so any stray
-     reference still resolves; do not use in new code. */
-  --motion-slow: 260ms;
-  --ease-anticipate: cubic-bezier(0.68, -0.55, 0.27, 1.55);
+
+  /* The app's left rail — ONE width for browse's rail and the editor's: a fifth of the window,
+     between 15rem and 18rem */
+  --rail-w: clamp(15rem, 20vw, 18rem);
+
+  /* The sheet (EditorView reads these back as pixels — one source for CSS and layout code) */
+  --sheet-gutter: var(--space-7); /* = browse's content gutter */
+  --sheet-max: 60rem; /* a page, not a banner: min(60rem, column − 2 gutters) */
+  --paper-frame: calc(var(--u) * 12); /* the paper's own padding, both sides, plus slack */
+  --title-band: calc(var(--u) * 18); /* the engraved title block above the score */
+
+  /* Editor layout zones */
+  --editor-bar-h: calc(var(--u) * 14); /* top bar: identity | transport pill | history */
+  --rail-cats-w: calc(var(--u) * 14); /* the library's category column */
+  --flyout-w: calc(var(--u) * 72); /* the shelf that slides out where the rail collapses */
+  --editor-strip-h: calc(var(--u) * 13); /* the strip above the sheet: staff · voice · policy */
+  --editor-dock-h: calc(var(--u) * 13); /* the floating input tray */
+  --editor-edge: calc(var(--u) * 3); /* gap between floating chrome and the window edge */
+  --editor-toast-w: 32.5rem;
+
+  /* z-order */
+  --z-chrome: 30;
+  --z-inspector: 35;
+  --z-popover: 40;
+  --z-toast: 60;
+}
+
+/* Breakpoints. A media query cannot read a custom property, so the widths are written out where
+   they are used; these are the only ones (a `max-width` pair ends 1/16em below its `min-width`):
+     30em      phone: the narrowest layouts
+     35em/40em component-specific wraps (the now-playing bar, the context strip)
+     48em      tablet: browse grids and panels gain columns (≤47.9375em below it)
+     64em      the editor becomes drawer + bottom sheet + tray at ≤64em (JS: min-width 64.0625em)
+     67.5em    browse's preview panel reserves its own column
+     80em      the editor bar fits one row (≤79.9375em below it) */
+
+/* Dark: the same ladder re-lit. The paper stays white and engraving ink stays pinned. */
+:root[data-theme='dark'],
+.theme-copy[data-theme='dark'] {
+  color-scheme: dark;
+  --color-backdrop: #17141a;
+  --color-surface: #201c23;
+  --color-surface-raised: #2b2630;
+  --color-border: #3a3440;
+  --color-border-strong: #4c4553;
+  --well: #121014;
+  --color-ink: #efebf2;
+  --color-ink-muted: #b4abb9;
+  --color-ink-faint: #81788a;
+  --color-accent: #c58ab6;
+  --color-accent-strong: #d6a2c8;
+  --color-accent-deep: #e3bad9;
+  --color-accent-subtle: #3a2636;
+  --color-on-accent: #211c25;
+  --color-danger: #e58a93;
+  --color-danger-subtle: #3d2227;
+  --color-success: #82bd98;
+  --color-success-subtle: #1e3328;
+  --color-warning: #d8b46e;
+  --color-warning-subtle: #3a3020;
+  --color-focus-ring: rgba(214, 162, 200, 0.55);
+  --color-listen-subtle: #1d3431;
+  --plate-0: #3b3140;
+  --plate-1: #2f3a46;
+  --plate-2: #383d30;
+  --plate-3: #40372f;
+  --plate-4: #2f3c3a;
+  --plate-5: #3f3138;
+  --tint: 0, 0, 0;
+  --wash-hover: rgba(255, 255, 255, 0.06);
+  --wash-press: rgba(255, 255, 255, 0.1);
+  --scrim: rgba(0, 0, 0, 0.5);
+  --elev-well: inset 0 1px 2px rgba(0, 0, 0, 0.4), inset 0 0 0 1px rgba(255, 255, 255, 0.04);
+  --elev-plate: 0 0 0 1px rgba(255, 255, 255, 0.05), 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.25);
+  --elev-keycap: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 1px 1px rgba(0, 0, 0, 0.4), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --elev-keycap-hover: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 1px 1px rgba(0, 0, 0, 0.4), 0 2px 6px rgba(0, 0, 0, 0.35);
+  --elev-keycap-press: 0 0 0 1px rgba(255, 255, 255, 0.1);
+  --elev-float: 0 0 0 1px rgba(255, 255, 255, 0.07), 0 4px 12px rgba(0, 0, 0, 0.35), 0 16px 40px rgba(0, 0, 0, 0.45);
 }
 
 @media (prefers-reduced-motion: reduce) {
