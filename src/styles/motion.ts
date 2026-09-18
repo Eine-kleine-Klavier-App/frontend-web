@@ -23,20 +23,111 @@ export const springSmooth = { type: 'spring', ...SPRING_SMOOTH } as const;
 /** large surfaces, page-level moves. */
 export const springGentle = { type: 'spring', ...SPRING_GENTLE } as const;
 
-/** LeftPanel's `visual` bounce only (§3.5's "Left panel" canonical case) — visibly underdamped
+/** The day/night switch (`ui/theme.ts`): the pull on the switch, its spring back, the light's
+ *  sweep, the reduced-motion crossfade and the icon's turn. A timed sequence, not a spring: the light
+ *  is scrubbed frame by frame, so each phase has a fixed length. */
+export const THEME_SWITCH_MS = { tug: 90, click: 140, light: 740, fade: 150, icon: 180 } as const;
+/** the light's sweep and the icon's turn: the standard ease (`--ease-standard`) */
+export const THEME_SWITCH_EASE = 'cubic-bezier(0.2, 0, 0, 1)';
+
+/** Discrete search-prompt editing cadence. Temporal text is the browse shell's motion signature. */
+export const SEARCH_PROMPT_ERASE_MS = 18;
+export const SEARCH_PROMPT_TYPE_MS = 38;
+
+// ---------------------------------------------------------------------------------------------
+// Concept A — "Plates on a desk": the ONE motion idea, editor and browse alike. Everything that
+// arrives SETTLES onto the surface (one near-critical spring: opacity in, a few px down, a hair of
+// scale); everything that leaves LIFTS off it (a short ease-exit: fade + 4px up), about three
+// times faster than the arrival. Pages, popovers, toasts, the inspector's content and the follow-
+// scroll all use these; side panels share their quiet profile through `useSidePanelMotion`.
+
+/** the arrival spring — near-critical (damping ≈ 2·√stiffness): it lands, it does not bounce */
+export const SPRING_SETTLE = { stiffness: 380, damping: 39 } as const;
+export const springSettle = { type: 'spring', ...SPRING_SETTLE } as const;
+/** the exit — 120ms ease-exit, opacity + 4px up */
+export const lift = { duration: 0.12, ease: [0.3, 0, 1, 1] } as const;
+/** reduced motion: a settle collapses to this opacity crossfade; slides become instant */
+export const reducedFade = { duration: 0.12, ease: 'linear' } as const;
+
+/** Presence props for one settling surface. `fromY` is the offset it arrives from, in px: the
+ *  default 8 starts it just below its rest (pages, the toast). A popover settles from its anchor —
+ *  positive when the anchor is below it (opens upward), negative when the anchor is above. */
+export function settleMotion(reduce: boolean | null, fromY = 8) {
+  if (reduce) {
+    return {
+      initial: { opacity: 0 },
+      animate: { opacity: 1, transition: reducedFade },
+      exit: { opacity: 0, transition: reducedFade },
+    };
+  }
+  return {
+    initial: { opacity: 0, y: fromY, scale: 0.985 },
+    animate: { opacity: 1, y: 0, scale: 1, transition: springSettle },
+    exit: { opacity: 0, y: -4, transition: lift },
+  };
+}
+
+/** `settleMotion` for a GLASS surface. Opacity below 1 on any ancestor of `.glass-lens` cuts its
+ *  backdrop off (the lens would show unblurred, then pop to glass at the end), so the surface
+ *  only moves (`surface`: y + scale) and each glass layer fades itself (`layer`). */
+export function glassSettleMotion(reduce: boolean | null, fromY = 8) {
+  const fade = reduce ? reducedFade : springSettle;
+  return {
+    surface: reduce
+      ? {}
+      : {
+          initial: { y: fromY, scale: 0.985 },
+          animate: { y: 0, scale: 1, transition: springSettle },
+          exit: { y: -4, transition: lift },
+        },
+    layer: {
+      initial: { opacity: 0 },
+      animate: { opacity: 1, transition: fade },
+      exit: { opacity: 0, transition: reduce ? reducedFade : lift },
+    },
+  };
+}
+
+/** Scrolls `el` to the target with the settle spring instead of the browser's own smooth-scroll
+ *  curve (one motion character). Instant under reduced motion. Returns a stop function. */
+export function springScrollTo(
+  el: HTMLElement,
+  target: { top?: number; left?: number },
+  reduce: boolean | null,
+): () => void {
+  const fromTop = el.scrollTop;
+  const fromLeft = el.scrollLeft;
+  const toTop = target.top ?? fromTop;
+  const toLeft = target.left ?? fromLeft;
+  if (reduce) {
+    el.scrollTop = toTop;
+    el.scrollLeft = toLeft;
+    return () => {};
+  }
+  const controls = animate(0, 1, {
+    ...springSettle,
+    onUpdate: (t) => {
+      el.scrollTop = fromTop + (toTop - fromTop) * t;
+      el.scrollLeft = fromLeft + (toLeft - fromLeft) * t;
+    },
+  });
+  return () => controls.stop();
+}
+
+/** The panel show/hide `visual` bounce (§3.5's panel case) — visibly underdamped
  * (ζ ≈ 0.6, deliberately more so than `SPRING_SNAPPY`'s ζ ≈ 1.0) so the macOS-style "kicks right
  * before sliding left / grows past open before settling back" character actually reads; moved
- * here (was inlined in LeftPanel.tsx) so every spring config lives in the one place §11 requires. */
+ * here so every spring config lives in the one place §11 requires. */
 export const SPRING_PANEL_BOUNCE = { stiffness: 220, damping: 18 } as const;
 /** Transition-shaped wrapper of `SPRING_PANEL_BOUNCE`, for `motion.div`'s declarative `transition`
  *  prop (the `SPRING_*` form is `SpringOptions`, for `useSpring`/imperative `animate()`; this is
  *  the `spring*` form, matching the naming split above). Reused by any panel/surface that wants
- *  LeftPanel's macOS-window "bounce" character WITHOUT the full `useLayoutSafeSpring` machinery —
- *  that machinery exists specifically because LeftPanel's bounce drives a layout-affecting `width`
- *  next to a sibling that must never be nudged by the overshoot; a panel that only animates its
+ *  the panels' macOS-window "bounce" character WITHOUT the full `useLayoutSafeSpring` machinery —
+ *  that machinery exists specifically for a bounce driving a layout-affecting `width` next to
+ *  a sibling that must never be nudged by the overshoot; a panel that only animates its
  *  own `transform`/`opacity` (no sibling reflow hazard) can use this directly. Cross-surface parity
- *  for "panel show/hide" (DESIGN.md §3.5, settled 2026-08-09) — the editor's LeftPanel and browse's
- *  PreviewPanel now share this exact config rather than each picking their own feel. */
+ *  for "panel show/hide" (DESIGN.md §3.5) — the editor's inspector and browse's PreviewPanel share
+ *  this exact config rather than each picking their own feel. */
 export const springPanelBounce = { type: 'spring', ...SPRING_PANEL_BOUNCE } as const;
 
 // ---------------------------------------------------------------------------------------------
@@ -144,4 +235,12 @@ export function useLayoutSafeSpring(
   }, [open, reduce, layoutSpring, visualSpring, openVelocity, closeVelocity]);
 
   return { layout, visual };
+}
+
+
+/** Left/right side panels share the preserved quiet profile with zero injected velocity.
+ *  Its non-overshooting progress can safely carry both the slot and the fixed-width surface. */
+export function useSidePanelMotion(open: boolean): { layout: MotionValue<number>; visual: MotionValue<number> } {
+  const { visual } = useLayoutSafeSpring(open);
+  return { layout: visual, visual };
 }
