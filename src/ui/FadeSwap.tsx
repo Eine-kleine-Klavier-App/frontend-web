@@ -1,23 +1,35 @@
-import { AnimatePresence, motion } from 'motion/react';
-import type { ReactNode } from 'react';
-import { springSnappy } from '@/styles/motion';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
+import { useRef, type ReactNode } from 'react';
+import { reducedFade, springSnappy } from '@/styles/motion';
+import { usePageTransitionPhase } from '@/ui/PageTransition';
 
 /** Crossfades between different states of the SAME content area — most commonly a loading
  *  placeholder swapping for real data once it arrives, so an async fetch resolving never hard-pops
  *  the content in with zero transition. Keyed by `stateKey` (e.g. `!data ? 'loading' : 'content'`)
  *  — pass a NEW key whenever the shown content materially changes.
  *
- *  Unlike the route-level transition (AppShell), this does NOT position children absolutely —
- *  screen content has natural, variable, scrolling height, so a brief (`springSnappy`, small/
- *  fast per the shared preset table) sequential fade is used instead of an overlapping crossfade.
- *  A short gap here is a deliberate, minor exception to "never a blank frame" (DESIGN.md §3.5
- *  principle 5 already grants one for the mode-switch wipe) — the content genuinely isn't ready
- *  yet, so there is nothing to overlap with. */
+ *  `popLayout` removes the departing state from flow while the arriving state takes its final
+ *  geometry immediately. During page death the last settled content is frozen; during page entry
+ *  data may update immediately behind the parent animation without starting a second entrance. */
 export function FadeSwap({ stateKey, children }: { stateKey: string; children: ReactNode }) {
+  const pagePhase = usePageTransitionPhase();
+  const reduce = useReducedMotion();
+  const frozen = useRef({ stateKey, children });
+  if (pagePhase !== 'exiting') frozen.current = { stateKey, children };
+
+  const shown = pagePhase === 'exiting' ? frozen.current : { stateKey, children };
+  const animateLocally = pagePhase === 'settled';
+
   return (
-    <AnimatePresence mode="wait" initial={false}>
-      <motion.div key={stateKey} initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={springSnappy}>
-        {children}
+    <AnimatePresence mode="popLayout" initial={false}>
+      <motion.div
+        key={shown.stateKey}
+        initial={animateLocally ? { opacity: 0 } : false}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: animateLocally ? 0 : 1 }}
+        transition={animateLocally ? (reduce ? reducedFade : springSnappy) : { duration: 0 }}
+      >
+        {shown.children}
       </motion.div>
     </AnimatePresence>
   );
