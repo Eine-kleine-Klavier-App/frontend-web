@@ -56,6 +56,34 @@ export function FolderIcon() {
   );
 }
 
+export function FolderOpenIcon() {
+  return glyph(
+    <path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2" {...STROKE} />,
+  );
+}
+
+export function FolderPlusIcon() {
+  return glyph(
+    <>
+      <path d="M12 10v6" {...STROKE} />
+      <path d="M9 13h6" {...STROKE} />
+      <path d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" {...STROKE} />
+    </>,
+  );
+}
+
+export function TrashIcon() {
+  return glyph(
+    <>
+      <path d="M3 6h18" {...STROKE} />
+      <path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6" {...STROKE} />
+      <path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2" {...STROKE} />
+      <path d="M10 11v6" {...STROKE} />
+      <path d="M14 11v6" {...STROKE} />
+    </>,
+  );
+}
+
 export function UserIcon() {
   return glyph(
     <>
@@ -101,6 +129,22 @@ export function CollapsePanelIcon() {
       <rect width="18" height="18" x="3" y="3" rx="2" {...STROKE} />
       <path d="M15 3v18" {...STROKE} />
       <path d="m8 9 3 3-3 3" {...STROKE} />
+    </>,
+  );
+}
+
+export function SlidersIcon() {
+  return glyph(
+    <>
+      <path d="M21 4h-7" {...STROKE} />
+      <path d="M10 4H3" {...STROKE} />
+      <path d="M21 12h-9" {...STROKE} />
+      <path d="M8 12H3" {...STROKE} />
+      <path d="M21 20h-5" {...STROKE} />
+      <path d="M12 20H3" {...STROKE} />
+      <path d="M14 2v4" {...STROKE} />
+      <path d="M8 10v4" {...STROKE} />
+      <path d="M16 18v4" {...STROKE} />
     </>,
   );
 }
@@ -226,4 +270,92 @@ export function TrendingDownIcon() {
 
 export function MinusIcon() {
   return glyph(<path d="M5 12h14" {...STROKE} />);
+}
+
+// lucide-static 1.61.0: undo-2, redo-2, lock / lock-open, circle-help, circle-alert, mouse-pointer-2
+export function UndoIcon() {
+  return glyph(
+    <>
+      <path d="M9 14 4 9l5-5" {...STROKE} />
+      <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11" {...STROKE} />
+    </>,
+  );
+}
+export function RedoIcon() {
+  return glyph(
+    <>
+      <path d="m15 14 5-5-5-5" {...STROKE} />
+      <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5A5.5 5.5 0 0 0 9.5 20H13" {...STROKE} />
+    </>,
+  );
+}
+export function LockIcon({ locked }: { locked: boolean }) {
+  return glyph(
+    <>
+      <rect width="18" height="11" x="3" y="11" rx="2" ry="2" {...STROKE} />
+      <path d={locked ? 'M7 11V7a5 5 0 0 1 10 0v4' : 'M7 11V7a5 5 0 0 1 9.9-1'} {...STROKE} />
+    </>,
+  );
+}
+export function HelpIcon() {
+  return glyph(
+    <>
+      <circle cx="12" cy="12" r="10" {...STROKE} />
+      <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" {...STROKE} />
+      <path d="M12 17h.01" {...STROKE} />
+    </>,
+  );
+}
+export function AlertIcon() {
+  return glyph(
+    <>
+      <circle cx="12" cy="12" r="10" {...STROKE} />
+      <line x1="12" x2="12" y1="8" y2="12" {...STROKE} />
+      <line x1="12" x2="12.01" y1="16" y2="16" {...STROKE} />
+    </>,
+  );
+}
+export function MousePointerIcon() {
+  return glyph(
+    <path
+      d="M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z"
+      {...STROKE}
+    />,
+  );
+}
+// lucide-static 1.61.0: sun, moon — the day/night switch
+export function SunIcon() {
+  return glyph(
+    <>
+      <circle cx="12" cy="12" r="4" {...STROKE} />
+      <path d="M12 2v2" {...STROKE} />
+      <path d="M12 20v2" {...STROKE} />
+      <path d="m4.93 4.93 1.41 1.41" {...STROKE} />
+      <path d="m17.66 17.66 1.41 1.41" {...STROKE} />
+      <path d="M2 12h2" {...STROKE} />
+      <path d="M20 12h2" {...STROKE} />
+      <path d="m6.34 17.66-1.41 1.41" {...STROKE} />
+      <path d="m19.07 4.93-1.41 1.41" {...STROKE} />
+    </>,
+  );
+}
+export function MoonIcon() {
+  return glyph(
+    <path
+      d="M20.985 12.486a9 9 0 1 1-9.473-9.472c.405-.022.617.46.402.803a6 6 0 0 0 8.268 8.268c.344-.215.825-.004.803.401"
+      {...STROKE}
+    />,
+  );
+}
+// Lucide `pin` (lucide-static 1.61.0)
+export function PinIcon() {
+  return glyph(
+    <>
+      <path d="M12 17v5" {...STROKE} />
+      <path
+        d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"
+        {...STROKE}
+      />
+    </>,
+  );
 }
