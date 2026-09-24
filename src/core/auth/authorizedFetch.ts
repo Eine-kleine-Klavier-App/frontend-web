@@ -55,3 +55,20 @@ export async function authorizedFetch(input: string, init: RequestInit = {}): Pr
   }
   return res;
 }
+
+/** `fetch` for opt-auth backend reads (public, but widened for a signed-in caller's own private
+ *  rows — e.g. `GET /scores`, `GET /scores/{id}`). Attaches the current access token when there
+ *  is one, same 401-refresh-retry as `authorizedFetch`, but NEVER throws for a missing/dead
+ *  session: a failed refresh just retries with no token, degrading to the anonymous view instead
+ *  of breaking a read nobody needed to be signed in for. */
+export async function optionalAuthFetch(input: string, init: RequestInit = {}): Promise<Response> {
+  const initial = useAuthStore.getState();
+  if (initial.status === 'loading') await initial.bootstrap();
+  const token = useAuthStore.getState().accessToken;
+
+  const res = await fetch(input, withAuth(init, token));
+  if (res.status !== 401 || !token) return res;
+
+  const fresh = await refreshAccessToken();
+  return fetch(input, withAuth(init, fresh));
+}

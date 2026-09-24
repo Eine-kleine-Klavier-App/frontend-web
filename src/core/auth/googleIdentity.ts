@@ -8,6 +8,7 @@ interface GoogleIdConfig {
   client_id: string;
   callback: (response: GoogleCredentialResponse) => void;
   ux_mode?: 'popup' | 'redirect';
+  locale?: string;
 }
 
 interface GoogleButtonOptions {
@@ -112,6 +113,9 @@ export async function mountGoogleSignInButton(
       // Google's secure chooser is a separate popup in the target browser. Keep the application
       // mounted underneath it; the credential callback resumes the in-app flow after it returns.
       ux_mode: 'popup',
+      // Google otherwise auto-picks the button/prompt language from the browser or the caller's
+      // geolocation, independent of the app's own copy — DESIGN.md §2.9 mandates English (v1).
+      locale: 'en',
     });
     shared.initializedClientId = GOOGLE_CLIENT_ID;
   }
