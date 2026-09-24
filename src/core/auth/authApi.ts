@@ -35,6 +35,19 @@ export class InvalidCredentialError extends Error {
   }
 }
 
+/** `/auth/login` returned 401 — the username or password is wrong (the backend never says which). */
+export class InvalidPasswordLoginError extends Error {
+  constructor() {
+    super('Wrong username or password.');
+    this.name = 'InvalidPasswordLoginError';
+  }
+}
+
+/** The shortest password the backend accepts (its request DTO enforces the same bound). */
+export const PASSWORD_MIN_LENGTH = 8;
+
+export type PasswordAuthMode = 'login' | 'register';
+
 async function readDetail(res: Response): Promise<unknown> {
   const body: unknown = await res.json().catch(() => null);
   return body && typeof body === 'object' && 'detail' in body ? (body as { detail: unknown }).detail : null;
@@ -57,6 +70,27 @@ export async function googleSignIn(idToken: string, username?: string): Promise<
   if (res.status === 422 && typeof detail === 'string') throw new UsernameRequiredError();
   if (res.status === 409) throw new UsernameConflictError(typeof detail === 'string' ? detail : undefined);
   if (res.status === 401) throw new InvalidCredentialError(typeof detail === 'string' ? detail : undefined);
+  throw new Error(typeof detail === 'string' ? detail : `Sign-in failed (${res.status}).`);
+}
+
+/** Signs in (`login`) or creates an account (`register`) with a username and password. Both set the
+ *  same refresh cookie as Google sign-in, so `credentials: 'include'` is required. */
+export async function passwordSignIn(
+  mode: PasswordAuthMode,
+  username: string,
+  password: string,
+): Promise<AccessTokenResponse> {
+  const res = await fetch(`${API_BASE}/auth/${mode}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    credentials: 'include',
+    body: JSON.stringify({ username, password }),
+  });
+  if (res.ok) return (await res.json()) as AccessTokenResponse;
+
+  const detail = await readDetail(res);
+  if (res.status === 401) throw new InvalidPasswordLoginError();
+  if (res.status === 409) throw new UsernameConflictError(typeof detail === 'string' ? detail : undefined);
   throw new Error(typeof detail === 'string' ? detail : `Sign-in failed (${res.status}).`);
 }
 
