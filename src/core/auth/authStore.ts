@@ -3,6 +3,8 @@ import {
   fetchCurrentUser,
   googleSignIn,
   logoutSession,
+  passwordSignIn,
+  type PasswordAuthMode,
   refreshSessionOnce,
   type AccessTokenResponse,
 } from './authApi';
@@ -31,6 +33,8 @@ interface AuthState {
    *  The modal commits the returned session inside the auth scene transition, so the old and new
    *  shells never race each other on screen. */
   prepareGoogleSignIn: (idToken: string, username?: string) => Promise<PreparedAuthSession>;
+  /** The same for a username + password: `login` into an existing account, `register` a new one. */
+  preparePasswordSignIn: (mode: PasswordAuthMode, username: string, password: string) => Promise<PreparedAuthSession>;
   applyPreparedSession: (session: PreparedAuthSession) => void;
   signOut: () => void;
   /** Applies a freshly-minted access token (used by the refresh path in authorizedFetch). */
@@ -105,6 +109,11 @@ export const useAuthStore = create<AuthState>((set) => ({
   prepareGoogleSignIn: async (idToken, username) => {
     const session = await googleSignIn(idToken, username);
     return prepareSession(session.access_token, username ?? null);
+  },
+
+  preparePasswordSignIn: async (mode, username, password) => {
+    const session = await passwordSignIn(mode, username, password);
+    return prepareSession(session.access_token, username);
   },
 
   applyPreparedSession: (session) => {
