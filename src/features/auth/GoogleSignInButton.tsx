@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { GOOGLE_CLIENT_ID, mountGoogleSignInButton } from '@/core/auth/googleIdentity';
+import { errorMessage } from '@/core/errorMessage';
 
 /** Renders the official "Sign in with Google" button (Google Identity Services). On success it
  *  hands the raw id_token up via `onCredential`; the parent exchanges it at POST /auth/google.
@@ -42,7 +43,7 @@ export function GoogleSignInButton({
       .catch((e: unknown) => {
         if (cancelled) return;
         setStatus('unavailable');
-        onErrorRef.current?.(e instanceof Error ? e.message : 'Google sign-in failed to load.');
+        onErrorRef.current?.(errorMessage(e, 'Google sign-in failed to load.'));
       });
     return () => {
       cancelled = true;
