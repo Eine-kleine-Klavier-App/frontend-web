@@ -3,6 +3,7 @@ import { useAuthStore } from '@/core/auth/authStore';
 import { useAuthPrompt } from '@/core/auth/authPrompt';
 import { withPreview } from '@/features/browse/previewRoute';
 import { UserIcon } from '@/ui/icons';
+import { ChoiceThumb } from '@/ui/ChoiceGroup';
 
 /** The account block at the foot of the app nav. Anonymous → a "Sign in" CTA that opens the login
  *  modal RIGHT OVER the current page (no intermediary screen — reads stay where they are). Signed
@@ -25,10 +26,16 @@ export function AccountNav() {
           to={profileHref}
           className={({ isActive }) => 'app-nav-item app-nav-account' + (isActive ? ' active' : '')}
         >
-          <span className="app-nav-avatar" aria-hidden="true">
-            {initial}
-          </span>
-          <span className="app-nav-account-name">{label}</span>
+          {({ isActive }) => (
+            <>
+              {/* same sliding highlight as the main tabs (AppShell.tsx) — one nav, one thumb */}
+              {isActive && <ChoiceThumb groupId="app-nav-tabs" />}
+              <span className="app-nav-avatar" aria-hidden="true">
+                {initial}
+              </span>
+              <span className="app-nav-account-name">{label}</span>
+            </>
+          )}
         </NavLink>
       ) : (
         <button

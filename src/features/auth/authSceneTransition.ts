@@ -3,7 +3,7 @@ import { animate, type AnimationPlaybackControls } from 'motion/react';
 import { create } from 'zustand';
 import { springGentle, springSnappy } from '@/styles/motion';
 
-export type AuthSceneTransitionKind = 'sign-in' | 'sign-out';
+export type AuthSceneTransitionKind = 'sign-out';
 interface SceneAnimation extends AnimationPlaybackControls {
   then(onResolve: VoidFunction, onReject?: VoidFunction): Promise<void>;
 }
@@ -101,44 +101,6 @@ function settleTransition(currentGeneration: number, animations: SceneAnimation[
   });
 }
 
-function modalOrigin(): { x: number; y: number } {
-  const modal = document.querySelector<HTMLElement>('.auth-modal');
-  const rect = modal?.getBoundingClientRect();
-  if (rect && rect.width > 0 && rect.height > 0) {
-    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
-  }
-  return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-}
-
-function runSignIn(update: () => void, reduceMotion: boolean): SceneAnimation[] {
-  const root = document.getElementById('root');
-  if (!root) {
-    update();
-    return [];
-  }
-
-  const origin = modalOrigin();
-  const oldScene = freeze(root);
-  oldScene.element.style.transformOrigin = `${origin.x - oldScene.rect.left}px ${origin.y - oldScene.rect.top}px`;
-
-  flushSync(update);
-
-  if (reduceMotion) {
-    return [animate(oldScene.element, { opacity: [1, 0] }, springSnappy)];
-  }
-
-  return [
-    animate(
-      oldScene.element,
-      {
-        opacity: [1, 0.94, 0],
-        scale: [1, 1.018, 1.065],
-      },
-      springGentle,
-    ),
-  ];
-}
-
 function runSignOut(update: () => void, reduceMotion: boolean): SceneAnimation[] {
   const content = document.querySelector<HTMLElement>('.app-shell-content');
   const account = document.querySelector<HTMLElement>('.app-nav-account-slot');
@@ -185,10 +147,10 @@ function runSignOut(update: () => void, reduceMotion: boolean): SceneAnimation[]
   return animations;
 }
 
-/** Runs the auth change as one scene transition. Sign-in is a camera move through the current
- *  modal/shell into the authenticated space. Sign-out keeps Explore stationary underneath while
+/** Runs the auth change as one scene transition. Sign-out keeps Explore stationary underneath while
  *  one frozen profile surface recedes above it. The DOM truth changes synchronously; only a
- *  disposable, inert snapshot lags behind for presentation. */
+ *  disposable, inert layer lags behind for presentation. (Sign-in has no scene transition — the
+ *  session is applied directly; see LoginModal.) */
 export function runAuthSceneTransition(kind: AuthSceneTransitionKind, update: () => void): void {
   stopPreviousTransition();
   const currentGeneration = generation;
@@ -198,7 +160,7 @@ export function runAuthSceneTransition(kind: AuthSceneTransitionKind, update: ()
 
   let animations: SceneAnimation[];
   try {
-    animations = kind === 'sign-in' ? runSignIn(update, reduceMotion) : runSignOut(update, reduceMotion);
+    animations = runSignOut(update, reduceMotion);
   } catch (error) {
     stopPreviousTransition();
     throw error;
