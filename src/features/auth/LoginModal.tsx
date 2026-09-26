@@ -1,13 +1,20 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { UsernameConflictError, UsernameRequiredError } from '@/core/auth/authApi';
+import {
+  InvalidPasswordLoginError,
+  PASSWORD_MIN_LENGTH,
+  UsernameConflictError,
+  UsernameRequiredError,
+  type PasswordAuthMode,
+} from '@/core/auth/authApi';
 import { useAuthStore, type PreparedAuthSession } from '@/core/auth/authStore';
 import { useAuthPrompt } from '@/core/auth/authPrompt';
 import { GoogleSignInButton } from './GoogleSignInButton';
-import { runAuthSceneTransition } from './authSceneTransition';
 import { Button } from '@/ui/Button';
+import { ChoiceGroup } from '@/ui/ChoiceGroup';
 import { BrandMark, CloseIcon, EditIcon, LibraryIcon, PracticeIcon } from '@/ui/icons';
-import { springGentle, springSmooth } from '@/styles/motion';
+import { lift, springSmooth, springSnappy } from '@/styles/motion';
+import { errorMessage } from '@/core/errorMessage';
 
 type Step = 'choose' | 'username';
 
@@ -32,16 +39,20 @@ const FOCUSABLE_SELECTOR = [
 /** The sign-in modal. Reads is a free act; this appears only when an anonymous visitor reaches a
  *  write / logged-in-only action ([[auth-product-model]]). Two-step Google flow: a credential that
  *  belongs to a brand-new account comes back as `UsernameRequiredError` → we keep the SAME id_token
- *  and ask for a username, then resend. Closing (backdrop / Esc / ✕) cancels without side effects. */
+ *  and ask for a username, then resend. Closing (backdrop / ✕) cancels without side effects. */
 export function LoginModal() {
   const close = useAuthPrompt((s) => s.close);
   const succeed = useAuthPrompt((s) => s.succeed);
   const prepareGoogleSignIn = useAuthStore((s) => s.prepareGoogleSignIn);
+  const preparePasswordSignIn = useAuthStore((s) => s.preparePasswordSignIn);
   const applyPreparedSession = useAuthStore((s) => s.applyPreparedSession);
 
   const [step, setStep] = useState<Step>('choose');
   const [idToken, setIdToken] = useState<string | null>(null);
   const [username, setUsername] = useState('');
+  const [mode, setMode] = useState<PasswordAuthMode>('login');
+  const [loginName, setLoginName] = useState('');
+  const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
@@ -91,11 +102,6 @@ export function LoginModal() {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        if (!busy) close();
-        return;
-      }
       if (e.key !== 'Tab') return;
 
       const modal = modalRef.current;
@@ -126,10 +132,8 @@ export function LoginModal() {
 
   const completeSignIn = useCallback(
     (session: PreparedAuthSession) => {
-      runAuthSceneTransition('sign-in', () => {
-        applyPreparedSession(session);
-        succeed();
-      });
+      applyPreparedSession(session);
+      succeed();
     },
     [applyPreparedSession, succeed],
   );
@@ -146,7 +150,7 @@ export function LoginModal() {
           setIdToken(token);
           setStep('username');
         } else {
-          setError(e instanceof Error ? e.message : 'Sign-in failed. Please try again.');
+          setError(errorMessage(e, 'Sign-in failed. Please try again.'));
         }
         setBusy(false);
       }
@@ -165,10 +169,29 @@ export function LoginModal() {
     } catch (e) {
       if (e instanceof UsernameConflictError) setError('That username is already taken — try another.');
       else if (e instanceof UsernameRequiredError) setError('Please enter a username.');
-      else setError(e instanceof Error ? e.message : 'Sign-in failed. Please try again.');
+      else setError(errorMessage(e, 'Sign-in failed. Please try again.'));
       setBusy(false);
     }
   }, [idToken, username, busy, completeSignIn, prepareGoogleSignIn]);
+
+  const canSubmitPassword =
+    loginName.trim() !== '' && (mode === 'login' ? password !== '' : password.length >= PASSWORD_MIN_LENGTH);
+
+  const submitPassword = useCallback(async () => {
+    const name = loginName.trim();
+    if (!canSubmitPassword || busy) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const session = await preparePasswordSignIn(mode, name, password);
+      completeSignIn(session);
+    } catch (e) {
+      if (e instanceof InvalidPasswordLoginError) setError('Wrong username or password.');
+      else if (e instanceof UsernameConflictError) setError('That username is already taken — try another.');
+      else setError(errorMessage(e, 'Sign-in failed. Please try again.'));
+      setBusy(false);
+    }
+  }, [loginName, password, mode, busy, canSubmitPassword, completeSignIn, preparePasswordSignIn]);
 
   return (
     <motion.div
@@ -179,8 +202,8 @@ export function LoginModal() {
       }}
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.16 }}
+      exit={{ opacity: 0, transition: lift }}
+      transition={springSmooth}
     >
       <div className="auth-focus-guard" tabIndex={0} onFocus={focusLast} />
       <motion.div
@@ -191,9 +214,8 @@ export function LoginModal() {
         aria-labelledby="auth-modal-title"
         tabIndex={-1}
         initial={{ opacity: 0, y: 12, scale: 0.98 }}
-        animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 8, scale: 0.98 }}
-        transition={springGentle}
+        animate={{ opacity: 1, y: 0, scale: 1, transition: springSmooth }}
+        exit={{ opacity: 0, y: 8, scale: 0.98, transition: springSnappy }}
       >
         <button ref={closeRef} type="button" className="icon-btn auth-modal-close" aria-label="Close" onClick={close} disabled={busy}>
           <CloseIcon />
@@ -230,6 +252,63 @@ export function LoginModal() {
                     </li>
                   ))}
                 </ul>
+                <form
+                  className="auth-form"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void submitPassword();
+                  }}
+                >
+                  <ChoiceGroup<PasswordAuthMode>
+                    ariaLabel="Sign in or create an account"
+                    variant="tabs"
+                    value={mode}
+                    onChange={(next) => {
+                      setMode(next);
+                      setError(null);
+                    }}
+                    options={[
+                      { value: 'login', label: 'Sign in' },
+                      { value: 'register', label: 'Create account' },
+                    ]}
+                  />
+                  <label className="auth-field-label" htmlFor="auth-login-name">
+                    Username
+                  </label>
+                  <input
+                    id="auth-login-name"
+                    className="auth-field"
+                    type="text"
+                    value={loginName}
+                    onChange={(e) => setLoginName(e.target.value)}
+                    maxLength={64}
+                    autoComplete="username"
+                    disabled={busy}
+                  />
+                  <label className="auth-field-label" htmlFor="auth-login-password">
+                    Password
+                  </label>
+                  <input
+                    id="auth-login-password"
+                    className="auth-field"
+                    type="password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder={mode === 'register' ? `At least ${PASSWORD_MIN_LENGTH} characters` : undefined}
+                    maxLength={128}
+                    autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+                    disabled={busy}
+                  />
+                  <p className={'auth-modal-error' + (error ? '' : ' auth-modal-error--idle')} role="alert">
+                    {error ?? '\u00a0'}
+                  </p>
+                  <Button variant="primary" type="submit" disabled={busy || !canSubmitPassword}>
+                    {mode === 'register' ? 'Create account' : 'Sign in'}
+                  </Button>
+                </form>
+                <div className="auth-modal-or" aria-hidden="true">
+                  or
+                </div>
                 <div className="auth-modal-actions">
                   {busy ? (
                     <div className="auth-modal-progress" role="status" aria-live="polite">
@@ -276,6 +355,9 @@ export function LoginModal() {
                     maxLength={64}
                     autoComplete="username"
                   />
+                  <p className={'auth-modal-error' + (error ? '' : ' auth-modal-error--idle')} role="alert">
+                    {error ?? '\u00a0'}
+                  </p>
                   <Button variant="primary" type="submit" disabled={busy || !username.trim()}>
                     {busy ? 'Creating your account…' : 'Continue'}
                   </Button>
@@ -283,11 +365,6 @@ export function LoginModal() {
               </>
             )}
 
-            {error && (
-              <p className="auth-modal-error" role="alert">
-                {error}
-              </p>
-            )}
           </motion.div>
         </AnimatePresence>
       </motion.div>
