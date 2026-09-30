@@ -1,4 +1,4 @@
-import type { ScoreDocument } from '@/core/model/score';
+import type { ContextCoverage, ScoreDocument } from '@/core/model/score';
 import type { Command } from '@/core/commands/command';
 
 /**
@@ -14,4 +14,6 @@ export interface EditorGateway {
   apply(draftId: string, command: Command): Promise<ScoreDocument>;
   undo(draftId: string): Promise<ScoreDocument>;
   redo(draftId: string): Promise<ScoreDocument>;
+  /** The elements a context is applied to — read from the backend, which owns the rule. */
+  contextCoverage(draftId: string, contextId: string): Promise<ContextCoverage>;
 }
