@@ -1,5 +1,5 @@
 import type { EditorGateway } from './EditorGateway';
-import type { ScoreDocument } from '@/core/model/score';
+import type { ContextCoverage, ScoreDocument } from '@/core/model/score';
 import type { Command } from '@/core/commands/command';
 
 /**
@@ -32,6 +32,10 @@ export class QueuedGateway implements EditorGateway {
 
   redo(draftId: string): Promise<ScoreDocument> {
     return this.enqueue(() => this.inner.redo(draftId));
+  }
+
+  contextCoverage(draftId: string, contextId: string): Promise<ContextCoverage> {
+    return this.enqueue(() => this.inner.contextCoverage(draftId, contextId));
   }
 
   private enqueue<T>(op: () => Promise<T>): Promise<T> {
