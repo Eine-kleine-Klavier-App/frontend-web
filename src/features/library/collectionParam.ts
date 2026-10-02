@@ -1,18 +1,15 @@
-// The selected collection lives in the URL (`?collection=`), not local component state —
-// both the sidebar tree (AppShell) and the Library page itself need to read/drive the same
-// selection, and a URL is the shared source of truth react-router already gives us for free
-// (also makes the selection linkable/bookmarkable, a nice side effect of not inventing a store).
-export const UNSORTED_PARAM = 'unsorted';
+import type { CollectionSummary } from '@/core/gateway/LibraryGateway';
+import { withPreview } from '@/features/browse/previewRoute';
 
-/** `undefined` = show everything (no filter), `null` = the Unsorted bucket, otherwise a real
- *  collection id. Absent query param decodes to `undefined`. */
-export function collectionParamToId(param: string | null): string | null | undefined {
-  if (param === null) return undefined;
-  if (param === UNSORTED_PARAM) return null;
-  return param;
+/** The open collection lives in the URL, so the rail's tree and the Library page read one source
+ *  and a collection can be linked to. */
+export const COLLECTION_PARAM = 'collection';
+
+export function collectionHref(collectionId: string, previewId: string | null): string {
+  return withPreview(`/library?${COLLECTION_PARAM}=${encodeURIComponent(collectionId)}`, previewId);
 }
 
-export function collectionIdToSearchParams(id: string | null | undefined): Record<string, string> {
-  if (id === undefined) return {};
-  return { collection: id === null ? UNSORTED_PARAM : id };
+/** The order the backend lists collections in. */
+export function byName(a: CollectionSummary, b: CollectionSummary): number {
+  return a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.id.localeCompare(b.id);
 }
