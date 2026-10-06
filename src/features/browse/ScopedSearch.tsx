@@ -8,23 +8,37 @@ export function ScopedSearch({
   value,
   onChange,
   scope,
+  visiblePrompt,
+  typing,
 }: {
   value: string;
   onChange: (v: string) => void;
   /** What the search is bounded to right now, e.g. "all pieces", "Warm-ups", "Bach". */
   scope: string;
+  /** Presentation is owned by AppShell so it survives keyed route scenes and rapid reversals. */
+  visiblePrompt: string;
+  typing: boolean;
 }) {
+  const prompt = `Search ${scope}`;
+
   return (
     <div className="scoped-search">
       <SearchIcon />
-      <input
-        type="search"
-        className="scoped-search-input"
-        placeholder={`Search ${scope}`}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        aria-label={`Search ${scope}`}
-      />
+      <div className="scoped-search-field">
+        {!value && (
+          <span className="scoped-search-placeholder" aria-hidden="true">
+            {visiblePrompt}
+            {typing && <span className="scoped-search-type-caret" />}
+          </span>
+        )}
+        <input
+          type="search"
+          className="scoped-search-input"
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          aria-label={prompt}
+        />
+      </div>
       {value && (
         <button type="button" className="scoped-search-clear" onClick={() => onChange('')} aria-label="Clear search">
           <CloseIcon />

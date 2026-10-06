@@ -1,60 +1,26 @@
-import {
-  previewControlPhase,
-  previewPlayer,
-  usePreviewPlayback,
-  type PreviewTrack,
-} from '@/core/audio/PreviewPlayer';
-import { scoreToEvents } from '@/core/audio/scoreToEvents';
+import { useSyncExternalStore } from 'react';
+import type { ScorePlayback, ScorePlaybackTrack } from '@/core/playback/SavedScorePlayback';
 import { PauseIcon, PlayIcon, ReplayIcon } from '@/ui/icons';
 
-type Previewable = PreviewTrack;
-
-/** The one preview play/pause control, reused by plates, the hero, and the right panel —
- *  playback lives everywhere now, not just the editor (docs/browse-redesign.md). Renders
- *  nothing when the piece has no preview document. `size` = 'sm' on cover overlays, 'lg' for
- *  the hero/panel. `label` shows a text label beside the icon (hero/panel wide buttons). */
-export function PreviewPlayButton({
-  score,
-  size = 'sm',
-  label = false,
-  className = '',
-}: {
-  score: Previewable;
+/** The same saved-score control in the panel, its versions and the collapsed player. */
+export function PreviewPlayButton({ score, transport, size = 'sm', label = false, disabled = false, variant = 'preview' }: {
+  score: ScorePlaybackTrack;
+  transport: ScorePlayback;
   size?: 'sm' | 'lg';
   label?: boolean;
-  className?: string;
+  disabled?: boolean;
+  variant?: 'preview' | 'transport';
 }) {
-  const playback = usePreviewPlayback();
-  const phase = previewControlPhase(playback, score.id);
-  const isPlaying = phase === 'playing';
-  const isPaused = phase === 'paused';
-  const canReplay = phase === 'replay';
-  if (!score.previewDocument) return null;
-
-  const toggle = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    void previewPlayer.play(score, scoreToEvents(score.previewDocument!));
-  };
-
-  return (
-    <button
-      type="button"
-      className={`preview-play preview-play--${size}${label ? ' preview-play--labeled' : ''}${canReplay ? ' restart' : ''}${isPlaying ? ' playing' : ''} ${className}`}
-      onClick={toggle}
-      aria-label={
-        isPlaying
-          ? `Pause preview of ${score.title}`
-          : isPaused
-            ? `Resume preview of ${score.title}`
-          : canReplay
-            ? `Replay preview of ${score.title}`
-            : `Play preview of ${score.title}`
-      }
-    >
-      {isPlaying ? <PauseIcon /> : canReplay ? <ReplayIcon /> : <PlayIcon />}
-      {label && (
-        <span>{isPlaying ? 'Pause preview' : isPaused ? 'Resume preview' : canReplay ? 'Replay preview' : 'Play preview'}</span>
-      )}
-    </button>
-  );
+  const phase = useSyncExternalStore(transport.subscribe, () => {
+    const state = transport.getState();
+    return state.track?.id === score.id ? state.phase : 'idle';
+  });
+  const action = phase === 'playing' ? 'Pause' : phase === 'paused' ? 'Resume' : phase === 'replay' ? 'Replay' : phase === 'loading' ? 'Cancel loading' : 'Play';
+  return <button type="button"
+    className={variant === 'transport' ? 'play' : `preview-play preview-play--${size}${label ? ' preview-play--labeled' : ''}${phase === 'replay' ? ' restart' : ''}${phase === 'playing' ? ' playing' : ''}`}
+    disabled={disabled} aria-busy={phase === 'loading'} aria-label={`${action} preview of ${score.title}`}
+    onClick={event => { event.stopPropagation(); if (variant === 'transport' && phase === 'loading') transport.stopPlayback(); else void transport.play(score); }}>
+    {phase === 'playing' ? <PauseIcon /> : variant === 'transport' ? <PlayIcon /> : phase === 'replay' ? <ReplayIcon /> : <PlayIcon />}
+    {label && <span>{action === 'Cancel loading' ? action : `${action} preview`}</span>}
+  </button>;
 }
