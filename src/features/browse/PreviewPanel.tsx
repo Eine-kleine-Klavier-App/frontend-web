@@ -1,52 +1,40 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
-import { motion, useMotionValueEvent, useReducedMotion, useTransform } from 'motion/react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { motion, useMotionValue, useMotionValueEvent, useReducedMotion, useTransform } from 'motion/react';
 import type { BranchSummary, ScoreSummary } from '@/core/gateway/LibraryGateway';
 import { libraryGateway } from '@/core/gateway/defaultLibraryGateway';
-import { ScoreCover } from './ScoreCover';
-import { FitBadge } from './FitBadge';
-import { StarRating } from './StarRating';
-import { PreviewPlayButton } from './PreviewPlayButton';
-import { Button } from '@/ui/Button';
-import { ArrowLeftIcon, ChevronRightIcon, CloseIcon, CollapsePanelIcon } from '@/ui/icons';
-import { useLayoutSafeSpring, SPRING_PANEL_BOUNCE } from '@/styles/motion';
-import { requireAuth } from '@/core/auth/authPrompt';
+import type { ScorePlayback } from '@/core/playback/SavedScorePlayback';
 import { useAuthStore } from '@/core/auth/authStore';
+import { useAuthPrompt } from '@/core/auth/authPrompt';
+import { BROWSE_QUERY_KEYS, authorScoresQueryKey, invalidateBrowseQueries } from '@/core/gateway/browseQueryCache';
+import { errorMessage } from '@/core/errorMessage';
+import { Button } from '@/ui/Button';
+import { ChoiceGroup } from '@/ui/ChoiceGroup';
+import { OpenInEditorButton } from '@/ui/OpenInEditorButton';
+import { PanelToolbar, PanelToolbarControl } from '@/ui/PanelToolbar';
+import { ArrowLeftIcon, ChevronRightIcon, CloseIcon, CollapsePanelIcon } from '@/ui/icons';
+import { reducedFade, useSidePanelMotion } from '@/styles/motion';
+import { ScoreCover } from './ScoreCover';
+import { CollectionPicker } from './CollectionPicker';
+import { PreviewPlayButton } from './PreviewPlayButton';
 import { withPreview } from './previewRoute';
-import { BROWSE_QUERY_KEYS, invalidateBrowseQueries } from '@/core/gateway/browseQueryCache';
 
-const PANEL_W = 372;
-// Same injected velocities as the editor's LeftPanel — one panel-motion mechanic, not two
-// independently hand-tuned feels (see docs/browse-redesign.md for the reasoning).
-const OPEN_OVERSHOOT_VELOCITY = 5; // grows past PANEL_W before settling back to it
-const CLOSE_ANTICIPATE_VELOCITY = 6; // kicks toward open a touch before sliding fully out
+const privacyOptions = [
+  { value: 'private', label: 'Private' },
+  { value: 'public', label: 'Public' },
+];
+const message = (cause: unknown) => errorMessage(cause, 'Could not complete this action.');
 
-/** The single score-context surface. It is a reflowing right column on wide screens and the same
- *  component becomes a right-side drawer below that — never a second detail-page interaction.
- *
- *  Motion mechanic mirrors the editor's `LeftPanel` for the right edge: `layout` (critically
- *  damped, monotonic) is the ONLY value driving this panel's own real `width`, so wide content
- *  reflows smoothly with zero bounce while the fixed narrow drawer opens by that same width.
- *  `visual` (bouncy) drives ONLY `.preview-panel-inner`'s fixed-width transform — the panel
- *  content rides its own kick/overshoot as one rigid unit, same as `LeftPanel`'s `.lp-content`.
- *
- *  Mounted from `AppShell`'s FIRST render (`scoreId: string | null`, starts `null`), never gated
- *  on a piece being selected yet: `useLayoutSafeSpring` intentionally skips animating a value on a
- *  component's own first render (so a page that loads already-open, a deep link, doesn't replay
- *  its entrance) — that rule has to fire on a genuine "already open on load" case, not on this
- *  component's first real mount, or every session's first click would silently lose its own
- *  entrance animation. Closed state is `inert` — neither clickable nor tab-reachable at 0 width.
- *
- *  This panel owns the explicit next-step choices: practice, listen, or open an editable draft.
- *  The last action preserves the previous detail screen's auth gate and draft-from-score
- *  semantics without making the user navigate through a duplicate context page first. */
+/** Common saved-score context: a reserved right column or the same drawer over a narrow list. */
 export function PreviewPanel({
   scoreId,
   open,
+  transport,
   onCollapse,
   onClose,
   onMotionChange,
 }: {
+  transport: ScorePlayback;
   scoreId: string | null;
   open: boolean;
   onCollapse: () => void;
@@ -54,157 +42,213 @@ export function PreviewPanel({
   onMotionChange: (moving: boolean) => void;
 }) {
   const navigate = useNavigate();
-  const panelRef = useRef<HTMLElement | null>(null);
-  const panelScrollRef = useRef<HTMLDivElement | null>(null);
-  const { layout, visual } = useLayoutSafeSpring(open, {
-    visualSpring: SPRING_PANEL_BOUNCE,
-    openVelocity: OPEN_OVERSHOOT_VELOCITY,
-    closeVelocity: CLOSE_ANTICIPATE_VELOCITY,
-  });
-  const layoutWidth = useTransform(layout, (v) => Math.max(0, Math.min(1, v)) * PANEL_W);
-  // mirrored sign vs LeftPanel's `(v - 1) * OPEN_W` — this panel opens from the RIGHT edge, so
-  // "closed" is a POSITIVE offset (content sits past the right edge) not a negative one.
-  const visualX = useTransform(visual, (v) => (1 - v) * PANEL_W);
+  const location = useLocation();
+  const [params] = useSearchParams();
+  const currentId = open ? params.get('preview') ?? scoreId : scoreId;
+  const lastId = useRef(currentId);
+  if (currentId) lastId.current = currentId;
+  const id = currentId ?? lastId.current;
+  const userId = useAuthStore((state) => state.userId);
+  const authOpen = useAuthPrompt((state) => state.isOpen);
+  const panelRef = useRef<HTMLElement>(null);
+  const innerRef = useRef<HTMLDivElement>(null);
+  const closeRef = useRef<HTMLButtonElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
+  const wasOpen = useRef(false);
+  const reduce = useReducedMotion();
+  const { layout, visual } = useSidePanelMotion(open);
+  const panelWidth = useMotionValue(0);
+  const layoutWidth = useTransform(() => Math.max(0, Math.min(1, layout.get())) * panelWidth.get());
+  // Both aliases share the same quiet progress; reduced motion keeps the surface in place to fade.
+  const visualX = useTransform(() => (Math.max(0, Math.min(1, layout.get())) - (reduce ? 1 : visual.get())) * panelWidth.get());
+  const [moving, setMoving] = useState(false);
+  const [motionIntent, setMotionIntent] = useState(open);
+  const motionActive = moving || motionIntent !== open;
   const [parentScore, setParentScore] = useState<ScoreSummary | null>(null);
+  const [selectedVersion, setSelectedVersion] = useState<{ parentScoreId: string; score: ScoreSummary; loadedFor: string | null } | null>(null);
+  const editingScoreId = selectedVersion?.parentScoreId === id ? selectedVersion.score.id : id;
+  const score = selectedVersion?.parentScoreId === id ? (selectedVersion.loadedFor === userId ? selectedVersion.score : null) : parentScore;
   const [branches, setBranches] = useState<BranchSummary[]>([]);
-  const [selectedVersion, setSelectedVersion] = useState<{
-    parentScoreId: string;
-    branch: BranchSummary;
-  } | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [practiceSoon, setPracticeSoon] = useState(false);
+  const [loadedFor, setLoadedFor] = useState<string | null | undefined>(undefined);
+  const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [springMoving, setSpringMoving] = useState(false);
-  const reduceMotion = useReducedMotion();
-  const authed = useAuthStore((state) => state.status === 'authed');
-  const previousOpenRef = useRef(open);
-  const selectedBranch = selectedVersion?.parentScoreId === scoreId ? selectedVersion.branch : null;
-  const score = selectedBranch ?? parentScore;
-  // `open` changes in the render that precedes the spring effect. Including that edge directly
-  // hides the panel's native scrollbar before the first moving frame; the state keeps it hidden
-  // until the visual spring reports that it has actually settled (no guessed timeout).
-  const openChanged = previousOpenRef.current !== open;
-  const motionActive = springMoving || openChanged;
+  const generation = useRef(0);
+  const actionGeneration = useRef(0);
+  const locked = useRef(false);
+  const ready = !loading && parentScore?.id === id && loadedFor === userId;
+  const owner = ready && !!userId && score?.authorId === userId;
+  const audioError = useSyncExternalStore(transport.subscribe, () => {
+    const state = transport.getState();
+    return state.track?.id === score?.id ? state.error : null;
+  });
 
   useLayoutEffect(() => {
-    if (!openChanged) return;
-    previousOpenRef.current = open;
-    setSpringMoving(!reduceMotion);
-  }, [open, openChanged, reduceMotion]);
+    actionGeneration.current++;
+    locked.current = false;
+    setBusy(false);
+  }, [id, open, userId]);
 
-  useMotionValueEvent(visual, 'animationComplete', () => setSpringMoving(false));
-
-  // AppShell temporarily makes every scrollbar visually transparent while either of its panels
-  // is moving. Report the render-edge too, so the thumbs disappear before the first spring frame,
-  // and use the MotionValue's real completion rather than a guessed duration.
+  useLayoutEffect(() => {
+    const inner = innerRef.current;
+    if (!inner) return;
+    const measure = () => panelWidth.set(inner.offsetWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(inner);
+    return () => observer.disconnect();
+  }, [panelWidth]);
+  useLayoutEffect(() => {
+    if (motionIntent === open) return;
+    setMotionIntent(open);
+    setMoving(!reduce);
+  }, [open, motionIntent, reduce]);
+  useMotionValueEvent(visual, 'animationComplete', () => {
+    if (!reduce) setMoving(false);
+  });
   useLayoutEffect(() => {
     onMotionChange(motionActive);
     return () => {
       if (motionActive) onMotionChange(false);
     };
   }, [motionActive, onMotionChange]);
-
-  // React 18 treats `inert` as an unknown non-boolean attribute and drops `{inert: true}`. Set
-  // the native DOM property before paint instead: the closed panel and every descendant then
-  // leave pointer navigation, sequential focus, and the accessibility tree as one unit.
   useLayoutEffect(() => {
     const panel = panelRef.current;
     if (!panel) return;
-    if (!open && panel.contains(document.activeElement)) {
-      const activeCard = document.querySelector<HTMLElement>('.piece-card.active');
-      if (activeCard) activeCard.focus();
-      else if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    panel.inert = !open || authOpen;
+    if (open && !authOpen) {
+      const active = document.activeElement;
+      if (active instanceof HTMLElement && !panel.contains(active) && (!wasOpen.current || active.closest('.piece-card'))) opener.current = active;
+      if (!wasOpen.current) closeRef.current?.focus({ preventScroll: true });
+    } else if (!open) {
+      if (panel.contains(document.activeElement) || document.activeElement === document.body) {
+        const target = opener.current?.isConnected ? opener.current : document.querySelector<HTMLElement>('.piece-card.active, .scoped-search-input');
+        if (target) target.focus({ preventScroll: true });
+        else if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+      }
+      opener.current = null;
     }
-    panel.inert = !open;
-  }, [open]);
+    wasOpen.current = open;
+  }, [open, authOpen, id]);
 
   useEffect(() => {
-    if (!scoreId) return; // always-mounted; nothing selected yet
-    let cancelled = false;
+    const current = ++generation.current;
+    if (!open || !id) return;
+    setError(null);
     setLoading(true);
-    // Do NOT blank `score`/`branches` here — keep the previous piece's content visible until the
-    // new one resolves. A full "Loading…" shows only on the very first open, when there's nothing yet.
-    setPracticeSoon(false);
-    setError(null);
-    void libraryGateway.getScore(scoreId).then((s) => {
-      if (!cancelled) {
-        setParentScore(s);
+    const versionId = selectedVersion?.parentScoreId === id ? selectedVersion.score.id : null;
+    void Promise.all([libraryGateway.getScore(id), libraryGateway.listPublicBranches(id), versionId ? libraryGateway.getScore(versionId) : null])
+      .then(([value, versions, version]) => {
+        if (generation.current !== current) return;
+        setParentScore(value);
+        setBranches(versions);
+        setLoadedFor(userId);
         setLoading(false);
-      }
-    });
-    void libraryGateway.listPublicBranches(scoreId).then((b) => !cancelled && setBranches(b));
+        if (versionId) {
+          setSelectedVersion((previous) =>
+            previous?.parentScoreId === id && previous.score.id === versionId
+              ? version
+                ? { parentScoreId: id, score: version, loadedFor: userId }
+                : null
+              : previous,
+          );
+        }
+        if (!value) setError('This score is unavailable.');
+      })
+      .catch((cause) => {
+        if (generation.current !== current) return;
+        setParentScore(null);
+        setBranches([]);
+        setSelectedVersion(null);
+        setLoading(false);
+        setError(message(cause));
+      });
     return () => {
-      cancelled = true;
+      generation.current++;
     };
-  }, [scoreId]);
+  }, [id, open, userId]);
 
-  const showVersion = (branch: BranchSummary) => {
-    if (!scoreId) return;
-    setSelectedVersion({ parentScoreId: scoreId, branch });
-    setPracticeSoon(false);
-    setError(null);
-    panelScrollRef.current?.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
+  const invalidate = (authorId: string | null) => {
+    invalidateBrowseQueries('private', BROWSE_QUERY_KEYS.myScores, BROWSE_QUERY_KEYS.myDrafts);
+    invalidateBrowseQueries('public', BROWSE_QUERY_KEYS.publicScores, ...(authorId ? [authorScoresQueryKey(authorId)] : []));
   };
-
-  const showParent = () => {
-    setSelectedVersion(null);
-    setPracticeSoon(false);
+  const run = async (action: (current: number) => Promise<void>) => {
+    if (locked.current || !ready || !open) return;
+    const current = actionGeneration.current;
+    locked.current = true;
+    setBusy(true);
     setError(null);
-    panelScrollRef.current?.scrollTo({ top: 0, behavior: reduceMotion ? 'auto' : 'smooth' });
-  };
-
-  const openInEditor = () =>
-    requireAuth(async () => {
-      if (!score || busy) return;
-      setBusy(true);
-      setError(null);
-      try {
-        const { draftId } = await libraryGateway.createDraft(score.id);
-        invalidateBrowseQueries('private', BROWSE_QUERY_KEYS.myDrafts);
-        navigate(`/edit/${draftId}`);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : 'Failed to create a draft.');
-      } finally {
+    try {
+      await action(current);
+    } catch (cause) {
+      if (actionGeneration.current === current) setError(message(cause));
+    } finally {
+      if (actionGeneration.current === current) {
+        locked.current = false;
         setBusy(false);
       }
+    }
+  };
+  const changePrivacy = (value: string) => {
+    if (!score || !owner || score.isPublic === (value === 'public')) return;
+    const selected = score;
+    void run(async (current) => {
+      await libraryGateway.setScoreVisibility(selected.id, value === 'public');
+      invalidate(selected.authorId);
+      if (actionGeneration.current === current) {
+        const updated = { ...selected, isPublic: value === 'public' };
+        if (selected.id === id) setParentScore(updated);
+        else setSelectedVersion({ parentScoreId: id!, score: updated, loadedFor: userId });
+        setBranches((previous) =>
+          previous.map((branch) => (branch.id === selected.id ? { ...branch, isPublic: updated.isPublic } : branch)).filter((branch) => branch.isPublic),
+        );
+      }
     });
+  };
+  const openScore = () => {
+    if (score && ready && !busy) {
+      navigate(`/scores/${encodeURIComponent(score.id)}`, {
+        state: { returnTo: `${location.pathname}${location.search}` },
+      });
+    }
+  };
+  const selectBranch = (branch: BranchSummary) => {
+    if (!id) return;
+    setError(null);
+    setSelectedVersion({ parentScoreId: id, score: branch, loadedFor: userId });
+    innerRef.current?.querySelector('.preview-panel-content')?.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' });
+  };
+  const track = score ? { id: score.id, title: score.title, composer: score.composer, ...(score.id !== id && id ? { parentScoreId: id } : {}) } : null;
+  const shown = score && loadedFor === userId;
 
   return (
-    <motion.aside
-      ref={panelRef}
-      className="preview-panel"
-      aria-label="Piece preview"
-      style={{ width: layoutWidth }}
-    >
-      <motion.div className="preview-panel-inner" style={{ x: visualX }}>
-        <div className="preview-panel-toolbar">
-          <span className="preview-panel-toolbar-label">Preview</span>
-          <div className="preview-panel-controls">
-            <button
-              type="button"
-              className="icon-btn preview-panel-control"
-              onClick={onCollapse}
-              aria-label="Collapse preview panel"
-              title="Collapse preview panel"
-            >
-              <CollapsePanelIcon />
-            </button>
-            <button
-              type="button"
-              className="icon-btn preview-panel-control preview-panel-close"
-              onClick={onClose}
-              aria-label="Close preview and player"
-              title="Close preview and player"
-            >
-              <CloseIcon />
-            </button>
-          </div>
-        </div>
-
-        <div ref={panelScrollRef} className="preview-panel-content">
-          {selectedBranch && parentScore && (
-            <button type="button" className="preview-parent-link" onClick={showParent}>
+    <motion.aside ref={panelRef} className="preview-panel" data-open={open} aria-label="Score" aria-hidden={!open} style={{ width: layoutWidth }}>
+      <motion.div
+        ref={innerRef}
+        className="preview-panel-inner"
+        style={{ x: visualX }}
+        initial={false}
+        animate={{ opacity: reduce && !open ? 0 : 1 }}
+        transition={reducedFade}
+        onAnimationStart={() => {
+          if (reduce) setMoving(true);
+        }}
+        onAnimationComplete={() => {
+          if (reduce) setMoving(false);
+        }}
+      >
+        <PanelToolbar label="Preview">
+          {shown && userId && <CollectionPicker scoreId={score.id} />}
+          <PanelToolbarControl onClick={onCollapse} aria-label="Collapse preview panel" title="Collapse preview panel">
+            <CollapsePanelIcon />
+          </PanelToolbarControl>
+          <PanelToolbarControl ref={closeRef} onClick={onClose} className="preview-panel-close" aria-label="Close preview and player" title="Close preview and player">
+            <CloseIcon />
+          </PanelToolbarControl>
+        </PanelToolbar>
+        <div className="preview-panel-content" aria-busy={loading || busy}>
+          {selectedVersion?.parentScoreId === id && selectedVersion.loadedFor === userId && loadedFor === userId && parentScore?.id === id && (
+            <button type="button" className="preview-parent-link" disabled={!ready || busy} onClick={() => setSelectedVersion(null)}>
               <ArrowLeftIcon />
               <span className="preview-parent-link-copy">
                 <span className="preview-parent-link-label">Back to original</span>
@@ -212,95 +256,84 @@ export function PreviewPanel({
               </span>
             </button>
           )}
-          {loading && !score && <div className="preview-panel-loading">Loading…</div>}
-          {!loading && !score && (
-            <div className="preview-panel-empty">This piece isn’t in the catalog.</div>
-          )}
-
-          {score && (
-            <div className="preview-panel-body">
-              <div className="preview-panel-cover">
-                {/* The labeled transport directly below is the panel's one playback action. Repeating
-                    the same action as a hover overlay on this adjacent cover adds no capability. */}
-                <ScoreCover score={score} playable={false} />
-              </div>
-
-              <div className="preview-panel-titleblock">
-                <h2 className="preview-panel-title">{score.title}</h2>
-                <span className="preview-panel-composer">{score.composer ?? 'Unknown composer'}</span>
-                <Link
-                  className="preview-panel-author"
-                  to={withPreview(`/authors/${score.authorId}`, scoreId)}
-                >
-                  Arranged by {score.authorName}
-                </Link>
-              </div>
-
-              <div className="preview-panel-signals">
-                {authed && (
-                  <div className="preview-panel-signal">
-                    <span className="preview-panel-signal-label">Your fit</span>
-                    <FitBadge fit={score.difficultyFit} />
-                  </div>
-                )}
-                <div className="preview-panel-signal">
-                  <span className="preview-panel-signal-label">Arrangement</span>
-                  <StarRating rating={score.arrangementRating} />
-                </div>
-              </div>
-
-              <div className="preview-panel-actions">
-                <Button variant="primary" onClick={() => setPracticeSoon(true)}>
-                  Practice
-                </Button>
-                <PreviewPlayButton score={score} size="lg" label />
-                <Button variant="secondary" onClick={openInEditor} disabled={busy}>
-                  {busy ? 'Opening…' : 'Open in editor'}
-                </Button>
-              </div>
-
-              {practiceSoon && (
-                <p className="preview-panel-note">
-                  Practice mode is coming soon — you’ll play along with live feedback here. For now,
-                  listen to the preview or open an editable copy.
-                </p>
-              )}
-
-              {error && (
-                <p className="preview-panel-error" role="alert">
-                  {error}
-                </p>
-              )}
-
-              <button type="button" className="preview-panel-more" disabled>
-                See what drives your fit — soon
-              </button>
-
-              {branches.length > 0 && (
-                <section className="branch-list" aria-label="Other versions">
-                  <h3 className="branch-list-head">Other versions</h3>
-                  {branches.map((b) => (
-                    <div key={b.id} className={'branch-row' + (selectedBranch?.id === b.id ? ' selected' : '')}>
-                      <button
-                        type="button"
-                        className="branch-row-main"
-                        aria-current={selectedBranch?.id === b.id ? 'true' : undefined}
-                        onClick={() => showVersion(b)}
-                      >
-                        <span className="branch-row-title">{b.title}</span>
-                        <span className="branch-row-author">by {b.authorName}</span>
-                        <FitBadge fit={b.difficultyFit} />
-                        <span className="branch-row-state">
-                          {selectedBranch?.id === b.id ? 'Viewing' : <ChevronRightIcon />}
-                        </span>
-                      </button>
-                      <PreviewPlayButton score={b} size="sm" />
-                    </div>
-                  ))}
-                </section>
-              )}
+          {loading && (!score || loadedFor !== userId) && (
+            <div className="preview-panel-loading" role="status">
+              Loading score…
             </div>
           )}
+          {error && (
+            <p className="preview-panel-error" role="alert">
+              {error}
+            </p>
+          )}
+          <div className="preview-panel-body">
+            {shown && (
+              <>
+                <div className="preview-panel-cover">
+                  <ScoreCover score={score} />
+                </div>
+                <div className="preview-panel-titleblock">
+                  <h2 className="preview-panel-title">{score.title}</h2>
+                  {score.composer?.trim() && <span className="preview-panel-composer">{score.composer}</span>}
+                  {score.authorId && score.authorName && (
+                    <Link
+                      className="preview-panel-author"
+                      to={withPreview(`/authors/${encodeURIComponent(score.authorId)}`, id)}
+                      onClick={(event) => {
+                        if (!ready) event.preventDefault();
+                      }}
+                    >
+                      Arranged by {score.authorName}
+                    </Link>
+                  )}
+                </div>
+              </>
+            )}
+            <div className="preview-panel-actions">
+              {shown && track && <PreviewPlayButton score={track} transport={transport} size="lg" label disabled={!ready} />}
+              <Button variant="secondary" onClick={openScore} disabled={!ready || !score || busy}>
+                Open score
+              </Button>
+              {editingScoreId && <OpenInEditorButton scoreId={editingScoreId} disabled={!ready || !score || busy} active={open} />}
+            </div>
+            {shown && (
+              <>
+                {audioError && (
+                  <p className="preview-panel-error" role="alert">
+                    {audioError}
+                  </p>
+                )}
+                {owner && (
+                  <fieldset className="score-privacy preview-panel-privacy" disabled={!ready || busy}>
+                    <legend>Privacy</legend>
+                    <ChoiceGroup ariaLabel="Score privacy" value={score.isPublic ? 'public' : 'private'} onChange={changePrivacy} options={privacyOptions} />
+                    <p>{score.isPublic ? 'Visible to everyone in Explore.' : 'Only you can open this score.'}</p>
+                  </fieldset>
+                )}
+                {!!branches.length && (
+                  <section className="branch-list" aria-label="Other versions">
+                    <h3 className="branch-list-head">Other versions</h3>
+                    {branches.map((branch) => (
+                      <div key={branch.id} className={'branch-row' + (score.id === branch.id ? ' selected' : '')}>
+                        <button
+                          type="button"
+                          className="branch-row-main"
+                          disabled={!ready || busy}
+                          aria-current={score.id === branch.id ? 'true' : undefined}
+                          onClick={() => selectBranch(branch)}
+                        >
+                          <span className="branch-row-title">{branch.title}</span>
+                          {branch.authorName && <span className="branch-row-author">by {branch.authorName}</span>}
+                          <span className="branch-row-state">{score.id === branch.id ? 'Viewing' : <ChevronRightIcon />}</span>
+                        </button>
+                        <PreviewPlayButton score={branch} transport={transport} size="sm" disabled={!ready} />
+                      </div>
+                    ))}
+                  </section>
+                )}
+              </>
+            )}
+          </div>
         </div>
       </motion.div>
     </motion.aside>
