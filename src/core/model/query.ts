@@ -1,4 +1,5 @@
-import type { Item, NoteRef, ScoreDocument } from './score';
+import { measureBeats } from './contexts';
+import type { ContextCoverage, GraceGroup, Item, NoteRef, ScoreDocument } from './score';
 
 /** An item's own individually-selectable ids — its chord's several note ids, or (a rest) its
  *  own carrier id as a single-element fallback. Every group-select helper below (`selectedIds`
@@ -6,6 +7,26 @@ import type { Item, NoteRef, ScoreDocument } from './score';
  *  inside a selected voice/staff/measure highlights ALL its notes, not nothing. */
 function itemNoteIds(item: Item): string[] {
   return item.notes.length ? item.notes.map((n) => n.noteId) : [item.id];
+}
+
+/** The items of a voice in one measure with each item's grace carriers beside it, in the order they are
+ *  played, the grace carriers as items of their own (marked by `grace`). A grace note is selected, edited
+ *  and deleted by its own ids like the notes of any carrier, so every lookup by id goes through this. */
+export function withGraces(items: Item[]): Item[] {
+  return items.flatMap((item) => {
+    const asItems = (group: GraceGroup | null | undefined, side: 'before' | 'after'): Item[] =>
+      group ? group.carriers.map((carrier) => ({
+        id: carrier.id,
+        kind: 'note',
+        duration: carrier.duration,
+        dots: carrier.dots,
+        position: item.position,
+        notes: carrier.notes,
+        articulations: carrier.articulations,
+        grace: { hostId: item.id, side, kind: group.kind },
+      })) : [];
+    return [...asItems(item.graceBefore, 'before'), item, ...asItems(item.graceAfter, 'after')];
+  });
 }
 
 export interface NoteLocation {
@@ -21,7 +42,7 @@ export interface NoteLocation {
 export function locate(doc: ScoreDocument, id: string): NoteLocation | null {
   for (const m of doc.measures) {
     for (const v of m.voices) {
-      for (const item of v.items) {
+      for (const item of withGraces(v.items)) {
         if (item.kind === 'rest') {
           if (item.id === id && item.staffId) return { measureId: m.id, staffId: item.staffId, voiceId: v.id };
           continue;
@@ -44,7 +65,7 @@ export function locate(doc: ScoreDocument, id: string): NoteLocation | null {
 export function chordNoteIds(doc: ScoreDocument, carrierId: string): string[] {
   for (const m of doc.measures) {
     for (const v of m.voices) {
-      const item = v.items.find((x) => x.id === carrierId);
+      const item = withGraces(v.items).find((x) => x.id === carrierId);
       if (item) return itemNoteIds(item);
     }
   }
@@ -57,7 +78,7 @@ export function chordNoteIds(doc: ScoreDocument, carrierId: string): string[] {
 export function carrierIdOf(doc: ScoreDocument, id: string): string {
   for (const m of doc.measures) {
     for (const v of m.voices) {
-      for (const item of v.items) {
+      for (const item of withGraces(v.items)) {
         if (item.id === id || item.notes.some((n) => n.noteId === id)) return item.id;
       }
     }
@@ -70,7 +91,7 @@ export function carrierIdOf(doc: ScoreDocument, id: string): string {
 export function itemOf(doc: ScoreDocument, carrierId: string): Item | null {
   for (const m of doc.measures) {
     for (const v of m.voices) {
-      const item = v.items.find((x) => x.id === carrierId);
+      const item = withGraces(v.items).find((x) => x.id === carrierId);
       if (item) return item;
     }
   }
@@ -101,7 +122,7 @@ export function physicalNoteOrder(doc: ScoreDocument, item: Item): string[] {
  *  different staff). */
 export function voiceNoteIds(doc: ScoreDocument, measureId: string, voiceId: string): string[] {
   const v = doc.measures.find((m) => m.id === measureId)?.voices.find((x) => x.id === voiceId);
-  return v ? v.items.flatMap(itemNoteIds) : [];
+  return v ? withGraces(v.items).flatMap(itemNoteIds) : [];
 }
 
 /** Every individually-selectable note id landing on one staff within one measure, across all
@@ -112,7 +133,7 @@ export function staffNoteIds(doc: ScoreDocument, measureId: string, staffId: str
   if (!m) return [];
   const ids: string[] = [];
   for (const v of m.voices) {
-    for (const item of v.items) {
+    for (const item of withGraces(v.items)) {
       if (item.kind === 'rest') {
         if (item.staffId === staffId) ids.push(item.id);
         continue;
@@ -129,15 +150,15 @@ export function voiceCarrierIds(doc: ScoreDocument, voiceId: string): string[] {
   const ids: string[] = [];
   for (const m of doc.measures) {
     const v = m.voices.find((x) => x.id === voiceId);
-    if (v) ids.push(...v.items.flatMap(itemNoteIds));
+    if (v) ids.push(...withGraces(v.items).flatMap(itemNoteIds));
   }
   return ids;
 }
 
 /** One entry PER CARRIER (chord/rest, `item.id` — not exploded to individual note ids like
- *  `voiceCarrierIds`) of a global voice, in document order across measures. Used for arrow-key
- *  carrier-to-carrier navigation: a measure the voice has nothing in simply contributes no id, so
- *  a multi-measure gap in that voice is skipped over for free — no separate "find next" search. */
+ *  `voiceCarrierIds`) of a global voice, in document order across measures. Metric operations such
+ *  as beaming exclude grace carriers; selection navigation has its own order below. A measure the
+ *  voice has nothing in contributes no id. */
 export function orderedVoiceCarrierIds(doc: ScoreDocument, voiceId: string): string[] {
   const ids: string[] = [];
   for (const m of doc.measures) {
@@ -147,9 +168,72 @@ export function orderedVoiceCarrierIds(doc: ScoreDocument, voiceId: string): str
   return ids;
 }
 
+/** Selection walks every carrier in reading order, including both sides of a host's grace groups.
+ *  Metric carrier order stays separate for operations such as beaming. */
+export function orderedVoiceNavigationIds(doc: ScoreDocument, voiceId: string): string[] {
+  return doc.measures.flatMap(measure => {
+    const voice = measure.voices.find(candidate => candidate.id === voiceId);
+    return voice ? withGraces(voice.items).map(item => item.id) : [];
+  });
+}
+
 export function measureNoteIds(doc: ScoreDocument, measureId: string): string[] {
   const m = doc.measures.find((x) => x.id === measureId);
-  return m ? m.voices.flatMap((v) => v.items.flatMap(itemNoteIds)) : [];
+  return m ? m.voices.flatMap((v) => withGraces(v.items).flatMap(itemNoteIds)) : [];
+}
+
+
+export interface ContentSelection {
+  noteIds: string[];
+  carrierIds: string[];
+  structureIds: string[];
+}
+
+/** Group picks colour the complete local glyph, including a selected half of a cross-staff chord.
+ *  A relation belongs to the pick only when all of its members belong to it. */
+export function contentSelection(doc: ScoreDocument, noteIds: string[], contextIds: string[] = []): ContentSelection {
+  const picked = new Set(noteIds);
+  const carrierIds = [...new Set(noteIds.map(id => carrierIdOf(doc, id)))];
+  const whole = new Set(carrierIds.filter(id => chordNoteIds(doc, id).every(noteId => picked.has(noteId))));
+  const relations = [...doc.beams, ...doc.tuplets].filter(relation =>
+    relation.carrierIds.length > 0 && relation.carrierIds.every(id => whole.has(id))).map(relation => relation.id);
+  const ties = [...doc.ties, ...doc.glissandos].filter(tie => picked.has(tie.startNoteId) && picked.has(tie.endNoteId)).map(tie => tie.id);
+  return { noteIds: [...picked], carrierIds, structureIds: [...new Set([...relations, ...ties, ...contextIds])] };
+}
+
+export function measureContentSelection(doc: ScoreDocument, measureId: string, staffId?: string): ContentSelection {
+  if (!doc.measures.some(measure => measure.id === measureId)) return { noteIds: [], carrierIds: [], structureIds: [] };
+  const contextIds = doc.contexts.filter(context => context.measureId === measureId
+    && 'staffId' in context && (!staffId || context.staffId === staffId)).map(context => context.id);
+  return contentSelection(doc, staffId ? staffNoteIds(doc, measureId, staffId) : measureNoteIds(doc, measureId), contextIds);
+}
+
+/** What belongs to a relation: the notes of its members, and so everything those notes make whole
+ *  (a beam or tuplet over exactly them, a tie between them). A beam and a tuplet name carriers, a
+ *  tie its two notes. */
+export function relationContentSelection(doc: ScoreDocument, relationId: string): ContentSelection {
+  const tie = [...doc.ties, ...doc.glissandos].find(candidate => candidate.id === relationId);
+  if (tie) return contentSelection(doc, [tie.startNoteId, tie.endNoteId]);
+  const carrierIds = [...doc.beams, ...doc.tuplets].find(candidate => candidate.id === relationId)?.carrierIds;
+  if (!carrierIds) return { noteIds: [], carrierIds: [], structureIds: [] };
+  return contentSelection(doc, carrierIds.flatMap(id => chordNoteIds(doc, id)));
+}
+
+/** What a context is applied to, as the backend answers (it owns the rule): the covered notes and
+ *  the covered rests, with the context itself. */
+export function contextContentSelection(doc: ScoreDocument, contextId: string, coverage: ContextCoverage): ContentSelection {
+  const restIds = coverage.carrierIds.filter(id => itemOf(doc, id)?.kind === 'rest');
+  return contentSelection(doc, [...coverage.noteIds, ...restIds], [contextId]);
+}
+
+/** Empty-space staff gestures are bounded by its five lines, including the outer lines. */
+export function staffContainsPoint(zone: { x0: number; x1: number; bottomLineY: number; stepPx: number }, x: number, y: number): boolean {
+  return x >= zone.x0 && x <= zone.x1 && y >= zone.bottomLineY - 8 * zone.stepPx && y <= zone.bottomLineY;
+}
+
+export function splitBeamTarget(doc: ScoreDocument, carrierId: string): { beamId: string; beforeCarrierId: string } | null {
+  const beam = doc.beams.find(candidate => candidate.carrierIds.indexOf(carrierId) > 0);
+  return beam ? { beamId: beam.id, beforeCarrierId: carrierId } : null;
 }
 
 /** One carrier (chord/rest) touched by the current selection, with which of its notes are picked. */
@@ -181,7 +265,7 @@ export function describeSelection(doc: ScoreDocument, selectedIds: string[]): Se
   let restCount = 0;
   for (const m of doc.measures) {
     for (const v of m.voices) {
-      for (const item of v.items) {
+      for (const item of withGraces(v.items)) {
         if (item.kind === 'rest') {
           if (ids.has(item.id)) {
             carriers.push({ item, measureId: m.id, voiceId: v.id, notes: [], whole: true });
@@ -204,4 +288,35 @@ export function describeSelection(doc: ScoreDocument, selectedIds: string[]): Se
     }
   }
   return { carriers, noteCount, restCount };
+}
+
+/** Where `timeBeats` (quarter beats from the start) falls: the 0-based measure index and the 1-based
+ *  beat in that measure's own beat unit (a 6/8 bar counts eighths). Bars accumulate exactly as the
+ *  renderer's time map does (`beats * 4 / beatValue` quarter beats each), so the transport readout,
+ *  the current-bar wash and the playback cursor always agree. */
+export function barAtBeat(doc: ScoreDocument, timeBeats: number): { index: number; beat: number } {
+  let start = 0;
+  for (let i = 0; i < doc.measures.length; i++) {
+    const { beats, beatValue } = doc.measures[i].timeSignature;
+    const length = measureBeats(doc.measures[i].timeSignature);
+    if (timeBeats < start + length || i === doc.measures.length - 1) {
+      const unit = length / beats;
+      return { index: i, beat: Math.min(beats, Math.floor((timeBeats - start) / unit + 1e-6) + 1) };
+    }
+    start += length;
+  }
+  return { index: 0, beat: 1 };
+}
+
+/** Every selectable entity id in the document — each note of a chord, and each rest — with its
+ *  kind. */
+export function entityKinds(doc: ScoreDocument): Map<string, 'note' | 'rest'> {
+  const kinds = new Map<string, 'note' | 'rest'>();
+  for (const m of doc.measures)
+    for (const v of m.voices)
+      for (const item of withGraces(v.items)) {
+        if (item.kind === 'rest') kinds.set(item.id, 'rest');
+        else item.notes.forEach((n) => kinds.set(n.noteId, 'note'));
+      }
+  return kinds;
 }
