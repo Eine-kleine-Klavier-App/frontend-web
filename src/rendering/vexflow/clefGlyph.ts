@@ -3,6 +3,7 @@
 // SVG — is what DESIGN.md mandates for music glyphs in the UI; it also keeps the cover mark in the
 // same visual family as the engraved score.
 import { Glyph, Renderer } from 'vexflow';
+import { createScratchHost } from './scratchHost';
 
 export interface GlyphMarkup {
   /** `<path>` outerHTML, translated so the glyph's bounding box starts at (0,0). */
@@ -15,14 +16,7 @@ const cache = new Map<string, GlyphMarkup>();
 
 let scratchHost: HTMLDivElement | null = null;
 function getScratchHost(): HTMLDivElement {
-  if (scratchHost) return scratchHost;
-  scratchHost = document.createElement('div');
-  scratchHost.style.position = 'absolute';
-  scratchHost.style.top = '0';
-  scratchHost.style.left = '-9999px';
-  scratchHost.style.visibility = 'hidden';
-  scratchHost.style.pointerEvents = 'none';
-  document.body.appendChild(scratchHost);
+  scratchHost ??= createScratchHost();
   return scratchHost;
 }
 

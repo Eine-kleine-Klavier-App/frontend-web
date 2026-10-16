@@ -1,6 +1,13 @@
 // Shared between VexflowRenderer.tsx (real score) and noteGlyph.ts (toolbar icon + insert-ghost)
 // so the whole-note correction can never drift between the two rendering paths.
 import { Renderer, Stave, StaveNote, Voice, Formatter, Stem } from 'vexflow';
+import { createScratchHost } from './scratchHost';
+
+/** the gap between two staff lines, in score units — VexFlow's own stave spacing; every engraving
+ *  distance in the score, the overlay and the context marks is a multiple of it */
+export const STAFF_SPACE = 10;
+/** the room a start-of-repeat sign takes at the start of a system, between the time signature and the first note */
+export const REPEAT_SIGN_ROOM = 3.4 * STAFF_SPACE;
 
 // VexFlow silently adds a fixed offset to a note's rendered x beyond what
 // `staff.getNoteStartX() + <formatter x>` predicts (constant ~12px, independent of
@@ -10,13 +17,7 @@ import { Renderer, Stave, StaveNote, Voice, Formatter, Stem } from 'vexflow';
 let cachedNotePadding: number | null = null;
 export function getNotePaddingPx(): number {
   if (cachedNotePadding !== null) return cachedNotePadding;
-  const host = document.createElement('div');
-  host.style.position = 'absolute';
-  host.style.top = '0';
-  host.style.left = '-9999px';
-  host.style.visibility = 'hidden';
-  host.style.pointerEvents = 'none';
-  document.body.appendChild(host);
+  const host = createScratchHost();
   const renderer = new Renderer(host, Renderer.Backends.SVG);
   renderer.resize(300, 300);
   const ctx = renderer.getContext();
@@ -132,24 +133,33 @@ export interface Box {
 // excludes the element's OWN transform, so it would keep reporting the pre-shrink box).
 export function shrinkWholeNotehead(staveNoteGroup: SVGElement | null | undefined): Box | null {
   if (!staveNoteGroup) return null;
-  const notehead = staveNoteGroup.querySelector<SVGGraphicsElement>('.vf-notehead');
-  if (!notehead) return null;
-  const box = notehead.getBBox();
-  const cx = box.x + box.width / 2;
-  const cy = box.y + box.height / 2;
-  const ledger = [...staveNoteGroup.children].find((el): el is SVGPathElement => {
-    if (el.tagName !== 'path' || notehead.contains(el)) return false;
-    const d = el.getAttribute('d') ?? '';
-    const m = d.match(/^M([\d.-]+) ([\d.-]+)L([\d.-]+) ([\d.-]+)/);
-    return !!m && Math.abs(parseFloat(m[2]) - parseFloat(m[4])) < 0.01 && Math.abs(parseFloat(m[1]) - parseFloat(m[3])) > 5;
-  });
-  const targetCx = ledger ? ledger.getBBox().x + ledger.getBBox().width / 2 : cx;
-  const dx = targetCx - cx;
-  notehead.setAttribute(
-    'transform',
-    `translate(${dx} 0) translate(${cx} ${cy}) scale(${WHOLE_NOTE_GLYPH_SCALE}) translate(${-cx} ${-cy})`,
-  );
-  const width = box.width * WHOLE_NOTE_GLYPH_SCALE;
-  const height = box.height * WHOLE_NOTE_GLYPH_SCALE;
-  return { x: targetCx - width / 2, y: cy - height / 2, width, height };
+  const noteheads = [...staveNoteGroup.querySelectorAll<SVGGraphicsElement>('.vf-notehead')];
+  if (!noteheads.length) return null;
+  // every notehead of a chord shrinks, or the whole notes inside one chord come out in two sizes
+  // (the returned box is the first one's, which is the only one a single note has)
+  const ledger =
+    noteheads.length === 1
+      ? [...staveNoteGroup.children].find((el): el is SVGPathElement => {
+          if (el.tagName !== 'path' || noteheads[0].contains(el)) return false;
+          const d = el.getAttribute('d') ?? '';
+          const m = d.match(/^M([\d.-]+) ([\d.-]+)L([\d.-]+) ([\d.-]+)/);
+          return !!m && Math.abs(parseFloat(m[2]) - parseFloat(m[4])) < 0.01 && Math.abs(parseFloat(m[1]) - parseFloat(m[3])) > 5;
+        })
+      : undefined;
+  let first: Box | null = null;
+  for (const notehead of noteheads) {
+    const box = notehead.getBBox();
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    const targetCx = ledger ? ledger.getBBox().x + ledger.getBBox().width / 2 : cx;
+    const dx = targetCx - cx;
+    notehead.setAttribute(
+      'transform',
+      `translate(${dx} 0) translate(${cx} ${cy}) scale(${WHOLE_NOTE_GLYPH_SCALE}) translate(${-cx} ${-cy})`,
+    );
+    const width = box.width * WHOLE_NOTE_GLYPH_SCALE;
+    const height = box.height * WHOLE_NOTE_GLYPH_SCALE;
+    first ??= { x: targetCx - width / 2, y: cy - height / 2, width, height };
+  }
+  return first;
 }
