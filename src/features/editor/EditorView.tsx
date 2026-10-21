@@ -1,79 +1,90 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { animate, motion, useMotionValue, useReducedMotion, useSpring, useTransform } from 'motion/react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { animate, motion, useMotionValue, useReducedMotion, useSpring } from 'motion/react';
 import type { AnimationPlaybackControls } from 'motion/react';
 import { useEditor } from '@/app/store';
 import { VexflowRenderer } from '@/rendering/vexflow/VexflowRenderer';
 import { Overlay } from './Overlay';
-import type { ScoreLayout, MeasureBox } from '@/rendering/ScoreRenderer';
+import type { ScoreLayout } from '@/rendering/ScoreRenderer';
+import { StaffMarker } from './StaffMarker';
+import type { BeamOverride } from '@/core/model/score';
+import type { SlurOffsets } from '@/core/model/slurHandles';
+import type { SpanPreview } from '@/rendering/ScoreRenderer';
 import { playback } from '@/core/playback/PlaybackController';
 import { SPRING_SMOOTH } from '@/styles/motion';
+import { visibleBottom } from './visibleBottom';
+import { readCssLength } from '@/ui/cssLength';
+import { SCORE_MARGIN_X } from '@/rendering/vexflow/VexflowRenderer';
 
-// Mode-switch wipe timings (DESIGN.md §3.5 mode case). Erase is a quick accelerate-out; the redraw
-// is slower and decelerates, so the new mode reads as being progressively drawn back in, not popped.
-const ERASE_S = 0.19;
-const REDRAW_S = 0.4;
-
-/** The measure closest to the top-left of the current viewport, in the given mode — line mode
- *  cares about horizontal scroll only (one row), page mode about vertical (which row is topmost;
- *  `measures` is already in row-major, left-to-right document order, so the first measure not yet
- *  fully scrolled past vertically IS that row's leftmost one, no separate column search needed). */
-function computeAnchorMeasureId(
-  measures: MeasureBox[],
-  mode: 'line' | 'page',
-  scrollLeft: number,
-  scrollTop: number,
-  zoom: number,
-): string | null {
-  if (!measures.length) return null;
-  if (mode === 'line') {
-    const viewX = scrollLeft / zoom;
-    for (const m of measures) if (m.x + m.w > viewX + 1) return m.id;
-    return measures[measures.length - 1].id;
-  }
-  const viewY = scrollTop / zoom;
-  for (const m of measures) if (m.y + m.h > viewY + 1) return m.id;
-  return measures[measures.length - 1].id;
+// Sheet geometry comes from the stylesheet's tokens (one source), resolved to pixels:
+// `--sheet-gutter` (the canvas's side padding = browse's gutter), `--sheet-max` (a page, not a
+// banner), `--paper-frame` (the paper's padding, both sides, plus slack) and `--title-band` (the
+// engraved title block above the score — added to the paper's height, never part of the score's
+// own coordinates, so the overlay and hit-testing are untouched).
+interface SheetGeometry {
+  gutter: number;
+  max: number;
+  frame: number;
+  band: number;
+}
+function readSheetGeometry(el: Element): SheetGeometry {
+  return {
+    gutter: readCssLength(el, '--sheet-gutter'),
+    max: readCssLength(el, '--sheet-max'),
+    frame: readCssLength(el, '--paper-frame'),
+    band: readCssLength(el, '--title-band'),
+  };
 }
 
-/** Scrolls so `anchorId` lands exactly at the viewport's leading edge in the given mode — the
- *  leftmost column (line) or the top row (page). Instant: it fires while the content is still fully
- *  clipped (erased), so the jump itself is invisible; only the redraw reads as motion. */
-function scrollToAnchor(
-  el: HTMLDivElement,
-  measures: MeasureBox[],
-  mode: 'line' | 'page',
-  anchorId: string,
-  zoom: number,
-): void {
-  const m = measures.find((mm) => mm.id === anchorId);
-  if (!m) return;
-  if (mode === 'line') {
-    el.scrollLeft = m.x * zoom;
-    el.scrollTop = 0;
-  } else {
-    el.scrollTop = m.y * zoom;
-    el.scrollLeft = 0;
-  }
+/** Layout changes may generate hover events under a stationary pointer after keyboard navigation. */
+export function createHoverFeedback(show: (ids: string[]) => void) {
+  let keyboard = false;
+  return {
+    keyboardMove() { keyboard = true; show([]); },
+    pointerMove() { keyboard = false; },
+    hover(ids: string[]) { if (!keyboard) show(ids); },
+  };
 }
 
-export function EditorView() {
+export function EditorView({ title }: { title?: string } = {}) {
+  const tool = useEditor(s => s.tool);
+  const reading = useEditor(s => s.source?.kind === 'saved');
   const document = useEditor((s) => s.document);
   const selectedIds = useEditor((s) => s.selectedIds);
   const carrierSelectedIds = useEditor((s) => s.carrierSelectedIds);
-  const storeMode = useEditor((s) => s.canvasMode);
   const zoom = useEditor((s) => s.zoom);
   const voiceColors = useEditor((s) => s.voiceColors);
   const stemOverrides = useEditor((s) => s.stemOverrides);
   const [layout, setLayout] = useState<ScoreLayout | null>(null);
+  const [beamPreview, setBeamPreview] = useState<{ id: string; override: BeamOverride; anchorId: string | null } | null>(null);
+  const [slurPreview, setSlurPreview] = useState<{ id: string; offsets: SlurOffsets } | null>(null);
+  const [placementPreview, setPlacementPreview] = useState<{ id: string; factor: number } | null>(null);
+  const [spanPreview, setSpanPreview] = useState<SpanPreview | null>(null);
+  const beamLayoutRef = useRef<ScoreLayout | null>(null);
+  const beamAnchorRef = useRef<{ id: string; screenY: number; overflowAnchor: string; releaseLayout: ScoreLayout | null } | null>(null);
   const [hoveredNoteIds, setHoveredNoteIds] = useState<string[]>([]);
+  const [hoverFeedback] = useState(() => createHoverFeedback(ids =>
+    setHoveredNoteIds(previous => previous.length === ids.length && previous.every((id, index) => id === ids[index]) ? previous : ids)));
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && (['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName) || target.isContentEditable)) return;
+      if (!event.metaKey && !event.ctrlKey && !event.altKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) hoverFeedback.keyboardMove();
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [hoverFeedback]);
+  useEffect(() => { if (tool !== 'select') hoverFeedback.keyboardMove(); }, [tool, hoverFeedback]);
+  const selectedStructureIds = useEditor((s) => s.selectedStructureIds);
+  const selectedMeasureIds = useEditor((s) => s.selectedMeasureIds);
+  // everything picked that is engraved as one object rather than as notes: beams, tuplets and clefs
+  // by their own ids, and a picked measure's time signature
+  const selectedObjectIds = [...selectedStructureIds, ...selectedMeasureIds.map((id) => `ts:${id}`)];
+  // what the last insert created, flashed once in its voice colour (a fresh object per insert, so
+  // the same ids inserted again still flash)
+  const [flash, setFlash] = useState<{ ids: string[] } | null>(null);
+  const onInserted = useCallback((ids: string[]) => setFlash({ ids }), []);
 
   const reduce = useReducedMotion();
-
-  // Mode actually being RENDERED — decoupled from the store's `canvasMode` so the OLD content can be
-  // erased before the new mode's layout replaces it.
-  const [displayMode, setDisplayMode] = useState(storeMode);
-  const displayModeRef = useRef(displayMode);
-  displayModeRef.current = displayMode;
 
   const canvasAreaRef = useRef<HTMLDivElement>(null);
   const scoreContentRef = useRef<HTMLDivElement>(null);
@@ -83,21 +94,29 @@ export function EditorView() {
     playback.setTotalBeats(l.totalBeats);
   }, []);
 
-  // Reflow-zoom (page mode): rendered page width stays pinned to `.canvas-area`'s available
-  // width regardless of zoom, so page mode never needs horizontal scroll — zoom only changes how
-  // much content fits per system. Recomputed off the store's `zoom` (commits instantly, unlike
+  // Reflow-zoom: the rendered sheet width stays pinned to the desk's available width (capped at
+  // SHEET_MAX_W) regardless of zoom, so the sheet never needs horizontal scroll — zoom only changes
+  // how much content fits per system. Recomputed off the store's `zoom` (commits instantly, unlike
   // the animated `scale`), which does trigger a fresh layout per click; also watches
-  // `.canvas-area`'s own size via `ResizeObserver` for window resizes and panel toggles.
+  // `.canvas-area`'s own size via `ResizeObserver` for window resizes.
   const [pageContentWidth, setPageContentWidth] = useState<number | undefined>(undefined);
-  useEffect(() => {
+  // the sheet's token geometry in pixels; re-read with every size change (a font-size change
+  // reflows the canvas too, so the ResizeObserver below catches it)
+  const geometryRef = useRef<SheetGeometry>({ gutter: 0, max: 0, frame: 0, band: 0 });
+  // the page's width and the content width asked of the layout for it
+  const pageWidthRef = useRef({ available: 0, requested: 0 });
+  useLayoutEffect(() => {
     const area = canvasAreaRef.current;
     if (!area) return;
     const recompute = () => {
-      // Inverts EditorView's own `paperW` formula (`w*zoom + 48`) and VexflowRenderer's page-mode
-      // `totalW = 2*MARGIN_L(24) + pageContentWidth` against the actual available box, so the
-      // result is exactly what was already correct at 100% zoom, just generalized to any zoom.
-      const available = area.clientWidth - 48; // minus .canvas-area's own --space-6 padding (24px * 2)
-      const target = (available - 48) / zoom - 48; // minus paperW's own +48, then MARGIN_L*2
+      const g = (geometryRef.current = readSheetGeometry(area));
+      // Inverts EditorView's own `paperW` formula (`w*zoom + frame`) and VexflowRenderer's
+      // `totalW = SCORE_MARGIN_X + pageContentWidth` against the actual available box:
+      // the sheet is min(--sheet-max, column − 2 gutters).
+      const available = Math.min(area.clientWidth - 2 * g.gutter, g.max);
+      const target = (available - g.frame) / zoom - SCORE_MARGIN_X;
+      pageWidthRef.current = { available, requested: Math.max(200, target) };
+      syncSizes();
       setPageContentWidth(Math.max(200, target));
     };
     recompute();
@@ -111,6 +130,20 @@ export function EditorView() {
   // desync. A content edit leaves the spring at rest, so the size transforms recompute to the new
   // w/h instantly — edits never lag.
   const scale = useSpring(zoom, SPRING_SMOOTH);
+  const onBeamPreview = useCallback((preview: { id: string; override: BeamOverride; anchorId: string | null } | null) => {
+    if (preview?.anchorId && beamAnchorRef.current?.id !== preview.anchorId) {
+      const area = canvasAreaRef.current;
+      const content = scoreContentRef.current;
+      const box = beamLayoutRef.current?.noteBoxes.find(note => note.id === preview.anchorId);
+      if (area && content && box) {
+        const screenY = content.getBoundingClientRect().top + (box.y + box.h / 2) * scale.get();
+        beamAnchorRef.current = { id: preview.anchorId, screenY, overflowAnchor: area.style.overflowAnchor, releaseLayout: null };
+        area.style.overflowAnchor = 'none';
+      }
+    }
+    if (!preview && beamAnchorRef.current) beamAnchorRef.current.releaseLayout = beamLayoutRef.current;
+    setBeamPreview(preview);
+  }, [scale]);
   useEffect(() => {
     if (reduce) scale.jump(zoom);
     else scale.set(zoom);
@@ -155,7 +188,8 @@ export function EditorView() {
   }, [zoom]);
 
   // Keep the selection in view, smoothly — arrow-key carrier navigation (EditorScreen.tsx) can move the
-  // selection past the edge of what's currently scrolled into view, in both line and page mode.
+  // selection past the edge of what's currently scrolled into view, and a click near the bottom
+  // can land under the dock or the inspector sheet.
   // Same idea as the zoom-center fix above (animate `.canvas-area`'s scroll, don't jump it), same
   // spring preset as everything else chrome-weight (`SPRING_SMOOTH`, §3.5) — deliberately a ONE-
   // SHOT animation (current scroll -> a computed target), not a continuously-live value like
@@ -189,7 +223,7 @@ export function EditorView() {
     const viewLeft = areaRect.left;
     const viewRight = areaRect.left + areaRect.width;
     const viewTop = areaRect.top;
-    const viewBottom = areaRect.top + areaRect.height;
+    const viewBottom = visibleBottom(area);
 
     // already fully on screen — don't yank the view for a selection change that's already visible
     // (a plain click), only rescue one that navigated past the edge.
@@ -220,145 +254,127 @@ export function EditorView() {
 
   const w = layout?.width ?? 0;
   const h = layout?.height ?? 0;
-  const dimsRef = useRef({ w, h });
-  dimsRef.current = { w, h };
-
-  const paperW = useTransform(scale, (z) => dimsRef.current.w * z + 48);
-  const paperH = useTransform(scale, (z) => dimsRef.current.h * z + 48);
-  const scaleW = useTransform(scale, (z) => dimsRef.current.w * z);
-  const scaleH = useTransform(scale, (z) => dimsRef.current.h * z);
-
-  // --- MODE SWITCH: erase along the old axis → redraw along the new axis, no ghost. ---
-  // `wipe`: 0 = fully drawn (visible), 1 = fully erased. Implemented as `overflow: hidden` on a
-  // dedicated `.score-wipe` wrapper whose own box size shrinks/grows — NOT `clip-path` on the
-  // `scale`-transformed content itself. `clip-path` animated together with `transform` on an
-  // element containing a big SVG tree, inside a SCROLLABLE ancestor, is a known compositor
-  // trigger for stale-paint trails in Chromium/WebKit (confirmed real repro: fast scrolling during
-  // a switch left note-glyph streaks behind). Plain `overflow: hidden` + a real box-size change is
-  // the standard, reliably-repainted clipping mechanism — the axis (line = width, page = height)
-  // is still keyed on whatever mode is currently DISPLAYED, same as before.
-  const wipe = useMotionValue(0);
-  const wipeFactor = useTransform(wipe, (v) => 1 - v);
-  const wipeW = useTransform([scaleW, wipeFactor], (vals: number[]) =>
-    displayModeRef.current === 'line' ? vals[0] * vals[1] : vals[0],
-  );
-  const wipeH = useTransform([scaleH, wipeFactor], (vals: number[]) =>
-    displayModeRef.current === 'page' ? vals[0] * vals[1] : vals[0],
-  );
-
-  const switchGenRef = useRef(0);
-  const wipeAnimRef = useRef<AnimationPlaybackControls | null>(null);
-  const pendingRedrawRef = useRef<{ gen: number; mode: 'line' | 'page'; anchorId: string | null } | null>(null);
-  // the scroll anchor is LOCKED: only a genuine user scroll updates it; the programmatic scroll we
-  // do on each switch is ignored (guarded below). Without this, re-reading the anchor from the
-  // post-switch scroll position quantised differently each time and the focused measure DRIFTED
-  // across repeated switches — now the same measure stays anchored no matter how many switches.
-  const lastAnchorRef = useRef<string | null>(null);
-  const suppressScrollAnchorRef = useRef(false);
-
-  // Start the switch when the store's mode diverges from what's displayed. Erase the current
-  // content, then (on completion) commit the new mode — the redraw is kicked off by the layout
-  // effect below once the new layout is actually ready + scroll-anchored.
-  useEffect(() => {
-    if (storeMode === displayMode) return;
-    const gen = ++switchGenRef.current;
-    const toMode = storeMode;
-
-    // lock the anchor: reuse the last user-chosen one, or compute it once from the current scroll
-    // (and store it, so subsequent switches reuse the identical measure — no drift).
-    let anchorId = lastAnchorRef.current;
+  // The paper's and the score box's sizes, written directly — never through a change event.
+  // Derived motion values (`useTransform` over the layout size) subscribe in an effect AFTER this
+  // component's layout effects, so a size set on the first commit was missed (WebKit kept the
+  // paper at its bare 48px frame width, hidden). `syncSizes` runs on every layout/geometry
+  // change and on every tick of the zoom spring; the visibility rides the same write as the
+  // width, so the paper never shows before its size.
+  const sizeRef = useRef({ w, h });
+  sizeRef.current = { w, h };
+  // the zoom being steered to: the paper's width follows THIS, not the spring in flight. A zoom step
+  // re-flows the score to fit the width at once, so a paper sized by the flying value was wider than
+  // the page (zooming out) or narrower (zooming in) for the length of the spring — a jump opposite to
+  // the zoom's direction at every click
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const layoutRef = useRef(layout);
+  layoutRef.current = layout;
+  const paperW = useMotionValue(0);
+  const paperH = useMotionValue(0);
+  const scaleW = useMotionValue(0);
+  const scaleH = useMotionValue(0);
+  const paperVisibility = useMotionValue<'visible' | 'hidden'>('hidden');
+  const syncSizes = useCallback(() => {
+    const z = scale.get();
+    const { w: ww, h: hh } = sizeRef.current;
+    const { frame, band } = geometryRef.current;
+    scaleW.set(ww * z);
+    scaleH.set(hh * z);
+    // a layout engraved for another width than the one now asked for is stale (it arrives a frame or more after a zoom step): the paper keeps the width it has until the current layout comes
+    // (the page's width if it has none yet)
+    const { available, requested } = pageWidthRef.current;
+    const current = layoutRef.current?.engravedFor === requested;
+    if (current || !available) paperW.set(ww * zoomRef.current + frame);
+    else if (paperW.get() === 0) paperW.set(available);
+    paperH.set(hh * z + frame + band);
+    paperVisibility.set(ww * z > 0 ? 'visible' : 'hidden');
+  }, [scale, scaleW, scaleH, paperW, paperH, paperVisibility]);
+  useLayoutEffect(syncSizes, [w, h, layout, syncSizes]);
+  useLayoutEffect(() => {
+    beamLayoutRef.current = layout;
+    const anchor = beamAnchorRef.current;
     const area = canvasAreaRef.current;
-    if (anchorId == null && layout && area) {
-      anchorId = computeAnchorMeasureId(layout.measures, displayMode, area.scrollLeft, area.scrollTop, zoom);
-      lastAnchorRef.current = anchorId;
+    const content = scoreContentRef.current;
+    const box = layout?.noteBoxes.find(note => note.id === anchor?.id);
+    if (anchor && area && content && box) {
+      const actualY = content.getBoundingClientRect().top + (box.y + box.h / 2) * scale.get();
+      area.scrollTop += actualY - anchor.screenY;
     }
-
-    const el = scoreContentRef.current;
-    if (reduce || !el) {
-      pendingRedrawRef.current = { gen, mode: toMode, anchorId };
-      setDisplayMode(toMode);
-      return;
+    if (!beamPreview && anchor && layout !== anchor.releaseLayout) {
+      if (area) area.style.overflowAnchor = anchor.overflowAnchor;
+      beamAnchorRef.current = null;
     }
-
-    wipeAnimRef.current?.stop();
-    wipeAnimRef.current = animate(wipe, 1, {
-      duration: ERASE_S,
-      ease: [0.4, 0, 1, 1],
-      // onComplete fires only on NATURAL completion — a superseding switch calls `.stop()`, which
-      // does not fire it — so this never runs for a stale erase. (The gen check is belt-and-braces.)
-      onComplete: () => {
-        if (switchGenRef.current !== gen) return;
-        pendingRedrawRef.current = { gen, mode: toMode, anchorId };
-        setDisplayMode(toMode); // content stays fully clipped (wipe=1) until the redraw effect fires
-      },
-    });
-  }, [storeMode, displayMode, reduce, wipe, layout, zoom]);
-
-  // Once the freshly-switched-to layout has actually arrived, scroll the locked anchor to the
-  // leading edge (invisible — still fully erased), then redraw: wipe 1 → 0 along the new axis.
-  useEffect(() => {
-    const pending = pendingRedrawRef.current;
-    if (!pending || !layout || pending.mode !== displayMode || layout.mode !== displayMode) return;
-    if (switchGenRef.current !== pending.gen) {
-      pendingRedrawRef.current = null;
-      return;
-    }
-    const area = canvasAreaRef.current;
-    if (area && pending.anchorId) {
-      suppressScrollAnchorRef.current = true;
-      scrollToAnchor(area, layout.measures, displayMode, pending.anchorId, zoom);
-      requestAnimationFrame(() => {
-        suppressScrollAnchorRef.current = false;
-      });
-    }
-    pendingRedrawRef.current = null;
-
-    const el = scoreContentRef.current;
-    if (reduce || !el) {
-      wipe.set(0);
-      return;
-    }
-    wipeAnimRef.current?.stop();
-    wipeAnimRef.current = animate(wipe, 0, { duration: REDRAW_S, ease: [0, 0, 0.2, 1] });
-  }, [layout, displayMode, zoom, reduce, wipe]);
+  }, [layout, beamPreview, scale]);
+  useEffect(() => scale.on('change', syncSizes), [scale, syncSizes]);
 
   useEffect(() => {
     return () => {
-      wipeAnimRef.current?.stop();
       selectionScrollAnimRef.current?.stop();
     };
   }, []);
 
-  const onScroll = () => {
-    if (suppressScrollAnchorRef.current) return; // our own programmatic scroll — never re-anchor on it
-    const el = canvasAreaRef.current;
-    if (!el || !layout || layout.mode !== displayMode) return;
-    lastAnchorRef.current = computeAnchorMeasureId(layout.measures, displayMode, el.scrollLeft, el.scrollTop, zoom);
-  };
-
   return (
-    <div className="canvas-area" ref={canvasAreaRef} onScroll={onScroll}>
-      <motion.div className="paper" style={{ width: paperW, height: paperH }}>
+    <div
+      className="canvas-area"
+      ref={canvasAreaRef}
+      onPointerMoveCapture={() => hoverFeedback.pointerMove()}
+      data-scrolled="false"
+      // the soft top fade exists only once the sheet has scrolled (index.css); flipped on the DOM
+      // directly so scrolling never re-renders the score
+      onScroll={(e) => {
+        const el = e.currentTarget;
+        const scrolled = el.scrollTop > 2 ? 'true' : 'false';
+        if (el.dataset.scrolled !== scrolled) el.dataset.scrolled = scrolled;
+        // the sheet moved under a still pointer: whatever was hovered is no longer under it. Without
+        // this, the hover tint stayed on a note that had scrolled away (no pointermove fires on
+        // scroll) — a pale "white" note that looked like a broken selection.
+        setHoveredNoteIds((ids) => (ids.length ? [] : ids));
+      }}
+    >
+      {/* invisible until the first layout exists: before it the paper's width is just its frame,
+          which painted as a thin full-height strip that then jumped to full width */}
+      <motion.div className="paper" data-ready={layout && w > 0 ? 'true' : 'false'} style={{ width: paperW, height: paperH, visibility: paperVisibility }}>
+        <div className="sheet-title" aria-hidden="true">
+          <h1>{title || document.title || 'Untitled'}</h1>
+        </div>
         <motion.div className="score-scale" style={{ width: scaleW, height: scaleH }}>
-          <motion.div className="score-wipe" style={{ width: wipeW, height: wipeH }}>
-            <motion.div
-              ref={scoreContentRef}
-              className="score-content"
-              style={{ scale, transformOrigin: 'top left', width: w, height: h, position: 'relative' }}
-            >
-              <VexflowRenderer
-                document={document}
-                selectedIds={selectedIds}
-                carrierSelectedIds={carrierSelectedIds}
-                mode={displayMode}
-                pageContentWidth={pageContentWidth}
-                onLayout={onLayout}
-                voiceColors={voiceColors}
-                stemOverrides={stemOverrides}
-                hoveredNoteIds={hoveredNoteIds}
+          <motion.div
+            ref={scoreContentRef}
+            className="score-content"
+            style={{ scale, transformOrigin: 'top left', width: w, height: h, position: 'relative' }}
+          >
+            {pageContentWidth !== undefined && <VexflowRenderer
+              document={document}
+              selectedIds={selectedIds}
+              carrierSelectedIds={carrierSelectedIds}
+              pageContentWidth={pageContentWidth}
+              onLayout={onLayout}
+              voiceColors={voiceColors}
+              stemOverrides={stemOverrides}
+              beamPreview={beamPreview}
+              slurPreview={slurPreview}
+              spanPreview={spanPreview}
+              placementPreview={placementPreview}
+              hoveredNoteIds={tool === 'select' ? hoveredNoteIds : []}
+              selectedObjectIds={selectedObjectIds}
+              flash={flash}
+            />}
+            {layout && !reading && <StaffMarker layout={layout} />}
+            {layout && (
+              <Overlay
+                layout={layout}
+                // pointer moves report the same hover again and again: only a change re-renders
+                onHoverNote={hoverFeedback.hover}
+                onInserted={onInserted}
+                onBeamPreview={onBeamPreview}
+                slurPreview={slurPreview}
+                onSlurPreview={setSlurPreview}
+                spanPreview={spanPreview}
+                onSpanPreview={setSpanPreview}
+                onPlacementPreview={setPlacementPreview}
               />
-              {layout && <Overlay layout={layout} onHoverNote={setHoveredNoteIds} />}
-            </motion.div>
+            )}
           </motion.div>
         </motion.div>
       </motion.div>
