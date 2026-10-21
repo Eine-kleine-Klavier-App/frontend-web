@@ -1,26 +1,52 @@
-import { useEffect, useRef } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { selectionInsertTool } from './selectionInsertTool';
+import { UndoIcon, RedoIcon, AlertIcon, CloseIcon, LockIcon, CollapsePanelIcon } from '@/ui/icons';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { AnimatePresence, animate, motion, useMotionValue, useReducedMotion, useTransform, type AnimationPlaybackControls, type MotionStyle } from 'motion/react';
+import { lift, reducedFade, settleMotion, springGentle, springSmooth, springSnappy, useSidePanelMotion } from '@/styles/motion';
+import { ChoiceGroup } from '@/ui/ChoiceGroup';
+import { useParams } from 'react-router-dom';
+import { useAuthStore } from '@/core/auth/authStore';
+import { PanelToolbar, PanelToolbarControl } from '@/ui/PanelToolbar';
+import { EditorDocumentActions } from './EditorDocumentActions';
 import { useEditor, hotbarSlotKey, HOTBAR_SLOT_COUNT } from '@/app/store';
-import { LeftPanel } from '@/features/editor/LeftPanel';
 import { Toolbar } from '@/features/editor/Toolbar';
 import { EditorView } from '@/features/editor/EditorView';
+import { SelectionInfo } from './SelectionInfo';
 import { PropertiesPanel } from '@/features/editor/PropertiesPanel';
+import { ListeningControls } from '@/features/playback/ListeningControls';
 import { PlaybackBar } from '@/features/playback/PlaybackBar';
-import { SegmentedControl } from '@/features/editor/SegmentedControl';
-import { BackIcon } from '@/features/editor/icons';
+import { WaterfallStage, warmWaterfallStage, type WaterfallSky } from '@/features/playback/waterfall/WaterfallStage';
+import { readCssToken } from '@/ui/cssToken';
+import { WaterfallPanel } from '@/features/playback/waterfall/WaterfallPanel';
+import { playback, usePlaybackValue } from '@/core/playback/PlaybackController';
+import { measureBeats } from '@/core/model/contexts';
+import { bindEditorAudition } from './EditorAudition';
+import { HelpPopover } from '@/features/editor/HelpPopover';
+import { ContextStrip } from './ContextStrip';
+import { PitchModeNotice } from './PitchModeNotice';
+import { HotPanel } from '@/features/editor/HotPanel';
+import { parseTool } from '@/core/model/insertItems';
+import { parseMark } from '@/core/model/markTools';
+import { LightSwitch } from '@/ui/LightSwitch';
+import { useMediaQuery } from '@/ui/useMediaQuery';
 import {
   locate,
   carrierIdOf,
   itemOf,
   chordNoteIds,
-  orderedVoiceCarrierIds,
+  orderedVoiceNavigationIds,
   physicalNoteOrder,
 } from '@/core/model/query';
 
-const CANVAS_MODE_OPTIONS = [
-  { value: 'line' as const, label: 'Line' },
-  { value: 'page' as const, label: 'Page' },
+type EditorView = 'editor' | 'waterfall';
+const VIEW_OPTIONS: { value: EditorView; label: string }[] = [
+  { value: 'editor', label: 'Score' },
+  { value: 'waterfall', label: 'Waterfall' },
 ];
+/** While the waterfall plays untouched, the bar leaves the roll alone after this long. */
+const BAR_IDLE_MS = 3000;
+/** how often the idle bar checks whether it should rest */
+const BAR_IDLE_CHECK_MS = 500;
 
 /** Arrow-key navigation's in-progress Shift-range state (EditorScreen's keydown handler).
  *  `scopeId` is the carrier id (note-mode) or voice id (carrier-mode) the range is confined
@@ -44,47 +70,266 @@ function sameIds(a: string[], b: string[]): boolean {
   return a.length === b.length && a.every((id, i) => id === b[i]);
 }
 
-function LockIcon({ locked }: { locked: boolean }) {
-  return (
-    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <rect x="3.5" y="7" width="9" height="6.5" rx="1.5" />
-      {locked ? <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" /> : <path d="M5.5 7V5a2.5 2.5 0 0 1 4.8-1" />}
-    </svg>
-  );
-}
-
 export default function EditorScreen() {
   // the route is the source of truth for which draft is open — this component doesn't own
   // that id, it just tells the store to load it (see App Router's `/edit/:draftId`).
-  const { draftId } = useParams<{ draftId: string }>();
-  const load = useEditor((s) => s.load);
+  const { draftId, scoreId: savedScoreId } = useParams<{ draftId: string; scoreId: string }>();
+  const activeId = draftId ?? savedScoreId;
+  const userId = useAuthStore(state => state.userId);
+  const reading = !!savedScoreId;
+  const loadSource = useEditor(state => state.loadSource);
+  const clearSource = useEditor(state => state.clearSource);
+  const [documentTitle, setDocumentTitle] = useState<{ draftId: string; title: string } | null>(null);
+  const onDocumentTitle = useCallback((title: string) => {
+    if (!draftId) return;
+    setDocumentTitle((previous) => previous?.draftId === draftId && previous.title === title ? previous : { draftId, title });
+  }, [draftId]);
   const document = useEditor((s) => s.document);
-  const error = useEditor((s) => s.error);
+  const editError = useEditor((s) => s.error);
+  const playbackError = usePlaybackValue((state) => state.error);
+  const playing = usePlaybackValue((state) => state.playing);
+  const error = editError ?? playbackError;
+  const [dismissedError, setDismissedError] = useState<string | null>(null);
+  useEffect(() => { setDismissedError(null); }, [error]);
+  // what the document bar reports (a failed save, a missing working copy) shares the one toast slot with the editing error
+  const [documentNotice, setDocumentNotice] = useState<string | null>(null);
+  const shownError = error && error !== dismissedError ? error : null;
+  const toastText = shownError ?? documentNotice;
+  const dismissToast = () => {
+    if (shownError) setDismissedError(shownError);
+    setDocumentNotice(null);
+  };
   const undo = useEditor((s) => s.undo);
   const redo = useEditor((s) => s.redo);
-  const zoom = useEditor((s) => s.zoom);
-  const setZoom = useEditor((s) => s.setZoom);
   const locked = useEditor((s) => s.locked);
+  const pitchNotice = useEditor((s) => s.pitchNotice);
+  const manualLocked = useEditor((s) => s.manualLocked);
+  const playbackLocked = useEditor((s) => s.playbackLocked);
   const setLocked = useEditor((s) => s.setLocked);
-  const canvasMode = useEditor((s) => s.canvasMode);
-  const setCanvasMode = useEditor((s) => s.setCanvasMode);
+  const setPlaybackLocked = useEditor((s) => s.setPlaybackLocked);
+  const documentLoading = useEditor((s) => s.loading);
   const navRangeRef = useRef<NavRange | null>(null);
+  const [waterfallOpen, setWaterfallOpen] = useState(false);
+  const reduce = useReducedMotion();
+  // a pick that no longer exists in the document (an undo removed it) is not a selection: the rail
+  // keeps the tool panel rather than opening an inspector on nothing
+  const hasSelection = useEditor(
+    (s) =>
+      s.selectedIds.some((id) => locate(s.document, id) !== null) ||
+      s.document.measures.some((m) => s.selectedMeasureIds.includes(m.id)) ||
+      s.selectedStructureIds.some((id) => [...s.document.beams, ...s.document.tuplets, ...s.document.ties, ...s.document.glissandos, ...s.document.contexts].some((o) => o.id === id)),
+  );
+  // Wide panels reserve room beside the score; narrow panels slide over it.
+  const wide = useMediaQuery('(min-width: 64.0625em)');
+  // The waterfall is a view of the desk. The left panel belongs to both views — the tools in the
+  // editor, what the waterfall lets you set in the waterfall — and either view can hide it; the
+  // bar is the same in both, so nothing in it moves when the view changes.
+  const [view, setView] = useState<EditorView>('editor');
+  const [panelOpen, setPanelOpen] = useState<Record<EditorView, boolean>>({ editor: wide, waterfall: false });
+  const previousSavedScore = useRef(savedScoreId);
+  useLayoutEffect(() => {
+    if (previousSavedScore.current && draftId) {
+      setView('editor');
+      setPanelOpen(open => ({ ...open, editor: wide }));
+    }
+    previousSavedScore.current = savedScoreId;
+  }, [savedScoreId, draftId, wide]);
+  const [sky, setSky] = useState<WaterfallSky>('black');
+  const [stripColor, setStripColor] = useState(() => readCssToken(globalThis.document.documentElement, '--waterfall-strip-default'));
+  const [tilt, setTilt] = useState(1);
+  const [octaveLines, setOctaveLines] = useState(true);
+  const [measureLines, setMeasureLines] = useState(true);
+  const [barAwake, setBarAwake] = useState(true);
+  const waterfall = view === 'waterfall';
+  const scorePanelOpen = panelOpen.editor;
+  const railOpen = view === 'editor' ? scorePanelOpen : panelOpen.waterfall;
+  const railRef = useRef<HTMLElement>(null);
+  const panelToggleRef = useRef<HTMLButtonElement>(null);
+  const { layout, visual } = useSidePanelMotion(railOpen);
+  // The outgoing score keeps its own reservation while the waterfall's panel moves.
+  const { layout: editorLayout } = useSidePanelMotion(scorePanelOpen);
+  const railWidth = useMotionValue(0);
+  const toggleWidth = useMotionValue(0);
+  const toggleInset = useMotionValue(0);
+  const toggleX = useTransform(() => Math.max(0, visual.get() * railWidth.get() - toggleWidth.get() - 2 * toggleInset.get()));
+  const deskOpacity = useMotionValue(1);
+  const stageOpacity = useMotionValue(0);
+  const [stageOnTop, setStageOnTop] = useState(false);
+  const stageOnTopRef = useRef(false);
+  const headerLeft = useTransform(() => {
+    const progress = wide ? Math.max(0, Math.min(1, layout.get())) : 0;
+    return progress * railWidth.get() + (1 - progress) * (toggleWidth.get() + toggleInset.get());
+  });
+  const headerOffset = useTransform(headerLeft, value => `${value}px`);
+  const stageWidth = useMotionValue(1);
+  const railX = useTransform(visual, (v) => `${(v - 1) * 100}%`);
+  const layoutWidth = useTransform(() => `${wide ? Math.max(0, Math.min(1, layout.get())) * railWidth.get() : 0}px`);
+  // Wide waterfall panels leave room for the stage without resizing its canvas.
+  const pushed = waterfall && panelOpen.waterfall && wide;
+  // The two views are layers: the one on top fades over the other, which stays whole beneath it until it is covered. One spring drives every
+  // fade (the panel's and the transport's own), so the whole screen moves as one gesture; a switch back mid-flight reverses the same fade.
+  const shownLayer = useRef<EditorView>(view);
+  const layerFlight = useRef<AnimationPlaybackControls | null>(null);
+  useEffect(() => {
+    if (shownLayer.current === view) return;
+    shownLayer.current = view;
+    layerFlight.current?.stop();
+    const spring = reduce ? reducedFade : springSmooth;
+    const incoming = view === 'waterfall' ? stageOpacity : deskOpacity;
+    const outgoing = view === 'waterfall' ? deskOpacity : stageOpacity;
+    const incomingOnTop = (view === 'waterfall') === stageOnTopRef.current;
+    const putOnTop = (stage: boolean) => { stageOnTopRef.current = stage; setStageOnTop(stage); };
+    if (incomingOnTop) {
+      // it is the layer that was arriving: it carries on
+      layerFlight.current = animate(incoming, 1, { ...spring, onComplete: () => outgoing.set(0) });
+    } else if (incoming.get() > 0.001) {
+      // it is held whole beneath the layer that was arriving: that one fades out again
+      layerFlight.current = animate(outgoing, 0, { ...spring, onComplete: () => putOnTop(view === 'waterfall') });
+    } else {
+      putOnTop(view === 'waterfall');
+      outgoing.set(1);
+      layerFlight.current = animate(incoming, 1, { ...spring, onComplete: () => outgoing.set(0) });
+    }
+  }, [view, reduce, deskOpacity, stageOpacity]);
+  // the panel shows the contents of the view whose panel is open, so one that is sliding out keeps its own contents instead of turning into the other view's
+  const railView = useRef<EditorView>(view);
+  if (railOpen) railView.current = view;
+  const stageScale = useTransform(() => 1 - (wide ? Math.max(0, Math.min(1, layout.get())) * railWidth.get() / stageWidth.get() : 0));
+  // Prepare enough height for the fully open panel once; panel motion only reveals this reserve.
+  const stageCanvasHeight = useTransform(() => {
+    const width = stageWidth.get(), panel = railWidth.get();
+    return wide && width > panel ? `${100 * width / (width - panel)}%` : '100%';
+  });
+  // Commit the engraving's new box once; carry its centre on the non-bouncing layout spring.
+  const deskShift = useTransform(() => wide ? (Math.max(0, Math.min(1, editorLayout.get())) - (scorePanelOpen ? 1 : 0)) * railWidth.get() / 2 : 0);
+  const deskRef = useRef<HTMLElement>(null);
+  const barRef = useRef<HTMLElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  const togglePanel = () => setPanelOpen((open) => ({ ...open, [view]: !open[view] }));
+  const openLibrary = () => setPanelOpen((open) => ({ ...open, editor: true }));
+  const closeLibrary = () => setPanelOpen((open) => ({ ...open, editor: false }));
+
+  useLayoutEffect(() => {
+    const rail = railRef.current;
+    if (rail) {
+      if (!railOpen && rail.contains(window.document.activeElement)) panelToggleRef.current?.focus();
+      rail.inert = !railOpen;
+    }
+    const drawer = !wide && railOpen;
+    const bar = barRef.current;
+    if (bar) {
+      if (drawer && bar.contains(window.document.activeElement)) panelToggleRef.current?.focus();
+      bar.inert = drawer;
+    }
+    if (deskRef.current) deskRef.current.inert = waterfall || drawer;
+    if (stageRef.current) stageRef.current.inert = !waterfall || drawer;
+  }, [railOpen, waterfall, wide]);
+
+  useLayoutEffect(() => {
+    const measure = () => {
+      railWidth.set(railRef.current?.offsetWidth ?? 0);
+      toggleWidth.set(panelToggleRef.current?.offsetWidth ?? 0);
+      toggleInset.set(panelToggleRef.current?.parentElement?.offsetLeft ?? 0);
+      stageWidth.set(stageRef.current?.offsetWidth || 1);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (railRef.current) observer.observe(railRef.current);
+    if (stageRef.current) observer.observe(stageRef.current);
+    return () => observer.disconnect();
+  }, [railWidth, stageWidth, toggleWidth, toggleInset]);
 
   useEffect(() => {
-    if (draftId) void load(draftId);
-  }, [load, draftId]);
+    if (wide || !railOpen) return;
+    const close = () => setPanelOpen((open) => ({ ...open, [view]: false }));
+    const onDown = (e: PointerEvent) => {
+      const target = e.target as Node;
+      if (!railRef.current?.contains(target) && !barRef.current?.contains(target) && !panelToggleRef.current?.contains(target)) close();
+    };
+    window.document.addEventListener('pointerdown', onDown);
+    return () => {
+      window.document.removeEventListener('pointerdown', onDown);
+    };
+  }, [wide, railOpen, view]);
+
+  useEffect(() => {
+    if (!waterfall) { setBarAwake(true); return; }
+    let last = performance.now();
+    const wake = () => { last = performance.now(); setBarAwake(true); };
+    const timer = window.setInterval(() => {
+      const bar = barRef.current;
+      if (!playing || performance.now() - last < BAR_IDLE_MS) return;
+      if (bar?.matches(':hover') || bar?.querySelector(':focus-visible')) return;
+      setBarAwake(false);
+    }, BAR_IDLE_CHECK_MS);
+    window.addEventListener('pointermove', wake);
+    window.addEventListener('pointerdown', wake);
+    window.addEventListener('keydown', wake);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener('pointermove', wake);
+      window.removeEventListener('pointerdown', wake);
+      window.removeEventListener('keydown', wake);
+    };
+  }, [waterfall, playing]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '\\' || e.metaKey || e.ctrlKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      if (target && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))) return;
+      e.preventDefault();
+      setPanelOpen((open) => ({ ...open, [view]: !open[view] }));
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [view]);
+
+  useLayoutEffect(() => {
+    if (!activeId) return;
+    if (savedScoreId) playback.bindScore(savedScoreId);
+    else playback.bindDraft(draftId ?? null);
+    void loadSource({ kind: savedScoreId ? 'saved' : 'draft', id: activeId });
+    return () => { clearSource(); playback.bindDraft(null); };
+  }, [activeId, draftId, savedScoreId, userId, loadSource, clearSource]);
+
+  useEffect(() => {
+    if (!activeId) return;
+    return bindEditorAudition();
+  }, [activeId, draftId, savedScoreId]);
+
+  useEffect(() => {
+    const sync = () => {
+      const state = playback.getState();
+      setPlaybackLocked(state.loading || state.playing || state.paused);
+    };
+    sync();
+    const unsubscribe = playback.subscribe(sync);
+    return () => { unsubscribe(); setPlaybackLocked(false); };
+  }, [setPlaybackLocked]);
+
+  useEffect(() => {
+    if (!documentLoading && document.id === activeId) {
+      playback.setTotalBeats(document.measures.reduce((total, measure) => total + measureBeats(measure.timeSignature), 0));
+    }
+  }, [document, documentLoading, activeId]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
-      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return;
       const s = useEditor.getState();
+      if (s.pitchModeRequest) return;
       const meta = e.metaKey || e.ctrlKey;
       // `e.code` (physical key position, e.g. "KeyV") — not `e.key` (the character the active
       // keyboard LAYOUT produces for that key). Under a Cyrillic layout, `e.key` for the physical
-      // V/Z keys is "м"/"я", not "v"/"z", so a `.key`-based check silently never fires (real
-      // reported bug) — `.code` is layout-independent for any QWERTY-derived physical layout.
-      if (meta && e.code === 'KeyZ') {
+      // V/Z keys is "м"/"я", not "v"/"z", so a `.key`-based check never fires — `.code` is
+      // layout-independent for any QWERTY-derived physical layout.
+      if (meta && !e.altKey && !e.shiftKey && e.code === 'KeyC') {
+        if (s.loading || s.locked) return;
+        const tool = selectionInsertTool(s.document, s);
+        if (tool) { e.preventDefault(); s.setTool(tool); }
+      } else if (meta && e.code === 'KeyZ') {
         e.preventDefault();
         if (e.shiftKey) void s.redo();
         else void s.undo();
@@ -99,11 +344,20 @@ export default function EditorScreen() {
         e.preventDefault();
         s.setTool('select');
         s.select(null);
+      } else if (!meta && !e.altKey && e.code === 'KeyL') {
+        // the lock's own hotkey (layout-zones decision: `L` lock)
+        e.preventDefault();
+        if (s.source?.kind !== 'saved' && !s.playbackLocked) s.setLocked(!s.manualLocked);
       } else if (e.key === 'Backspace' || e.key === 'Delete') {
-        if (s.selectedIds.length) {
+        if (s.selectedIds.length || s.selectedStructureIds.length) {
           e.preventDefault();
           void s.deleteSelected();
         }
+      } else if (!meta && !e.altKey && !e.shiftKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+        if (s.loading || s.locked || !s.selectedIds.length) return;
+        e.preventDefault();
+        navRangeRef.current = null;
+        void s.shiftSelectedNotes(e.key === 'ArrowUp' ? 1 : -1);
       } else if (!meta && !e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         // Two granularities, no extra endpoint — everything needed is already in the loaded
         // `document`. If the selection is ONE note out of a multi-note chord (not the whole
@@ -137,13 +391,13 @@ export default function EditorScreen() {
           } else {
             const voiceId = locate(doc, anchorId)?.voiceId;
             if (voiceId) {
-              mode = { kind: 'carrier', scopeId: voiceId, ids: orderedVoiceCarrierIds(doc, voiceId) };
+              mode = { kind: 'carrier', scopeId: voiceId, ids: orderedVoiceNavigationIds(doc, voiceId) };
               cursorId = carrierId;
             }
           }
         } else {
           const voiceId = doc.voices[s.currentVoice]?.id;
-          if (voiceId) mode = { kind: 'carrier', scopeId: voiceId, ids: orderedVoiceCarrierIds(doc, voiceId) };
+          if (voiceId) mode = { kind: 'carrier', scopeId: voiceId, ids: orderedVoiceNavigationIds(doc, voiceId) };
         }
 
         // wrap for note-mode, clamp (no wrap) for carrier-mode — returns null past a carrier-mode edge
@@ -169,14 +423,19 @@ export default function EditorScreen() {
           const reusing = existing && sameIds(existing.appliedIds, s.selectedIds);
           const kind = reusing ? existing.kind : mode?.kind;
           const scopeId = reusing ? existing.scopeId : mode?.scopeId;
-          const ids = reusing ? existing.ids : mode?.ids;
+          const rangeItem = reusing && existing.kind === 'note' ? itemOf(doc, existing.scopeId) : null;
+          const ids = reusing
+            ? existing.kind === 'carrier' ? orderedVoiceNavigationIds(doc, existing.scopeId) : rangeItem ? physicalNoteOrder(doc, rangeItem) : []
+            : mode?.ids;
           const anchorId = reusing ? existing.anchorId : cursorId;
           const fromId = reusing ? existing.cursorId : cursorId;
           if (!kind || !scopeId || !ids || !ids.length || anchorId == null || fromId == null) return;
-          const nextIdx = step(kind, ids, ids.indexOf(fromId));
+          const fromIdx = ids.indexOf(fromId);
+          const anchorIdx = ids.indexOf(anchorId);
+          if (fromIdx < 0 || anchorIdx < 0) { navRangeRef.current = null; return; }
+          const nextIdx = step(kind, ids, fromIdx);
           if (nextIdx === null) return;
           e.preventDefault();
-          const anchorIdx = ids.indexOf(anchorId);
           const lo = Math.min(anchorIdx, nextIdx);
           const hi = Math.max(anchorIdx, nextIdx);
           const appliedIds = applySelection(kind, ids.slice(lo, hi + 1));
@@ -185,7 +444,7 @@ export default function EditorScreen() {
         }
 
         // plain move — single item, no range
-        if (!mode || !mode.ids.length) return;
+        if (!mode || !mode.ids.length || (cursorId !== null && !mode.ids.includes(cursorId))) return;
         const nextIdx = step(mode.kind, mode.ids, cursorId ? mode.ids.indexOf(cursorId) : -1);
         if (nextIdx === null) return;
         e.preventDefault();
@@ -194,6 +453,13 @@ export default function EditorScreen() {
         } else {
           const carrierId = mode.ids[nextIdx];
           s.selectMany(chordNoteIds(doc, carrierId), false, [carrierId]);
+        }
+      } else if (e.altKey && !meta && !e.shiftKey && /^Digit\d$/.test(e.code)) {
+        // ⌥ + digit pins the armed element to that slot (by `code`: ⌥ + digit types a symbol on a Mac)
+        const index = Array.from({ length: HOTBAR_SLOT_COUNT }, (_, i) => i).find((i) => `Digit${hotbarSlotKey(i)}` === e.code);
+        if (index !== undefined && s.tool !== 'select' && (parseTool(s.tool) || parseMark(s.tool))) {
+          e.preventDefault();
+          s.setHotbarSlot(index, s.tool);
         }
       } else if (!meta && !e.altKey) {
         // hotbar quick-select: 1-9 then 0 (the 10th slot — matches the common browser-tab
@@ -204,7 +470,7 @@ export default function EditorScreen() {
           const slotTool = s.hotbarSlots[i];
           if (slotTool) {
             e.preventDefault();
-            s.setTool(slotTool);
+            s.setTool(slotTool, i);
           }
           break;
         }
@@ -214,54 +480,149 @@ export default function EditorScreen() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
+  // Layout = the app shell's skeleton (variant E). Wide: the left rail (same surface and width as
+  // browse's) holds identity, then the hotbar and the staff · voice row, then ONE area that is the
+  // hot panel (library, constructor) while nothing is selected and the inspector while
+  // something is — swapped with lift + settle, so the sheet never reflows. A focus workspace: no
+  // app navigation here; the back link is the way out. The sheet is centred in the content column with
+  // browse's gutters; the top bar spans that column. Nothing floats over the sheet.
+  // ≤1024px: the library becomes a drawer, the inspector a bottom sheet, and tools a bottom tray.
   return (
-    <div className="app">
-      <header className="topbar">
-        <Link to="/library" className="icon-btn back-link" title="Back to Library">
-          <BackIcon />
-        </Link>
-        <div className="title">
-          Eine kleine Klavierapp
-          <small>{document.title || 'Untitled'} · draft</small>
+    <motion.div className={'app editor-screen' + (waterfall ? ' is-waterfall' : '') + (scorePanelOpen ? '' : ' is-rail-closed') + (reading ? ' is-reading' : '') + (pushed ? ' is-stage-pushed' : '')} style={{ '--panel-layout-w': layoutWidth } as MotionStyle}>
+      <motion.div className="editor-panel-control" style={{ x: toggleX }}>
+        <PanelToolbarControl
+          ref={panelToggleRef}
+          className="panel-toggle"
+          title={railOpen ? 'Hide panel (\\)' : 'Show panel (\\)'}
+          aria-label={railOpen ? 'Hide panel' : 'Show panel'}
+          aria-expanded={railOpen}
+          aria-controls="editor-rail"
+          onClick={togglePanel}
+        ><CollapsePanelIcon /></PanelToolbarControl>
+      </motion.div>
+      <motion.header
+        ref={barRef}
+        className="editor-bar"
+        style={{ left: headerLeft, '--header-left': headerOffset, pointerEvents: barAwake ? undefined : 'none' } as MotionStyle}
+        animate={{ opacity: barAwake ? 1 : 0 }}
+        transition={reduce ? reducedFade : springSnappy}
+      >
+        <EditorDocumentActions key={`${savedScoreId ? 'saved' : 'draft'}:${activeId}`} draftId={draftId} savedScoreId={savedScoreId} onTitleChange={onDocumentTitle} onNotice={setDocumentNotice} />
+        <PlaybackBar />
+        <div className="bar-history" role="group" aria-label={waterfall ? 'View controls' : 'Editing controls'}>
+          <AnimatePresence initial={false}>
+            {!waterfall && !reading && <motion.div key="editing" className="bar-editing" {...settleMotion(reduce, 4)}>
+            <button
+              type="button"
+              className={'icon-btn ghost' + (locked ? ' active' : '')}
+              title={playbackLocked ? 'Editing locked during playback' : manualLocked ? 'Editing locked — unlock (L)' : 'Lock editing (L)'}
+              aria-label="Lock editing" aria-pressed={locked}
+              disabled={playbackLocked}
+              onClick={() => setLocked(!manualLocked)}
+            >
+              <LockIcon locked={locked} />
+            </button>
+            <button type="button" className="icon-btn ghost" disabled={locked} onClick={() => void undo()} title="Undo (Cmd+Z)" aria-label="Undo">
+              <UndoIcon />
+            </button>
+            <button type="button" className="icon-btn ghost" disabled={locked} onClick={() => void redo()} title="Redo (Cmd+Shift+Z)" aria-label="Redo">
+              <RedoIcon />
+            </button>
+            </motion.div>}
+          </AnimatePresence>
+          {/* where the panel's own foot is not on screen, the light switch is in the bar */}
+          {!wide && <LightSwitch />}
+          {/* the view switch is the bar's last item: it stays where it is whichever view is shown */}
+          <ChoiceGroup value={view} onChange={(next) => { if (next === 'waterfall') warmWaterfallStage(); setView(next); }} options={VIEW_OPTIONS} ariaLabel="View" variant="tabs" />
         </div>
-        <div className="spacer" />
-        {error && <span className="topbar-error" title={error}>{error}</span>}
-        <SegmentedControl
-          value={canvasMode}
-          onChange={setCanvasMode}
-          options={CANVAS_MODE_OPTIONS}
-          ariaLabel="Canvas layout"
-        />
-        <button
-          className={'icon-btn' + (locked ? ' active' : '')}
-          title="Lock — block selection for playback"
-          onClick={() => setLocked(!locked)}
-        >
-          <LockIcon locked={locked} />
-        </button>
-        <button className="icon-btn" onClick={() => void undo()} title="Undo (Cmd+Z)">
-          ↶
-        </button>
-        <button className="icon-btn" onClick={() => void redo()} title="Redo (Cmd+Shift+Z)">
-          ↷
-        </button>
-        <div className="zoom">
-          <button className="icon-btn" onClick={() => setZoom(zoom - 0.1)}>
-            −
-          </button>
-          <span>{Math.round(zoom * 100)}%</span>
-          <button className="icon-btn" onClick={() => setZoom(zoom + 0.1)}>
-            +
-          </button>
+      </motion.header>
+      <motion.aside
+        id="editor-rail"
+        ref={railRef}
+        className="rail editor-rail"
+        aria-label={railView.current === 'waterfall' ? 'Waterfall' : reading ? 'Playback settings' : 'Editor'}
+        style={{ x: railX }}
+      >
+        <PanelToolbar label={railView.current === 'waterfall' ? 'Waterfall' : reading ? 'Playback' : 'Tools'} className="editor-panel-toolbar" />
+        {railView.current === 'waterfall' ? <>
+          <WaterfallPanel listening={reading} sky={sky} onSky={setSky} stripColor={stripColor} onStripColor={setStripColor} tilt={tilt} onTilt={setTilt} octaveLines={octaveLines} onOctaveLines={setOctaveLines} measureLines={measureLines} onMeasureLines={setMeasureLines} />
+          <div className="rail-foot">
+            <HelpPopover topic="waterfall" />
+            {wide && <LightSwitch />}
+          </div>
+        </> : <>
+          {wide && !reading && <div className="rail-tools">
+            <Toolbar layout="rail" />
+          </div>}
+          <div className="rail-context">
+            <AnimatePresence initial={false} mode="wait">
+              {reading ? (hasSelection ? (
+                <motion.div key="info" className="rail-swap" {...settleMotion(reduce)}>
+                  <section className="inspector inspector--rail" aria-label="Selection">
+                    <div className="inspector-body"><div className="props-content"><SelectionInfo /></div></div>
+                  </section>
+                </motion.div>
+              ) : <motion.div key="listening" className="rail-swap rail-listening" {...settleMotion(reduce)}><div className="waterfall-panel"><ListeningControls /></div></motion.div>) : locked ? (
+                <motion.div key="locked" className="rail-swap rail-locked" {...settleMotion(reduce)}>
+                  <div className="locked-note" role="status">
+                    <LockIcon locked />
+                    <strong>{playbackLocked ? 'Editing paused for playback' : 'Editing is locked'}</strong>
+                    <p>{playbackLocked ? 'Switch to Editor and stop playback to edit.' : 'Nothing on the score can be selected or changed. Playback stays live.'}</p>
+                    {!playbackLocked && <button type="button" className="editor-action" onClick={() => setLocked(false)}>
+                      Unlock <kbd>L</kbd>
+                    </button>}
+                  </div>
+                </motion.div>
+              ) : wide && hasSelection ? (
+                <motion.div key="inspector" className="rail-swap" {...settleMotion(reduce)}>
+                  <PropertiesPanel placement="rail" />
+                </motion.div>
+              ) : (
+                <motion.div key="hot" className="rail-swap rail-hot" {...settleMotion(reduce)}>
+                  <HotPanel onRequestOpen={openLibrary} onPick={wide ? undefined : closeLibrary} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+          <div className="rail-foot">
+            <HelpPopover />
+            {wide && <LightSwitch />}
+          </div>
+        </>}
+      </motion.aside>
+      <motion.main
+        ref={deskRef}
+        className="desk"
+        style={{ x: deskShift, opacity: deskOpacity, zIndex: stageOnTop ? 1 : 2 }}
+      >
+        {!documentLoading && document.id === activeId && <ContextStrip readOnly={reading} />}
+        <div className="desk-content">
+          {!documentLoading && document.id === activeId && <EditorView title={documentTitle?.draftId === draftId ? documentTitle?.title : undefined} />}
         </div>
-      </header>
-      <Toolbar />
-      <div className="workspace">
-        <LeftPanel />
-        <EditorView />
-        <PropertiesPanel />
+      </motion.main>
+      <motion.div
+        ref={stageRef}
+        className="waterfall-stage"
+        style={{ '--sky-now': `var(--waterfall-sky-${sky})`, opacity: stageOpacity, zIndex: stageOnTop ? 2 : 1 } as MotionStyle}
+      >
+        {/* Uniform scaling preserves the keys; the preallocated upper roll fills the space it reveals. */}
+        <motion.div className="waterfall-fit" style={{ height: stageCanvasHeight, scale: stageScale, originX: 1, originY: 1 }}>
+          <WaterfallStage sky={sky} active={waterfall} stripColor={stripColor} tilt={tilt} viewportRef={stageRef} octaveLines={octaveLines} measureLines={measureLines} />
+        </motion.div>
+      </motion.div>
+      {!wide && !waterfall && !reading && <PropertiesPanel placement="sheet" />}
+      {!wide && !waterfall && !reading && <Toolbar layout="tray" />}
+      {/* the anchor positions; the toast inside settles up onto it and lifts away when dismissed */}
+      <div className="editor-toast-anchor">
+        <AnimatePresence>
+          {toastText ? (
+            <motion.div key={toastText} className="editor-toast" role="alert" {...settleMotion(reduce)}>
+              <AlertIcon /><span>{toastText}</span>
+              <button type="button" className="icon-btn ghost" aria-label="Dismiss error" onClick={dismissToast}><CloseIcon /></button>
+            </motion.div>
+          ) : pitchNotice && <PitchModeNotice key={pitchNotice.text} notice={pitchNotice} />}
+        </AnimatePresence>
       </div>
-      <PlaybackBar />
-    </div>
+    </motion.div>
   );
 }
