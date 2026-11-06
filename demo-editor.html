@@ -1,0 +1,16 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Demo editor</title>
+<script>
+  (function () {
+    var theme = 'light';
+    try {
+      var asked = new URLSearchParams(location.search).get('theme');
+      if (asked === 'dark' || asked === 'light') localStorage.setItem('theme', asked);
+      var stored = localStorage.getItem('theme');
+      if (stored === 'dark' || stored === 'light') theme = stored;
+    } catch (e) {}
+    var root = document.documentElement;
+    root.dataset.theme = theme; root.style.colorScheme = theme;
+    root.style.backgroundColor = theme === 'dark' ? '#17141a' : '#e8e5ea';
+  })();
+</script></head>
+<body><div id="root"></div><script type="module" src="/src/demo-editor.tsx"></script></body></html>
