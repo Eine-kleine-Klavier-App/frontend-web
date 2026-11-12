@@ -29,9 +29,11 @@ const requests = [];
 const { HttpGateway } = load('src/core/gateway/HttpGateway.ts', {
   '@/core/model/fromView': { fromView: (view, id) => ({ view, id }) },
   './apiBase': { API_BASE: '/api' },
+  './measureSync': { DraftSync: class { apply() { return {}; } } },
+  '@/core/playback/draftSounds': { draftSounds: { apply() {} } },
   '@/core/auth/authorizedFetch': { async authorizedFetch(url, options) {
     requests.push({ url, body: JSON.parse(options.body) });
-    return new Response(JSON.stringify({ document: {} }));
+    return new Response(JSON.stringify({ sync: {} }));
   } },
 });
 const gateway = new HttpGateway();

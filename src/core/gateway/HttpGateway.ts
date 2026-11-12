@@ -1,14 +1,17 @@
 import type { EditorGateway } from './EditorGateway';
 import type { ContextCoverage, ScoreDocument } from '@/core/model/score';
 import type { Command } from '@/core/commands/command';
-import { fromView, type ScoreView } from '@/core/model/fromView';
+import { fromView } from '@/core/model/fromView';
+import { draftSounds } from '@/core/playback/draftSounds';
+import { DraftSync, type MeasureSyncWire } from './measureSync';
 import { API_BASE } from './apiBase';
 import { authorizedFetch } from '@/core/auth/authorizedFetch';
 
 /** Talks to the backend draft/edit endpoints (`/drafts/{draft_id}`, `/drafts/{draft_id}/edit/...`)
- *  and maps the render view into the client model. Every response wraps the view under a
- *  `document` key (`GetDraftResponse` / `ScoreEditedResponse`, both `{ document: ScoreView }`) —
- *  see PianoAppBackend's `adapters/inbound/http/score/{draft,edit}/router.py`.
+ *  and maps the render view into the client model. The draft read and every edit answer
+ *  `{ sync }`: the measures that changed and their sound (`GetDraftResponse` /
+ *  `ScoreEditedResponse`, PianoAppBackend's `adapters/inbound/http/score/sync.py`); `DraftSync`
+ *  puts the whole view together again.
  *
  *  Every call goes through `authorizedFetch` — the backend guards these routes with a Bearer
  *  access token (`Depends(current_user)`); an anonymous/expired request surfaces as an
@@ -22,6 +25,9 @@ export class DraftNotFoundError extends Error {
 }
 
 export class HttpGateway implements EditorGateway {
+  /** the view of each draft this client holds, measure by measure */
+  private syncs = new Map<string, DraftSync>();
+
   private draftUrl(draftId: string): string {
     return `${API_BASE}/drafts/${encodeURIComponent(draftId)}`;
   }
@@ -474,7 +480,20 @@ export class HttpGateway implements EditorGateway {
         body && typeof body === 'object' && 'detail' in body ? String((body as { detail: unknown }).detail) : null;
       throw new Error(detail ?? `Request failed (${res.status})`);
     }
-    const body = (await res.json()) as { document: ScoreView };
-    return fromView(body.document, draftId);
+    let sync: MeasureSyncWire = ((await res.json()) as { sync: MeasureSyncWire }).sync;
+    const held = this.syncs.get(draftId) ?? new DraftSync();
+    let view = held.apply(sync);
+    if (!view) {
+      // the response does not follow the version this client holds (another tab saved in between):
+      // the score is taken whole
+      const whole = await authorizedFetch(this.draftUrl(draftId));
+      if (!whole.ok) throw new Error(`Request failed (${whole.status})`);
+      sync = ((await whole.json()) as { sync: MeasureSyncWire }).sync;
+      view = held.apply(sync);
+      if (!view) throw new Error('The score could not be loaded by measure.');
+    }
+    this.syncs.set(draftId, held);
+    draftSounds.apply(draftId, sync, view);
+    return fromView(view, draftId);
   }
 }
