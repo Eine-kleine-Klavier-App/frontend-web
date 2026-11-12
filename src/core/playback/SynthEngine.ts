@@ -5,6 +5,8 @@ export interface SynthEngine {
   noteOn(channel: number, pitch: number, velocity: number): void;
   noteOff(channel: number, pitch: number): void;
   sustain(down: boolean): void;
+  /** Cut every sounding voice at once; the effects tails die out as silence is rendered. */
+  silence?(): void;
   render(frames: number): Float32Array;
   close(): void;
 }

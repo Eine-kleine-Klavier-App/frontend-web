@@ -66,6 +66,10 @@ export class FluidSynthEngine implements SynthEngine {
   sustain(down: boolean): void {
     for (let channel = 0; channel < SYNTH_CHANNELS; channel++) this.synth!.midiControl(channel, 64, down ? 127 : 0);
   }
+  silence(): void {
+    for (let channel = 0; channel < SYNTH_CHANNELS; channel++) this.synth!.midiAllSoundsOff(channel);
+    this.sustain(false);
+  }
   render(frames: number): Float32Array {
     const left = new Float32Array(frames);
     const right = new Float32Array(frames);
