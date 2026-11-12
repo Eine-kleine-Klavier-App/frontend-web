@@ -73,7 +73,6 @@ try {
         assert.notEqual(mode === 'foreign' && path.includes('/working/'), true, 'another author must never be overwritten');
         return promotes === 1 ? json({ detail: 'Temporary saving failure' }, 503) : json({ score_id: mode === 'owned' ? 'original' : 'saved-score' });
       }
-      if (path.endsWith('/playback/preview/map')) return json({ version: 0, carriers: [] });
       throw new Error(`Unexpected test request ${request.method()} ${path}`);
     });
     await page.route('**/__save_test__', route => route.fulfill({ contentType: 'text/html', body: '<link rel="stylesheet" href="/src/styles/tokens.css"><link rel="stylesheet" href="/src/index.css"><div id="root"></div>' }));

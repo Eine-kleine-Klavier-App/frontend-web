@@ -2,7 +2,7 @@ import { PcmStreamPlayer } from './PcmStreamPlayer';
 import SynthesisWorker from './Synthesis.worker?worker';
 import type { ScoreSource } from '@/core/model/scoreSource';
 import { DEFAULT_PLAYBACK_SETTINGS, withPlaybackSettings, type PlaybackSettings } from './PlaybackSettings';
-import type { PlaybackGateway, PlaybackMap, PreviewMap, SavedScorePlaybackGateway } from './PlaybackGateway';
+import type { PlaybackGateway, PlaybackMap, PreviewCarrier, SavedScorePlaybackGateway } from './PlaybackGateway';
 
 export interface PreviewTransport {
   bindSource?(source: ScoreSource | null): void;
@@ -23,7 +23,7 @@ export class LocalPreview implements PreviewTransport {
   private opening: Promise<void> | null = null;
   private connected = false;
   private source: ScoreSource | null = null;
-  private map: Promise<PreviewMap> | null = null;
+  private carriers = new Map<string, Promise<PreviewCarrier>>();
   private request: AbortController | null = null;
   private sequence = 0;
   private finish: (() => void) | null = null;
@@ -42,29 +42,29 @@ export class LocalPreview implements PreviewTransport {
     this.release();
     this.request?.abort();
     this.request = null;
-    this.map = null;
-    if (this.source) void this.loadMap().catch(() => {});
+    this.carriers.clear();
   }
-  private loadMap(): Promise<PreviewMap> {
-    if (this.map) return this.map;
+  /** a carrier's chord is asked of the server when it is first played and kept until the document changes */
+  private loadCarrier(carrierId: string): Promise<PreviewCarrier> {
+    const cached = this.carriers.get(carrierId);
+    if (cached) return cached;
     const source = this.source;
     if (!source) return Promise.reject(new DOMException('Preview closed.', 'AbortError'));
-    const request = new AbortController();
-    this.request = request;
-    const plan = source.kind === 'saved' ? this.savedGateway.previewMapScore(source.id, request.signal) : this.gateway.previewMap(source.id, request.signal);
-    const attempt = plan.then((map) => {
-      if (request.signal.aborted || this.source !== source) throw new DOMException('Obsolete preview map.', 'AbortError');
-      return map;
+    const request = (this.request ??= new AbortController());
+    const chord = source.kind === 'saved' ? this.savedGateway.previewCarrierScore(source.id, carrierId, request.signal) : this.gateway.previewCarrier(source.id, carrierId, request.signal);
+    const attempt = chord.then((carrier) => {
+      if (request.signal.aborted || this.source !== source) throw new DOMException('Obsolete preview.', 'AbortError');
+      return carrier;
     });
-    this.map = attempt;
+    this.carriers.set(carrierId, attempt);
     void attempt.catch(() => {
-      if (this.map === attempt) this.map = null;
+      if (this.carriers.get(carrierId) === attempt) this.carriers.delete(carrierId);
     });
     return attempt;
   }
   async prepare(): Promise<void> {
     await this.player.prepare();
-    await Promise.all([this.prepareWorker(), ...(this.source ? [this.loadMap()] : [])]);
+    await this.prepareWorker();
   }
   private prepareWorker(): Promise<void> {
     if (this.ready) return this.ready;
@@ -123,15 +123,13 @@ export class LocalPreview implements PreviewTransport {
     this.finish = onFinished;
     this.error = onError;
     await this.player.unlock();
-    const [preview] = await Promise.all([this.loadMap(), this.ensureLive()]);
+    const [carrier] = await Promise.all([this.loadCarrier(carrierId), this.ensureLive()]);
     if (this.sequence !== sequence || this.source !== source) throw new DOMException('Obsolete preview.', 'AbortError');
-    const carrier = preview.carriers.find((c) => c.carrierId === carrierId);
-    if (!carrier) throw new Error('This note is not available for preview.');
     const wanted = noteIds ? new Set(noteIds) : null;
     const notes = carrier.notes.filter((note) => !wanted || wanted.has(note.sourceId));
     if (!notes.length || (wanted && notes.length !== wanted.size)) throw new Error('The selected notes are not in this chord.');
     const map: PlaybackMap = {
-      version: preview.version, extentMs: Math.max(...notes.map((note) => note.durationMs)), pedals: [], anchors: [], segments: [],
+      version: carrier.version, extentMs: Math.max(...notes.map((note) => note.durationMs)), pedals: [], anchors: [], segments: [],
       notes: notes.map((note) => ({ sourceId: note.sourceId, pitch: note.pitch, velocity: note.velocity, startMs: 0, keyReleaseMs: note.durationMs, endMs: note.durationMs })),
     };
     this.worker!.postMessage({ type: 'preview', sequence, map: withPlaybackSettings(map, settings) });
@@ -146,7 +144,7 @@ export class LocalPreview implements PreviewTransport {
     this.release();
     this.request?.abort();
     this.request = null;
-    this.map = null;
+    this.carriers.clear();
     this.source = null;
     this.rejectReady?.(new DOMException('Preview closed.', 'AbortError'));
     this.rejectReady = null;

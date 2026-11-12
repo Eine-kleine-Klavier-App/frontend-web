@@ -37,13 +37,13 @@ class SavedScorePlayback implements ScorePlayback {
   private listeners = new Set<() => void>();
   private request: AbortController | null = null;
   private generation = 0;
+  private transportIntent: { running: boolean } | null = null;
   private cache = new PlaybackCache();
   private cachedScore: string | null = null;
   private cachedMap: PlaybackMap | null = null;
-  private player = new PcmStreamPlayer(6, (running) => {
-    if (!this.request) return;
-    if (running && this.state.phase === 'paused') this.set({ phase: 'playing' });
-    else if (!running && this.state.phase === 'playing') this.set({ phase: 'paused' });
+  private player = new PcmStreamPlayer(0, (running) => {
+    if (!this.request || (running && this.transportIntent) || this.state.phase !== (running ? 'paused' : 'playing')) return;
+    this.set({ phase: running ? 'playing' : 'paused', timeMs: this.player.positionMs() ?? this.state.timeMs });
   });
 
   constructor(private gateway: SavedScorePlaybackGateway) {}
@@ -65,6 +65,7 @@ class SavedScorePlayback implements ScorePlayback {
     this.generation++;
     this.request?.abort();
     this.request = null;
+    this.transportIntent = null;
     this.player.stop();
   }
   stop(): void {
@@ -85,32 +86,32 @@ class SavedScorePlayback implements ScorePlayback {
     if (phase === 'replay' && track?.id !== scoreId && track?.parentScoreId !== scoreId) this.stop();
   }
   pause(): void {
-    if (this.state.phase !== 'playing') return;
+    if (this.state.phase === 'playing') void this.changeRunning(false);
+  }
+  private async changeRunning(running: boolean): Promise<void> {
+    if (this.transportIntent?.running === running) return;
     const generation = this.generation;
-    this.set({ phase: 'paused', timeMs: this.player.positionMs() ?? this.state.timeMs });
-    void this.player.pause().catch((error) => {
-      if (!(error instanceof DOMException && error.name === 'AbortError')) this.fail(error, generation);
-    });
+    const intent = { running };
+    this.transportIntent = intent;
+    try {
+      const timeMs = await (running ? this.player.resume() : this.player.pause());
+      if (this.transportIntent === intent && this.generation === generation) {
+        this.set({ phase: running ? 'playing' : 'paused', timeMs: timeMs ?? this.state.timeMs, error: null });
+      }
+    } catch (error) {
+      if (this.transportIntent === intent && !(error instanceof DOMException && error.name === 'AbortError')) this.fail(error, generation);
+    } finally {
+      if (this.transportIntent === intent) this.transportIntent = null;
+    }
   }
   async play(track: ScorePlaybackTrack): Promise<void> {
     if (this.state.track?.id === track.id) {
-      if (this.state.phase === 'playing') {
-        this.pause();
+      if (this.state.phase === 'playing' || this.state.phase === 'paused') {
+        await this.changeRunning(!(this.transportIntent?.running ?? (this.state.phase === 'playing')));
         return;
       }
       if (this.state.phase === 'loading') {
         this.stop();
-        return;
-      }
-      if (this.state.phase === 'paused') {
-        const generation = this.generation;
-        this.set({ phase: 'playing', error: null });
-        try {
-          await this.player.unlock();
-        }
-        catch (error) {
-          if (!(error instanceof DOMException && error.name === 'AbortError')) this.fail(error, generation);
-        }
         return;
       }
     }
@@ -151,6 +152,7 @@ class SavedScorePlayback implements ScorePlayback {
       }
       if (generation === this.generation) {
         this.request = null;
+        this.transportIntent = null;
         this.set({ phase: 'replay' });
       }
     } catch (error) {
