@@ -63,8 +63,8 @@ app=FastAPI();register_exception_handlers(app=app)
 app.include_router(build_scores_router(service=ScoreCatalogService(score_uow_factory=Uow),current_user=required,current_user_optional=optional))
 app.include_router(build_draft_router(service=DraftService(storage=history,score_uow_factory=Uow),current_user=required))
 app.include_router(build_edit_router(service=ScoreEditService(engine=build_engine(),compiler=build_compiler(),history=history),current_user=required))
-app.include_router(build_playback_router(service=PlaybackService(storage=history,renderer=None),current_user=required))
-app.include_router(build_saved_playback_router(service=SavedScorePlaybackService(score_uow_factory=Uow,renderer=None),current_user_optional=optional))
+app.include_router(build_playback_router(service=PlaybackService(storage=history),current_user=required))
+app.include_router(build_saved_playback_router(service=SavedScorePlaybackService(score_uow_factory=Uow),current_user_optional=optional))
 async def handle(value):
  async with AsyncClient(transport=ASGITransport(app=app),base_url='http://isolated') as client:
   response=await client.request(value['method'],value['path'],headers={'authorization':'Bearer isolated'} if value.get('authed') else {},json=value.get('body'))
