@@ -19,8 +19,10 @@ const policy = (params.get('policy') ?? 'ask') as 'ask' | 'preserve_pitch' | 'pr
 useEditor.setState({
   document, loading: false, scoreId: 'demo', locked: false, pitchPolicy: policy,
   currentStaff: document.staffOrder[0] ?? '',
-  load: async () => {},
-  gateway: { apply: async () => useEditor.getState().document },
+  gateway: {
+    load: async (_draftId: string) => document,
+    apply: async () => useEditor.getState().document,
+  },
 } as never);
 (window as never as { __editor: unknown }).__editor = useEditor;
 
@@ -66,10 +68,12 @@ const playedBeats = offsetBeats;
 const map: PlaybackMap = { pedals: [], notes, anchors: [], segments, extentMs: playedBeats * MS_PER_BEAT, version: 1 };
 const controller = playback as never as { prepareMap: () => Promise<void>; set: (patch: object) => void };
 playback.bindDraft('demo');
-controller.prepareMap = async () => {};
 const t = Number(params.get('t') ?? 6 * MS_PER_BEAT * 4 + 120); // bar 7-ish, shortly after an onset
 const playing = params.get('playing') !== '0';
 const apply = (ms: number, on = playing) => controller.set({ map, ready: true, mapLoading: false, playing: on, timeMs: ms, timeBeats: beatAtTime(map, ms), totalBeats });
+controller.prepareMap = async () => {
+  if (!playback.getState().map) apply(t);
+};
 apply(t);
 if (params.get('clock') === '1') {
   const standIn = playback as never as Record<'play' | 'pause' | 'stop' | 'seek', (...args: never[]) => unknown>;
