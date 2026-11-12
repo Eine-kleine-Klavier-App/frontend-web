@@ -1,11 +1,8 @@
 import { authorizedFetch, optionalAuthFetch } from '@/core/auth/authorizedFetch';
 import { API_BASE } from '@/core/gateway/apiBase';
-import type { PlaybackGateway, PlaybackMap, PreviewMap, SavedScorePlaybackGateway } from './PlaybackGateway';
+import type { PlaybackMap, PreviewCarrier, SavedScorePlaybackGateway } from './PlaybackGateway';
 
-interface RawPreviewCarrier {
-  carrier_id: string;
-  notes: { source_id: string; pitch: number; velocity: number; duration_ms: number }[];
-}
+interface RawPreviewNote { source_id: string; pitch: number; velocity: number; duration_ms: number }
 interface RawPlaybackNote {
   source_id: string;
   pitch: number;
@@ -22,24 +19,16 @@ interface RawPlaybackSegment {
   moments: { position: unknown; time_ms: number }[];
 }
 
-export class HttpPlaybackGateway implements PlaybackGateway, SavedScorePlaybackGateway {
-  async map(draftId: string, signal: AbortSignal): Promise<PlaybackMap> {
-    return this.readMap(`/drafts/${encodeURIComponent(draftId)}/playback/map`, signal);
-  }
-
+export class HttpPlaybackGateway implements SavedScorePlaybackGateway {
   async mapScore(scoreId: string, signal: AbortSignal): Promise<PlaybackMap> {
     return this.readMap(`/scores/${encodeURIComponent(scoreId)}/playback/map`, signal, true);
   }
 
-  previewMap(draftId: string, signal: AbortSignal): Promise<PreviewMap> {
-    return this.readPreviewMap(`/drafts/${encodeURIComponent(draftId)}/playback/preview/map`, signal);
+  previewCarrierScore(scoreId: string, carrierId: string, signal: AbortSignal): Promise<PreviewCarrier> {
+    return this.readPreviewCarrier(`/scores/${encodeURIComponent(scoreId)}/playback/preview/carriers/${encodeURIComponent(carrierId)}`, signal, true);
   }
 
-  previewMapScore(scoreId: string, signal: AbortSignal): Promise<PreviewMap> {
-    return this.readPreviewMap(`/scores/${encodeURIComponent(scoreId)}/playback/preview/map`, signal, true);
-  }
-
-  private async readPreviewMap(path: string, signal: AbortSignal, saved = false): Promise<PreviewMap> {
+  private async readPreviewCarrier(path: string, signal: AbortSignal, saved = false): Promise<PreviewCarrier> {
     const value = await this.read(path, signal, saved);
     if (
       !value ||
@@ -47,24 +36,20 @@ export class HttpPlaybackGateway implements PlaybackGateway, SavedScorePlaybackG
       !('version' in value) ||
       !Number.isSafeInteger(value.version) ||
       (value.version as number) < 0 ||
-      !('carriers' in value) ||
-      !Array.isArray(value.carriers)
+      !('carrier_id' in value) ||
+      typeof value.carrier_id !== 'string' ||
+      !('notes' in value) ||
+      !Array.isArray(value.notes)
     ) {
-      throw new Error('Invalid preview map.');
+      throw new Error('Invalid preview carrier.');
     }
-    const seen = new Set<string>();
-    const carriers = value.carriers.map((carrier: RawPreviewCarrier) => {
-      if (typeof carrier.carrier_id !== 'string' || seen.has(carrier.carrier_id) || !Array.isArray(carrier.notes)) throw new Error('Invalid preview carrier.');
-      seen.add(carrier.carrier_id);
-      const notes = carrier.notes.map((note) => {
-        if (typeof note.source_id !== 'string' || !isMidiNote(note.pitch, note.velocity) || !Number.isFinite(note.duration_ms) || note.duration_ms <= 0) {
-          throw new Error('Invalid preview note.');
-        }
-        return { sourceId: note.source_id, pitch: note.pitch, velocity: note.velocity, durationMs: note.duration_ms };
-      });
-      return { carrierId: carrier.carrier_id, notes };
+    const notes = (value.notes as RawPreviewNote[]).map((note) => {
+      if (typeof note.source_id !== 'string' || !isMidiNote(note.pitch, note.velocity) || !Number.isFinite(note.duration_ms) || note.duration_ms <= 0) {
+        throw new Error('Invalid preview note.');
+      }
+      return { sourceId: note.source_id, pitch: note.pitch, velocity: note.velocity, durationMs: note.duration_ms };
     });
-    return { version: value.version as number, carriers };
+    return { version: value.version as number, carrierId: value.carrier_id, notes };
   }
 
   private async readMap(path: string, signal: AbortSignal, saved = false): Promise<PlaybackMap> {
@@ -105,7 +90,7 @@ function beatsOf(value: unknown): number {
   return ((fraction.numerator as number) / (fraction.denominator as number)) * 4;
 }
 
-function parsePlaybackMap(value: unknown, version: unknown, extentMs: unknown): PlaybackMap {
+export function parsePlaybackMap(value: unknown, version: unknown, extentMs: unknown): PlaybackMap {
   if (
     !value ||
     typeof value !== 'object' ||

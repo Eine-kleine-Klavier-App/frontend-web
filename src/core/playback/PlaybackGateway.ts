@@ -8,7 +8,8 @@ export interface PlaybackAnchor { carrierId: string; startMs: number; endMs: num
 export interface PlaybackNote { sourceId: string; pitch: number; startMs: number; keyReleaseMs: number; endMs: number; velocity: number }
 export interface PlaybackPedal { downMs: number; upMs: number }
 export interface PreviewNote { sourceId: string; pitch: number; velocity: number; durationMs: number }
-export interface PreviewMap { version: number; carriers: { carrierId: string; notes: PreviewNote[] }[] }
+/** The chord of one note carrier as the preview strikes it. */
+export interface PreviewCarrier { version: number; carrierId: string; notes: PreviewNote[] }
 export interface PlaybackMap { pedals: PlaybackPedal[]; notes: PlaybackNote[]; anchors: PlaybackAnchor[]; segments: PlaybackSegment[]; extentMs: number; version: number }
 
 export interface PlaybackAudio {
@@ -23,14 +24,15 @@ export interface PlaybackAudio {
   map?: PlaybackMap;
 }
 
-/** Musical timing and preview pitches are resolved by the server. */
+/** The playback map and the chord a click plays of a draft: the server resolves them, and they come
+ *  measure by measure with the responses to the draft (see `draftSounds`). */
 export interface PlaybackGateway {
   map(draftId: string, signal: AbortSignal): Promise<PlaybackMap>;
-  previewMap(draftId: string, signal: AbortSignal): Promise<PreviewMap>;
+  previewCarrier(draftId: string, carrierId: string, signal: AbortSignal): Promise<PreviewCarrier>;
 }
 
 /** Read a durable score's playback plan without creating an editing draft. */
 export interface SavedScorePlaybackGateway {
   mapScore(scoreId: string, signal: AbortSignal): Promise<PlaybackMap>;
-  previewMapScore(scoreId: string, signal: AbortSignal): Promise<PreviewMap>;
+  previewCarrierScore(scoreId: string, carrierId: string, signal: AbortSignal): Promise<PreviewCarrier>;
 }

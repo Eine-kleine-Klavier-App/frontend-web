@@ -34,7 +34,6 @@ try {
    view.presentation.directions=req.postDataJSON().changes.filter(c=>c.kind==='direction').map(c=>({...c.target,direction:c.direction}));
    return json({document:view});
   }
-  if(path.endsWith('/playback/preview/map')) return json({version:0,carriers:[]});
   if(path.startsWith('/api/drafts/copy-') || path==='/api/drafts/created-copy') return json({document:await (await page.request.get(new URL('/demo-editor-view.json',process.env.VITE_URL||'http://localhost:5173').href)).json()});
   unexpected.push(`${req.method()} ${path}`); return json({detail:'Unexpected isolated test request'},500);
  });

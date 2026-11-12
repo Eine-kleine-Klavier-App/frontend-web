@@ -81,23 +81,24 @@ class Worker {
 const settings=load('src/core/playback/PlaybackSettings.ts');
 const {LocalPreview}=load('src/core/playback/LocalPreview.ts',{'./PcmStreamPlayer':{PcmStreamPlayer:Player},'./Synthesis.worker?worker':{default:Worker},'./PlaybackSettings':settings},{queueMicrotask});
 let calls=0;const resolveMaps=[];
-const data={version:4,carriers:[{carrierId:'c',notes:[{sourceId:'n',pitch:60,velocity:80,durationMs:650}]}]};
-const gateway={previewMap:async()=>{calls++;return data;}};
+const data={version:4,carrierId:'c',notes:[{sourceId:'n',pitch:60,velocity:80,durationMs:650}]};
+const gateway={previewCarrier:async()=>{calls++;return data;}};
 const preview=new LocalPreview(gateway);preview.bindDraft('d');await preview.prepare();let finishes=0;
 await preview.preview('d','c',undefined,()=>finishes++,()=>{});const worker=Worker.instances.at(-1),first=worker.sent.at(-1);
 await preview.preview('d','c',['n'],()=>finishes++,()=>{});const second=worker.sent.at(-1);
 assert.equal(calls,1);assert.equal(first.map.notes[0].keyReleaseMs,650);assert.equal(second.map.notes[0].pitch,60);
 worker.emit({type:'finished',sequence:first.sequence});assert.equal(finishes,0);
 worker.emit({type:'finished',sequence:second.sequence});assert.equal(finishes,1);
-preview.invalidate();await flush();assert.equal(calls,2);
+preview.invalidate();await flush();assert.equal(calls,1,'a changed document must not fetch before a note is played');
+await preview.preview('d','c',undefined,()=>finishes++,()=>{});assert.equal(calls,2);
 await assert.rejects(preview.preview('d','c',['missing'],()=>{},()=>{}),/selected notes/);
 preview.close();assert.equal(worker.terminated,true);
-const slow=new LocalPreview({previewMap:()=>new Promise(resolve=>resolveMaps.push(resolve))});slow.bindDraft('d');const loading=slow.preview('d','c',undefined,()=>{},()=>{});await flush();slow.invalidate();const rejected=assert.rejects(loading,{name:'AbortError'});resolveMaps[0](data);await rejected;slow.close();
-console.log('PASS prepared preview-map reuse, selected chord notes, stale completion and revision cancellation');
+const slow=new LocalPreview({previewCarrier:()=>new Promise(resolve=>resolveMaps.push(resolve))});slow.bindDraft('d');const loading=slow.preview('d','c',undefined,()=>{},()=>{});await flush();slow.invalidate();const rejected=assert.rejects(loading,{name:'AbortError'});resolveMaps[0](data);await rejected;slow.close();
+console.log('PASS preview-chord reuse, selected chord notes, stale completion and revision cancellation');
 
 let draftReads=0,savedReads=0;
-const shared=new LocalPreview({previewMap:async()=>{draftReads++;return data;}},
-  {previewMapScore:async()=>{savedReads++;return {...data,version:8};}});
+const shared=new LocalPreview({previewCarrier:async()=>{draftReads++;return data;}},
+  {previewCarrierScore:async()=>{savedReads++;return {...data,version:8};}});
 shared.bindSource({kind:'saved',id:'same'});await shared.prepare();
 await shared.preview('same','c',['n'],()=>{},()=>{}, {speed:2,transpose:2});
 let savedWorker=Worker.instances.at(-1),savedPacket=savedWorker.sent.at(-1);
@@ -107,7 +108,7 @@ shared.bindDraft('same');await shared.prepare();await shared.preview('same','c',
 assert.equal(draftReads,1);assert.equal(savedWorker.terminated,true,'equal raw id cannot retain saved preview when binding draft');
 assert.equal(Worker.instances.at(-1).sent.at(-1).map.notes[0].pitch,60);
 shared.close();
-let resolveSaved;const sourceRace=new LocalPreview(gateway,{previewMapScore:()=>new Promise(resolve=>resolveSaved=resolve)});
+let resolveSaved;const sourceRace=new LocalPreview(gateway,{previewCarrierScore:()=>new Promise(resolve=>resolveSaved=resolve)});
 sourceRace.bindSource({kind:'saved',id:'old'});
 const oldPreview=sourceRace.preview('old','c',undefined,()=>{},()=>{});await flush();
 const oldRejected=assert.rejects(oldPreview,{name:'AbortError'});
