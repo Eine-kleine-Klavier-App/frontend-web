@@ -5,12 +5,27 @@ import PlaybackWorker from './PlaybackStream.worker?worker';
 interface PlaybackClock {
   startFrame: number;
   rate: number;
+  port: MessagePort;
+  anchors: ClockAnchor[];
+  lastMs: number;
+  previous: PlaybackClock | null;
+}
+
+interface ClockAnchor {
   frames: number;
   queued: number;
   contextTime: number;
   advancing: boolean;
-  lastMs: number;
-  previous: PlaybackClock | null;
+  held?: boolean;
+}
+
+interface TransportBoundary {
+  token: number;
+  clock: PlaybackClock;
+  running: boolean;
+  contextTime: number | null;
+  resolve: (ms: number | null) => void;
+  reject: (error: Error) => void;
 }
 
 interface OutputGain {
@@ -36,6 +51,9 @@ export class PcmStreamPlayer {
   private lifecycle: (() => void) | null = null;
   private clock: PlaybackClock | null = null;
   private fadingOutputs = new Set<OutputGain>();
+  private transportToken = 0;
+  private transport: TransportBoundary | null = null;
+  private transportRunning = true;
 
   get sampleRate(): number {
     this.initialize();
@@ -64,7 +82,13 @@ export class PcmStreamPlayer {
         throw error;
       });
       const changed = () => {
-        if (this.context === context) this.onState?.(context.state === 'running' && this.wantsRunning);
+        if (this.context !== context) return;
+        if (context.state !== 'running') {
+          if (this.clock && this.transport) this.holdInterrupted(this.clock);
+          this.onState?.(false);
+        } else if (this.transportRunning && !this.transport) {
+          this.onState?.(this.wantsRunning);
+        }
       };
       const wake = () => {
         if (globalThis.document?.visibilityState !== 'hidden' && this.wantsRunning && this.outputs.size && context.state !== 'running') {
@@ -130,12 +154,13 @@ export class PcmStreamPlayer {
     return channel.port2;
   }
 
-  async pause(): Promise<void> {
-    this.positionMs();
+  async pause(): Promise<number | null> {
+    if (this.clock && this.context?.state === 'running') return this.requestTransport(false);
+    if (this.clock) return this.holdInterrupted(this.clock);
     const intent = ++this.intent;
     this.wantsRunning = false;
     const context = this.context;
-    if (!context) return;
+    if (!context) return null;
     const waiting = [this.suspension, this.resumption].filter((operation): operation is Promise<void> => operation !== null);
     const pending = waiting.length ? Promise.all(waiting).then(async () => {
       if (this.context === context && intent === this.intent && !this.wantsRunning && context.state === 'running') await context.suspend();
@@ -147,6 +172,58 @@ export class PcmStreamPlayer {
     finally {
       if (this.suspension === pending) this.suspension = null;
     }
+    return null;
+  }
+
+  async resume(): Promise<number | null> {
+    if (this.context?.state !== 'running') await this.unlock();
+    return this.requestTransport(true);
+  }
+
+  private requestTransport(running: boolean): Promise<number | null> {
+    const context = this.context;
+    const clock = this.clock;
+    if (!clock || !context) return Promise.resolve(null);
+    if (!this.transport && this.transportRunning === running) return Promise.resolve(this.positionMs());
+    this.cancelTransport();
+    const token = ++this.transportToken;
+    this.transportRunning = running;
+    // Let a committed seek complete its crossfade before holding the new source.
+    let at = context.currentTime;
+    for (const output of this.fadingOutputs) {
+      if (output.retireAt !== null) at = Math.max(at, output.retireAt);
+      if (output.port === clock.port) at = Math.max(at, output.end);
+    }
+    const frame = Math.ceil((at * context.sampleRate + 128) / 128) * 128;
+    return new Promise((resolve, reject) => {
+      this.transport = { token, clock, running, contextTime: null, resolve, reject };
+      clock.port.postMessage({ type: 'transport', token, running, frame });
+    });
+  }
+
+  private cancelTransport(): void {
+    this.transport?.reject(new DOMException('Audio operation superseded.', 'AbortError'));
+    this.transport = null;
+  }
+
+  private holdInterrupted(clock: PlaybackClock): number | null {
+    const position = this.positionMs();
+    const pending = this.transport;
+    this.transport = null;
+    this.transportRunning = false;
+    this.wantsRunning = false;
+    this.intent++;
+    clock.port.postMessage({ type: 'transport', token: ++this.transportToken, running: false, frame: 0, immediate: true });
+    if (pending?.running) pending.reject(new DOMException('Audio output interrupted.', 'AbortError'));
+    else pending?.resolve(position);
+    return position;
+  }
+
+  private settleTransport(clock: PlaybackClock, outputTime: number, ms: number): void {
+    const pending = this.transport;
+    if (!pending || pending.clock !== clock || pending.contextTime === null || outputTime < pending.contextTime) return;
+    this.transport = null;
+    pending.resolve(ms);
   }
 
   /** The source position currently reaching the output device, bounded by known buffered PCM. */
@@ -154,33 +231,60 @@ export class PcmStreamPlayer {
     const clock = this.clock;
     const context = this.context;
     if (!clock || !context) return null;
-    return this.audiblePosition(clock, context);
+    return this.audiblePosition(clock, this.outputTime(context));
   }
 
-  private audiblePosition(clock: PlaybackClock, context: AudioContext): number {
-    const ms = this.clockPosition(clock, context);
-    if (clock.previous && ms <= clock.startFrame / clock.rate * 1000) return this.audiblePosition(clock.previous, context);
+  private audiblePosition(clock: PlaybackClock, outputTime: number): number {
+    const ms = this.clockPosition(clock, outputTime);
+    if (clock.previous && ms <= clock.startFrame / clock.rate * 1000) return this.audiblePosition(clock.previous, outputTime);
     clock.previous = null;
     return ms;
   }
 
-  private clockPosition(clock: PlaybackClock, context: AudioContext): number {
-    if (!this.wantsRunning || context.state !== 'running') return clock.lastMs;
+  private outputTime(context: AudioContext): number {
+    if (context.state !== 'running') return -Infinity;
     const output = context.getOutputTimestamp?.();
     const rendered = Math.max(0, context.currentTime - (context.outputLatency || context.baseLatency || 0));
     // Some devices report a render-head timestamp. Never advance past their reported output delay.
-    const time = output && typeof output.contextTime === 'number' && Number.isFinite(output.contextTime) && typeof output.performanceTime === 'number' && output.performanceTime > 0
+    return output && typeof output.contextTime === 'number' && Number.isFinite(output.contextTime) && typeof output.performanceTime === 'number' && output.performanceTime > 0
       ? Math.max(0, Math.min(rendered, output.contextTime + Math.max(0, performance.now() - output.performanceTime) / 1000))
       : rendered;
-    const delta = time - clock.contextTime;
-    const frames = Math.max(0, Math.min(clock.frames + clock.queued, clock.frames + (clock.advancing ? delta : Math.min(0, delta)) * clock.rate));
-    clock.lastMs = Math.max(clock.lastMs, (clock.startFrame + frames) / clock.rate * 1000);
+  }
+
+  private clockPosition(clock: PlaybackClock, outputTime: number): number {
+    // The newest rendered progress can be on the other side of a pause from the output device.
+    for (let index = clock.anchors.length - 1; index >= 0; index--) {
+      const anchor = clock.anchors[index];
+      if (anchor.contextTime > outputTime) continue;
+      const next = clock.anchors[index + 1];
+      const limit = Math.min(anchor.frames + anchor.queued, next?.frames ?? Infinity);
+      const frames = anchor.advancing ? Math.min(limit, anchor.frames + (outputTime - anchor.contextTime) * clock.rate) : anchor.frames;
+      const position = (clock.startFrame + frames) / clock.rate * 1000;
+      clock.lastMs = anchor.held ? position : Math.max(clock.lastMs, position);
+      break;
+    }
     return clock.lastMs;
+  }
+
+  private recordClock(clock: PlaybackClock, anchor: ClockAnchor): void {
+    const last = clock.anchors.at(-1);
+    if (last && anchor.contextTime <= last.contextTime) {
+      if (anchor.contextTime === last.contextTime && anchor.held) clock.anchors[clock.anchors.length - 1] = anchor;
+      return;
+    }
+    clock.anchors.push(anchor);
+    // Retain two seconds of precise positions behind the render head for high-latency devices.
+    if (clock.anchors.length > 512) {
+      const keep = clock.anchors.findIndex((point) => point.contextTime >= anchor.contextTime - 2);
+      if (keep > 1) clock.anchors.splice(0, keep - 1);
+    }
   }
 
   stop(): void {
     this.intent++;
     this.wantsRunning = false;
+    this.cancelTransport();
+    this.transportRunning = true;
     for (const stop of [...this.outputs]) stop();
     this.clock = null;
   }
@@ -220,7 +324,8 @@ export class PcmStreamPlayer {
     const worker = new PlaybackWorker();
     const channel = new MessageChannel();
     const firstFrame = Math.round(startMs * audio.sampleRate / 1000);
-    const clock: PlaybackClock = { startFrame: firstFrame, rate: audio.sampleRate, frames: 0, queued: 0, contextTime: context.currentTime, advancing: false, lastMs: firstFrame / audio.sampleRate * 1000, previous: null };
+    const clock: PlaybackClock = { startFrame: firstFrame, rate: audio.sampleRate, port: node.port,
+      anchors: [], lastMs: firstFrame / audio.sampleRate * 1000, previous: null };
     const outputGain = context.createGain();
     outputGain.gain.value = 1;
     const output: OutputGain = { port: node.port, rate: context.sampleRate, retireAt: null, from: 0, to: 0, start: 0, end: 0 };
@@ -229,6 +334,7 @@ export class PcmStreamPlayer {
     let started = false;
     let ticking = false;
     let done = false;
+    let frames = 0;
     let transferred = false;
     let frame = 0;
     let resolve!: () => void, reject!: (error: unknown) => void;
@@ -238,15 +344,17 @@ export class PcmStreamPlayer {
     });
     const stop = () => reject(new DOMException('Playback stopped.', 'AbortError'));
     const tick = () => {
-      const ms = this.clockPosition(clock, context);
-      if (!started && ms !== null && (ms > firstFrame / clock.rate * 1000 || (done && clock.frames === 0))) {
+      const outputTime = this.outputTime(context);
+      const ms = this.clockPosition(clock, outputTime);
+      this.settleTransport(clock, outputTime, ms);
+      if (!started && (ms > firstFrame / clock.rate * 1000 || (done && frames === 0))) {
         started = true;
         clock.previous = null;
         onStarted();
       }
       if (started) onTime(ms);
-      else if (clock.previous) onTime(this.audiblePosition(clock, context));
-      if (done && ms !== null && ms >= (firstFrame + clock.frames) / clock.rate * 1000 - 0.01) {
+      else if (clock.previous) onTime(this.audiblePosition(clock, outputTime));
+      if (done && ms >= (firstFrame + frames) / clock.rate * 1000 - 0.01) {
         resolve();
         return;
       }
@@ -269,18 +377,24 @@ export class PcmStreamPlayer {
         this.fadingOutputs.add(output);
         clock.previous = this.clock;
         this.clock = clock;
+        this.recordClock(clock, { frames: 0, queued: data.queued, contextTime: at, advancing: true });
         node.port.postMessage({ type: 'begin', frame: beginFrame });
         onReady();
         return;
       }
+      if (data.type === 'transport') {
+        this.recordClock(clock, { frames: data.frames + data.phase, queued: data.queued,
+          contextTime: data.contextTime, advancing: data.running, held: !data.running });
+        const pending = this.transport;
+        if (pending?.clock === clock && pending.token === data.token) pending.contextTime = data.contextTime;
+        return;
+      }
       if (data.type !== 'progress' && data.type !== 'done') return;
-      // A final drain message can repeat the last source frame after the output tail.
-      if (data.frames !== clock.frames || clock.advancing || data.advancing) clock.contextTime = data.contextTime;
-      clock.frames = data.frames;
-      clock.queued = data.queued;
-      clock.advancing = data.advancing;
+      frames = data.frames;
+      this.recordClock(clock, { frames: data.frames + data.phase, queued: data.queued,
+        contextTime: data.contextTime, advancing: data.advancing });
       done = data.type === 'done';
-      if (!ticking && (clock.frames > 0 || done)) {
+      if (!ticking && (frames > 0 || done)) {
         ticking = true;
         frame = requestAnimationFrame(tick);
       }
@@ -300,6 +414,12 @@ export class PcmStreamPlayer {
       await completion;
     } finally {
       cancelAnimationFrame(frame);
+      if (this.transport?.clock === clock) {
+        if (done) {
+          this.transport.resolve(clock.lastMs);
+          this.transport = null;
+        } else this.cancelTransport();
+      }
       if (this.clock === clock) this.clock = null;
       this.outputs.delete(stop);
       signal.removeEventListener('abort', stop);
