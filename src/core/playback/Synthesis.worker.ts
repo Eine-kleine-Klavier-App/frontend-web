@@ -1,5 +1,5 @@
 import { FluidSynthEngine } from './FluidSynthEngine';
-import { SynthScheduler } from './SynthScheduler';
+import { CHUNK_FRAMES, renderStartFrame, SynthScheduler } from './SynthScheduler';
 import type { PlaybackMap } from './PlaybackGateway';
 import { errorMessage } from '@/core/errorMessage';
 
@@ -45,18 +45,39 @@ function pump(): void {
   }, 0);
 }
 
-async function render(map: PlaybackMap): Promise<void> {
+/** The render for the cache: chunks of audio from a start before the target, produced up to a limit the cache moves ahead as it reads. */
+interface Stream {
+  token: number;
+  next: number;
+  limit: number;
+  running: boolean;
+}
+let stream: Stream | null = null;
+
+async function startStream(map: PlaybackMap, targetFrame: number, untilChunk: number, token: number): Promise<void> {
   await ready;
-  scheduler!.replace(map);
-  while (!stopped && scheduler!.remaining) {
+  if (stopped) return;
+  const start = renderStartFrame(map, targetFrame, engine!.sampleRate);
+  scheduler!.replaceFrom(map, start);
+  const created: Stream = { token, next: start / CHUNK_FRAMES, limit: untilChunk, running: false };
+  stream = created;
+  host.postMessage({ type: 'started', token, firstChunk: created.next });
+  await produce(created);
+}
+
+async function produce(current: Stream): Promise<void> {
+  if (current.running) return;
+  current.running = true;
+  while (stream === current && !stopped && scheduler!.remaining && current.next < current.limit) {
     const deadline = performance.now() + 12;
     do {
-      const samples = scheduler!.render(4096);
-      host.postMessage({ type: 'chunk', samples }, [samples.buffer]);
-    } while (!stopped && scheduler!.remaining && performance.now() < deadline);
-    if (scheduler!.remaining) await new Promise((resolve) => setTimeout(resolve, 0));
+      const samples = scheduler!.render(CHUNK_FRAMES);
+      host.postMessage({ type: 'chunk', token: current.token, index: current.next++, samples }, [samples.buffer]);
+    } while (stream === current && !stopped && scheduler!.remaining && current.next < current.limit && performance.now() < deadline);
+    if (scheduler!.remaining && current.next < current.limit) await new Promise((resolve) => setTimeout(resolve, 0));
   }
-  if (!stopped) host.postMessage({ type: 'done' });
+  current.running = false;
+  if (stream === current && !stopped && !scheduler!.remaining) host.postMessage({ type: 'done', token: current.token, endChunk: current.next });
 }
 
 host.onmessage = ({ data }) => {
@@ -67,8 +88,13 @@ host.onmessage = ({ data }) => {
       host.postMessage({ type: 'ready' });
     });
     void ready.catch(fail);
-  } else if (data.type === 'render') void render(data.map).catch(fail);
-  else if (data.type === 'live') {
+  } else if (data.type === 'render') void startStream(data.map, data.targetFrame, data.untilChunk, data.token).catch(fail);
+  else if (data.type === 'extend') {
+    if (stream && stream.token === data.token && data.untilChunk > stream.limit) {
+      stream.limit = data.untilChunk;
+      void produce(stream).catch(fail);
+    }
+  } else if (data.type === 'live') {
     source = data.port;
     source!.onmessage = ({ data: progress }) => {
       if (progress.type === 'progress' || progress.type === 'done') {

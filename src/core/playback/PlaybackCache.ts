@@ -1,13 +1,31 @@
 import SynthesisWorker from './Synthesis.worker?worker';
+import { CHUNK_FRAMES } from './SynthScheduler';
 import type { PlaybackAudio, PlaybackMap } from './PlaybackGateway';
 
+/** A reader of the audio: the stream handed to the player. It keeps the chunks around its place alive. */
+interface Reader {
+  index: number;
+  token: number;
+}
 interface Entry {
   map: PlaybackMap;
   rate: number;
   worker: Worker;
-  chunks: Uint8Array[];
-  frames: number;
-  complete: boolean;
+  /** Rendered audio by chunk number of the whole piece; only the neighbourhood of the readers and of the latest target is kept. */
+  chunks: Map<number, Uint8Array>;
+  readers: Set<Reader>;
+  /** The render in progress: its number, the next chunk it will deliver, the chunk it has been asked to reach, and whether it reached the end. */
+  token: number;
+  started: boolean;
+  next: number;
+  limit: number;
+  endChunk: number | null;
+  /** A start requested but not yet acknowledged by the worker, as a chunk number. */
+  awaiting: number | null;
+  /** The chunk the latest open or seek aims at. */
+  target: number;
+  /** A start to send as soon as the worker has loaded its instrument. */
+  pending: { chunk: number } | null;
   failure: Error | DOMException | null;
   waiting: Set<() => void>;
 }
@@ -17,12 +35,19 @@ interface Prepared {
   ready: Promise<void>;
   reject: (error: unknown) => void;
 }
-const RENDER_FRAMES = 4096;
+const AHEAD_SECONDS = 40;
+const BEHIND_SECONDS = 20;
+/** A target further ahead of the render than this starts a new render at the target instead of rendering the gap. */
+const FORWARD_RESTART_SECONDS = 10;
+const SLACK_CHUNKS = 4;
+/** The player's prime buffer, waited for after a seek target. */
+const PRIME_SECONDS = 0.8;
 
-/** Full local PCM cache for one document revision and instrument/sample-rate configuration. */
+/** Local PCM for one document revision and instrument/sample-rate configuration: a window around the position, rendered on demand. */
 export class PlaybackCache {
   private entry: Entry | null = null;
   private prepared: Prepared | null = null;
+  private readyWorkers = new WeakSet<Worker>();
 
   clear(): void {
     const error = new DOMException('Obsolete audio.', 'AbortError');
@@ -63,7 +88,10 @@ export class PlaybackCache {
     };
     worker.onmessage = ({ data }) => {
       if (data.type === 'ready') {
+        this.readyWorkers.add(worker);
         resolve();
+        const waiting = this.entry;
+        if (waiting?.worker === worker && waiting.pending) this.sendRender(waiting, waiting.pending.chunk);
         return;
       }
       if (data.type === 'failed') {
@@ -72,14 +100,20 @@ export class PlaybackCache {
       }
       const entry = this.entry;
       if (!entry || entry.worker !== worker) return;
-      if (data.type === 'chunk') {
+      if (data.type === 'started') {
+        if (data.token === entry.token) {
+          entry.started = true;
+          entry.awaiting = null;
+          entry.next = data.firstChunk;
+        }
+      } else if (data.type === 'chunk') {
+        // A chunk is the same audio whichever render made it, so a late chunk of the previous render is kept too.
         const samples = data.samples as Float32Array;
-        entry.chunks.push(new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength));
-        entry.frames += samples.length / 2;
+        entry.chunks.set(data.index, new Uint8Array(samples.buffer, samples.byteOffset, samples.byteLength));
+        if (data.token === entry.token) entry.next = data.index + 1;
+        this.evict(entry);
       } else if (data.type === 'done') {
-        entry.complete = true;
-        worker.terminate();
-        if (this.prepared === prepared) this.prepared = null;
+        if (data.token === entry.token) entry.endChunk = data.endChunk;
       }
       this.notify(entry);
     };
@@ -100,16 +134,15 @@ export class PlaybackCache {
       entry = null;
     }
     if (!entry) {
-      const ready = this.prepare(rate);
-      const worker = this.prepared!.worker;
-      entry = { map, rate, worker, chunks: [], frames: 0, complete: false, failure: null, waiting: new Set() };
+      void this.prepare(rate);
+      entry = {
+        map, rate, worker: this.prepared!.worker, chunks: new Map(), readers: new Set(), token: 0, started: false, next: 0, limit: 0,
+        endChunk: null, awaiting: null, target: 0, pending: null, failure: null, waiting: new Set(),
+      };
       this.entry = entry;
-      const current = entry;
-      void ready.then(() => {
-        if (this.entry === current) worker.postMessage({ type: 'render', map });
-      }, () => {});
     }
     const startFrame = Math.max(0, Math.round(startMs * rate / 1000));
+    this.ensureWindow(entry, startFrame);
     return { body: this.replay(entry, startFrame), startFrame, sampleRate: rate, channels: 2, format: 'f32le', version: map.version, extentMs: map.extentMs, map };
   }
 
@@ -117,13 +150,17 @@ export class PlaybackCache {
   async prepareAt(ms: number, signal: AbortSignal): Promise<void> {
     const entry = this.entry;
     if (!entry) return;
-    const required = Math.ceil((ms / 1000 + 0.8) * entry.rate);
+    const startFrame = Math.max(0, Math.round(ms * entry.rate / 1000));
+    this.ensureWindow(entry, startFrame);
+    const token = entry.token;
+    const required = Math.floor((startFrame + PRIME_SECONDS * entry.rate) / CHUNK_FRAMES);
     const abort = () => this.notify(entry);
     signal.addEventListener('abort', abort, { once: true });
     try {
-      while (!entry.complete && entry.frames < required) {
+      while (!this.has(entry, required)) {
         if (signal.aborted) throw new DOMException('Seek superseded.', 'AbortError');
         if (entry.failure) throw entry.failure;
+        if (entry.token !== token) throw new DOMException('Seek superseded.', 'AbortError');
         await new Promise<void>((resolve) => entry.waiting.add(resolve));
       }
       if (signal.aborted) throw new DOMException('Seek superseded.', 'AbortError');
@@ -133,31 +170,100 @@ export class PlaybackCache {
     }
   }
 
+  private chunksFor(entry: Entry, seconds: number): number {
+    return Math.ceil(seconds * entry.rate / CHUNK_FRAMES);
+  }
+
+  /** The chunk is held, or the piece ends before it. */
+  private has(entry: Entry, chunk: number): boolean {
+    return entry.chunks.has(chunk) || (entry.endChunk !== null && chunk >= entry.endChunk);
+  }
+
+  /** Make sure the render covers the target: carry on when the target is in or just ahead of the render, otherwise start a new render at it. */
+  private ensureWindow(entry: Entry, targetFrame: number): void {
+    const chunk = Math.floor(targetFrame / CHUNK_FRAMES);
+    entry.target = chunk;
+    const forward = this.chunksFor(entry, FORWARD_RESTART_SECONDS);
+    const ahead = this.chunksFor(entry, AHEAD_SECONDS);
+    const carrying = entry.chunks.has(chunk)
+      || (entry.endChunk !== null && chunk >= entry.endChunk)
+      || (entry.started && chunk >= entry.next && chunk - entry.next <= forward)
+      || (entry.awaiting !== null && Math.abs(chunk - entry.awaiting) <= forward);
+    if (!carrying) {
+      this.start(entry, chunk);
+      return;
+    }
+    this.extend(entry, chunk + ahead);
+  }
+
+  private start(entry: Entry, chunk: number): void {
+    entry.token++;
+    entry.started = false;
+    entry.endChunk = null;
+    entry.awaiting = chunk;
+    if (!this.readyWorkers.has(entry.worker)) {
+      entry.pending = { chunk };
+      return;
+    }
+    this.sendRender(entry, chunk);
+  }
+
+  private sendRender(entry: Entry, chunk: number): void {
+    entry.pending = null;
+    entry.limit = chunk + this.chunksFor(entry, AHEAD_SECONDS);
+    entry.worker.postMessage({ type: 'render', map: entry.map, targetFrame: chunk * CHUNK_FRAMES, untilChunk: entry.limit, token: entry.token });
+  }
+
+  private extend(entry: Entry, until: number): void {
+    if (until <= entry.limit || entry.endChunk !== null) return;
+    entry.limit = until;
+    if (this.readyWorkers.has(entry.worker) && !entry.pending) entry.worker.postMessage({ type: 'extend', token: entry.token, untilChunk: until });
+  }
+
+  /** Drop the chunks that no reader and no target is near. */
+  private evict(entry: Entry): void {
+    const behind = this.chunksFor(entry, BEHIND_SECONDS);
+    const ahead = this.chunksFor(entry, AHEAD_SECONDS) + SLACK_CHUNKS;
+    if (entry.chunks.size <= behind + ahead) return;
+    const anchors = [entry.target, ...[...entry.readers].map((reader) => reader.index)];
+    for (const index of [...entry.chunks.keys()]) {
+      if (!anchors.some((anchor) => index >= anchor - behind && index <= anchor + ahead)) entry.chunks.delete(index);
+    }
+  }
+
   private replay(entry: Entry, startFrame: number): ReadableStream<Uint8Array> {
-    // The synthesis worker emits 4096-frame chunks, with only its final chunk shorter.
-    let index = Math.floor(startFrame / RENDER_FRAMES);
-    let offset = startFrame % RENDER_FRAMES * 8;
+    const reader: Reader = { index: Math.floor(startFrame / CHUNK_FRAMES), token: entry.token };
+    let offset = startFrame % CHUNK_FRAMES * 8;
     let cancelled = false;
     let wake: (() => void) | null = null;
+    entry.readers.add(reader);
+    const finish = () => entry.readers.delete(reader);
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const cache = this;
     return new ReadableStream({
       async pull(controller) {
         while (!cancelled) {
           if (entry.failure) {
+            finish();
             controller.error(entry.failure);
             return;
           }
-          if (index < entry.chunks.length) {
-            const chunk = entry.chunks[index++].subarray(offset);
+          const held = entry.chunks.get(reader.index);
+          if (held) {
+            const chunk = held.subarray(offset);
             offset = 0;
+            reader.index++;
+            if (reader.token === entry.token) cache.extend(entry, reader.index + cache.chunksFor(entry, AHEAD_SECONDS));
             if (chunk.length) {
               controller.enqueue(chunk);
               return;
             }
+          } else if (reader.token !== entry.token || (entry.endChunk !== null && reader.index >= entry.endChunk)) {
+            // The render this reader followed was replaced, or the piece ends here.
+            finish();
+            controller.close();
+            return;
           } else {
-            if (entry.complete) {
-              controller.close();
-              return;
-            }
             await new Promise<void>((resolve) => {
               wake = resolve;
               entry.waiting.add(resolve);
@@ -169,6 +275,7 @@ export class PlaybackCache {
       },
       cancel() {
         cancelled = true;
+        finish();
         if (wake) {
           entry.waiting.delete(wake);
           wake();
@@ -177,6 +284,7 @@ export class PlaybackCache {
       },
     });
   }
+
   private notify(entry: Entry): void {
     for (const wake of entry.waiting) wake();
     entry.waiting.clear();
