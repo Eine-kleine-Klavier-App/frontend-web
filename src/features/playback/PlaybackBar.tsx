@@ -1,12 +1,19 @@
 import { motion, type MotionValue } from 'motion/react';
 import { PlayIcon, PauseIcon, StopIcon } from '@/ui/icons';
-import { playback, usePlayback } from '@/core/playback/PlaybackController';
+import { playback, usePlaybackValue } from '@/core/playback/PlaybackController';
 import { useEditor } from '@/app/store';
 import { barAtBeat } from '@/core/model/query';
 
 /** The transport: a pill centred over the content column. Play is the one accent fill on the page. `shift` carries it along while the column's edge moves (the panel opening). */
 export function PlaybackBar({ shift }: { shift?: MotionValue<number> }) {
-  const { playing, loading, paused, ready, timeBeats, seekBeats, totalBeats } = usePlayback();
+  // Single values, so the bar renders when one of them changes; the state's time moves a few times a second, not per frame.
+  const playing = usePlaybackValue((state) => state.playing);
+  const loading = usePlaybackValue((state) => state.loading);
+  const paused = usePlaybackValue((state) => state.paused);
+  const ready = usePlaybackValue((state) => state.ready);
+  const timeBeats = usePlaybackValue((state) => state.timeBeats);
+  const seekBeats = usePlaybackValue((state) => state.seekBeats);
+  const totalBeats = usePlaybackValue((state) => state.totalBeats);
   const documentLoading = useEditor((s) => s.loading);
   const doc = useEditor((s) => s.document);
   // The chosen start position; audio elapsed time is not a musical-time map.
