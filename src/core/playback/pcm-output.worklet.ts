@@ -5,6 +5,7 @@ declare class AudioWorkletProcessor { readonly port: MessagePort; }
 declare function registerProcessor(name: string, processor: typeof AudioWorkletProcessor): void;
 
 interface GainEnvelope { from: number; to: number; startFrame: number; endFrame: number }
+interface TransportCommand { token: number; running: boolean; frame: number; immediate?: boolean }
 
 class PcmOutput extends AudioWorkletProcessor {
   private source: MessagePort | null = null;
@@ -37,6 +38,11 @@ class PcmOutput extends AudioWorkletProcessor {
   private readonly edge = Math.max(1, Math.round(sampleRate * 0.01));
   private fadeIn = 0;
   private fadeOut = 0;
+  private transport: TransportCommand | null = null;
+  private gate = 1;
+  private held = false;
+  private releaseGain = 0;
+  private releaseRemaining = 0;
 
   constructor() {
     super();
@@ -51,9 +57,26 @@ class PcmOutput extends AudioWorkletProcessor {
         this.beginFrame = data.frame ?? Math.round(currentTime * sampleRate);
         this.awaitingBegin = false;
       }
-      else if (data.type === 'envelope') {
-        this.envelopes = this.envelopes.filter((envelope) => envelope.startFrame < data.startFrame);
-        this.envelopes.push(data);
+      else if (data.type === 'envelope' && !this.stopping) {
+        // A message that arrives late still gets its whole ramp: it starts on arrival and is never cut short.
+        const now = Math.round(currentTime * sampleRate);
+        const envelope: GainEnvelope = { ...data };
+        if (envelope.startFrame < now) {
+          envelope.endFrame += now - envelope.startFrame;
+          envelope.startFrame = now;
+        }
+        this.envelopes = this.envelopes.filter((queued) => queued.startFrame < envelope.startFrame);
+        this.envelopes.push(envelope);
+      }
+      else if (data.type === 'transport' && this.reportControl) {
+        if (data.immediate && !data.running) {
+          // The position stops at once, the sound fades from its last sample instead of dropping to silence.
+          this.releaseGain = this.gate;
+          this.releaseRemaining = this.edge;
+          this.gate = 0;
+          this.held = true;
+          this.acknowledgeTransport(data, Math.round(currentTime * sampleRate));
+        } else this.transport = data;
       }
       else if (data.type === 'configure') {
         this.inputRate = data.sampleRate;
@@ -79,7 +102,17 @@ class PcmOutput extends AudioWorkletProcessor {
       else if (data.type === 'end') this.ended = true;
       else if (data.type === 'stop' && !this.stopping) {
         this.stopping = true;
-        this.stopFrame = data.frame ?? 0;
+        // The output ends only after a fade to silence has run to its end, starting one here if its message is late.
+        const now = Math.round(currentTime * sampleRate);
+        const last = this.envelopes.at(-1) ?? this.envelope;
+        if (this.reportControl && (!last || last.to > 0)) {
+          const current = this.envelope;
+          const mix = current ? Math.max(0, Math.min(1, (now - current.startFrame) / Math.max(1, current.endFrame - current.startFrame))) : 1;
+          const from = current ? current.from + (current.to - current.from) * mix : 1;
+          this.envelopes = [{ from, to: 0, startFrame: now, endFrame: now + this.edge }];
+        }
+        const fades = [this.envelope, ...this.envelopes].map((envelope) => envelope?.endFrame ?? 0);
+        this.stopFrame = Math.max(data.frame ?? 0, ...fades);
         this.fadeOut = this.edge;
       }
     };
@@ -106,6 +139,12 @@ class PcmOutput extends AudioWorkletProcessor {
     return false;
   }
 
+  private acknowledgeTransport(command: TransportCommand, frame: number): void {
+    this.transport = null;
+    this.port.postMessage({ type: 'transport', token: command.token, running: command.running,
+      frames: this.consumed, phase: this.queued ? this.phase : 0, queued: this.queued, contextTime: frame / sampleRate });
+  }
+
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     if (this.stopped) return false;
     const output = outputs[0];
@@ -115,30 +154,61 @@ class PcmOutput extends AudioWorkletProcessor {
     if (this.primed && this.awaitingBegin) {
       if (!this.announced) {
         this.announced = true;
-        this.port.postMessage({ type: 'primed' });
+        this.port.postMessage({ type: 'primed', queued: this.queued });
       }
       return true;
     }
-    if (this.reportControl && Math.round(currentTime * sampleRate) < this.beginFrame) return true;
+    const firstFrame = Math.round(currentTime * sampleRate);
+    if (this.reportControl && firstFrame < this.beginFrame) return true;
+    if (this.held && !this.releaseRemaining && !this.stopping && !(this.ended && !this.queued) &&
+        (!this.transport || this.transport.frame >= firstFrame + output[0].length)) return true;
     const step = this.inputRate / sampleRate;
+    let lastSourceFrame = firstFrame;
     for (let i = 0; i < output[0].length; i++) {
       if (!this.primed) continue;
+      const command = this.transport;
+      if (command && firstFrame + i >= command.frame) {
+        if (command.running && this.queued) {
+          this.held = false;
+          this.acknowledgeTransport(command, firstFrame + i);
+        } else if (!command.running && this.gate <= 0) {
+          this.held = true;
+          this.acknowledgeTransport(command, firstFrame + i);
+        } else if (!command.running) {
+          this.gate = Math.max(0, this.gate - 1 / this.edge);
+        }
+      }
+      if (this.held) {
+        if (this.releaseRemaining) {
+          const fade = this.releaseGain * this.releaseRemaining / this.edge;
+          output[0][i] = this.lastLeft * fade;
+          if (output[1]) output[1][i] = this.lastRight * fade;
+          this.releaseRemaining--;
+        }
+        continue;
+      }
       while (this.phase >= 1 && this.queued) {
         this.phase -= 1;
         this.advance();
       }
       if (!this.queued) continue;
+      if (this.gate < 1 && (!this.transport || this.transport.running)) this.gate = Math.min(1, this.gate + 1 / this.edge);
       const left = this.value(0)!;
       const right = this.value(1)!;
       const mix = this.fadeRemaining ? 1 - this.fadeRemaining / this.edge : 1;
-      this.lastLeft = output[0][i] = this.fadeLeft * (1 - mix) + (left + ((this.value(0, true) ?? left) - left) * this.phase) * mix;
-      if (output[1]) this.lastRight = output[1][i] = this.fadeRight * (1 - mix) + (right + ((this.value(1, true) ?? right) - right) * this.phase) * mix;
+      this.lastLeft = this.fadeLeft * (1 - mix) + (left + ((this.value(0, true) ?? left) - left) * this.phase) * mix;
+      output[0][i] = this.lastLeft * this.gate;
+      if (output[1]) {
+        this.lastRight = this.fadeRight * (1 - mix) + (right + ((this.value(1, true) ?? right) - right) * this.phase) * mix;
+        output[1][i] = this.lastRight * this.gate;
+      }
       if (this.fadeRemaining) this.fadeRemaining--;
       this.phase += step;
       while (this.phase >= 1 && this.queued) {
         this.phase -= 1;
         this.advance();
       }
+      lastSourceFrame = firstFrame + i + 1;
     }
     if (this.primed && !this.reportControl && (this.fadeIn < this.edge || this.stopping)) {
       for (let i = 0; i < output[0].length; i++) {
@@ -152,7 +222,6 @@ class PcmOutput extends AudioWorkletProcessor {
       }
     }
     if (this.reportControl) {
-      const firstFrame = Math.round(currentTime * sampleRate);
       for (let i = 0; i < output[0].length; i++) {
         const frame = firstFrame + i;
         while (this.envelopes.length && this.envelopes[0].startFrame <= frame) this.envelope = this.envelopes.shift()!;
@@ -171,7 +240,10 @@ class PcmOutput extends AudioWorkletProcessor {
     const report = this.consumed - this.reported >= 256 || done || (!this.queued && this.consumed !== this.reported);
     if (report) {
       this.reported = this.consumed;
-      const message = { type: done ? 'done' : 'progress', frames: this.consumed, queued: this.queued, contextTime: currentTime + output[0].length / sampleRate, advancing: this.primed && this.queued > 0 };
+      const message = { type: done ? 'done' : 'progress', frames: this.consumed,
+        phase: this.queued ? this.phase : 0, queued: this.queued,
+        contextTime: (this.held ? firstFrame + output[0].length : lastSourceFrame) / sampleRate,
+        advancing: this.primed && !this.held && this.queued > 0 };
       (this.source ?? this.port).postMessage(message);
       if (this.source && this.reportControl) this.port.postMessage(message);
     }
