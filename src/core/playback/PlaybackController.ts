@@ -3,8 +3,10 @@ import { AuthRequiredError } from '@/core/auth/authorizedFetch';
 import { useAuthPrompt } from '@/core/auth/authPrompt';
 import { errorMessage } from '@/core/errorMessage';
 import type { ScoreSource } from '@/core/model/scoreSource';
+import { draftSounds } from './draftSounds';
 import { HttpPlaybackGateway } from './HttpPlaybackGateway';
 import type { PlaybackAudio, PlaybackGateway, PlaybackMap, PlaybackSegment, SavedScorePlaybackGateway } from './PlaybackGateway';
+import { MediaClock } from './MediaClock';
 import { PcmStreamPlayer } from './PcmStreamPlayer';
 import {
   DEFAULT_PLAYBACK_SETTINGS,
@@ -34,6 +36,12 @@ export interface PlaybackState {
   activeCarrierIds: string[];
 }
 export type PlaybackListener = (state: PlaybackState) => void;
+
+export interface PlaybackFrameBuffer {
+  active(): boolean;
+  prepare(map: PlaybackMap, timeMs: number, signal: AbortSignal): Promise<void> | undefined;
+}
+
 export interface PlaybackController {
   bindDraft(draftId: string | null): void;
   bindScore(scoreId: string | null): void;
@@ -48,10 +56,19 @@ export interface PlaybackController {
   stop(): void;
   seek(beats: number): void;
   setTotalBeats(total: number): void;
+  setFrameBuffer(buffer: PlaybackFrameBuffer): () => void;
   getState(): PlaybackState;
+  /** The position of the sound being heard now, read on the animation frame; the state's time is written only on transport events and a few times a second. */
   getTimeMs(): number;
+  getTimeBeats(): number;
+  getOutputDelayMs(): number;
+  /** Positive when the sound is heard later than the output reports. */
+  setOutputDelayMs(milliseconds: number): void;
   subscribe(listener: PlaybackListener): () => void;
 }
+
+/** The state's time follows the playing sound at this interval; whoever needs every frame reads `getTimeMs()`. */
+const TIME_STORE_INTERVAL_MS = 50;
 
 const isAbort = (error: unknown) => error instanceof DOMException && error.name === 'AbortError';
 
@@ -81,12 +98,16 @@ export class ServerPlaybackController implements PlaybackController {
   private mapRequest: AbortController | null = null;
   private mapPromise: Promise<PlaybackMap> | null = null;
   private generation = 0;
-  private player = new PcmStreamPlayer(6, (running) => this.audioState(running));
+  private transportIntent: { running: boolean } | null = null;
+  private clock = new MediaClock();
+  private timeWrittenAt = 0;
+  private player = new PcmStreamPlayer(0, (running) => this.audioState(running));
   private cache = new PlaybackCache();
+  private frameBuffer: PlaybackFrameBuffer | undefined;
   private previews: PreviewTransport;
 
   constructor(
-    private gateway: PlaybackGateway = new HttpPlaybackGateway(),
+    private gateway: PlaybackGateway = draftSounds,
     previews: PreviewTransport | undefined = undefined,
     private savedGateway: SavedScorePlaybackGateway = new HttpPlaybackGateway(),
   ) {
@@ -228,38 +249,74 @@ export class ServerPlaybackController implements PlaybackController {
   async play(): Promise<void> {
     if (!this.source) return;
     if ((this.state.playing || this.state.paused) && this.request) {
-      if (this.state.paused) this.set({ playing: true, paused: false });
+      if (this.transportIntent?.running || (this.state.playing && !this.transportIntent)) return;
       const request = this.request;
+      const intent = { running: true };
+      this.transportIntent = intent;
+      const current = () => this.request === request && this.transportIntent === intent;
       try {
-        await this.player.unlock();
-        if (this.request === request && request) this.set({ playing: true, paused: false });
+        const { paused, map, timeMs } = this.state;
+        const frames = paused && map ? this.frameBuffer?.prepare(map, timeMs, request.signal) : undefined;
+        // Acquire audio permission within the gesture if the device interrupted the context.
+        const ready = this.player.unlock();
+        void ready.catch(() => {});
+        if (frames) {
+          this.set({ loading: true });
+          await frames;
+          if (!current()) return;
+          if (map) await this.frameBuffer?.prepare(map, timeMs, request.signal);
+        }
+        await ready;
+        if (!current()) return;
+        const position = await this.player.resume();
+        if (!current()) return;
+        this.set({ ...this.positionPatch(position ?? timeMs), loading: false, playing: true, paused: false });
       } catch (error) {
-        if (this.request === request) this.fail(error);
+        if (current()) {
+          if (isAbort(error)) this.set({ loading: false });
+          else this.fail(error);
+        }
+      } finally {
+        if (this.transportIntent === intent) this.transportIntent = null;
       }
       return;
     }
+    await this.startAt(this.state.timeBeats);
+  }
+
+  private async startAt(beats: number, hold = false): Promise<void> {
     this.cancel();
     const request = new AbortController();
     this.request = request;
-    this.set({ loading: true, error: null });
+    this.set({ loading: true, error: null, seekBeats: hold ? beats : null });
     try {
       await this.player.unlock();
       const map = await this.loadMap();
       if (request.signal.aborted) return;
-      const startMs = timeAtBeat(map, this.state.timeBeats);
+      const startMs = timeAtBeat(map, beats);
+      if (startMs >= map.extentMs) {
+        this.request = null;
+        this.set({ loading: false, seekBeats: null, timeMs: startMs, timeBeats: beats });
+        return;
+      }
+      const frames = this.frameBuffer?.prepare(map, startMs, request.signal);
       const audio = await this.cache.open(map, this.player.sampleRate, startMs);
+      if (frames) {
+        await frames;
+        if (!request.signal.aborted) await this.frameBuffer?.prepare(map, startMs, request.signal);
+      }
       if (request.signal.aborted) {
         void audio?.body.cancel();
         return;
       }
-      if (audio && startMs < map.extentMs) {
+      if (audio) {
         await this.playAudio(audio, request, startMs);
       } else if (this.request === request) {
         this.request = null;
-        this.set({ loading: false, playing: false, paused: false });
+        this.set({ loading: false, playing: false, paused: false, seekBeats: null });
       }
     } catch (error) {
-      if (!request.signal.aborted) this.fail(error, () => void this.play());
+      if (!request.signal.aborted) this.fail(error, () => void this.startAt(beats, hold));
     }
   }
 
@@ -268,18 +325,16 @@ export class ServerPlaybackController implements PlaybackController {
       audio,
       request.signal,
       () => {
-        if (this.request === request) this.set({ loading: false, playing: true, paused: false, seekBeats: null });
+        if (this.request === request) this.set({ ...this.positionPatch(this.player.positionMs() ?? startMs),
+          loading: false, playing: true, paused: false, seekBeats: null });
       },
       startMs,
       (ms) => {
         if (this.request !== request || !this.state.playing) return;
-        const map = audio.map!;
-        const time = Math.min(ms, map.extentMs);
-        this.set({
-          timeMs: time,
-          timeBeats: beatAtTime(map, time),
-          activeCarrierIds: map.anchors.filter((a) => a.startMs <= time && time < a.endMs).map((a) => a.carrierId),
-        });
+        const now = performance.now();
+        if (now - this.timeWrittenAt < TIME_STORE_INTERVAL_MS) return;
+        this.timeWrittenAt = now;
+        this.set(this.positionPatch(ms));
       },
       false,
       () => {
@@ -294,6 +349,7 @@ export class ServerPlaybackController implements PlaybackController {
     );
     if (this.request === request) {
       this.request = null;
+      this.transportIntent = null;
       this.set({ loading: false, playing: false, paused: false, activeCarrierIds: [] });
     }
   }
@@ -303,8 +359,12 @@ export class ServerPlaybackController implements PlaybackController {
     const at = Math.max(0, Math.min(beats, this.state.totalBeats));
     this.seekRequest?.abort();
     this.seekRequest = null;
-    if (!this.state.playing) {
+    if (!this.state.playing || this.transportIntent?.running === false) {
       const restart = this.state.loading;
+      if (restart && (this.state.seekBeats !== null || this.frameBuffer?.active())) {
+        void this.startAt(at, true);
+        return;
+      }
       this.cancel();
       this.set({ timeBeats: at, timeMs: this.state.map ? timeAtBeat(this.state.map, at) : 0, error: null });
       if (restart) void this.play();
@@ -326,14 +386,37 @@ export class ServerPlaybackController implements PlaybackController {
           }
           return;
         }
+        const frames = this.frameBuffer?.prepare(map, startMs, request.signal);
+        if (frames) {
+          const timeMs = this.getTimeMs();
+          const previous = this.request;
+          this.request = request;
+          this.seekRequest = null;
+          this.set({
+            playing: false, loading: true, paused: false,
+            timeMs, timeBeats: beatAtTime(map, timeMs), activeCarrierIds: [],
+          });
+          previous?.abort();
+          this.player.stop();
+          await this.player.unlock();
+          if (request.signal.aborted) return;
+        }
         await this.cache.prepareAt(startMs, request.signal);
         if (request.signal.aborted) return;
         const audio = await this.cache.open(map, this.player.sampleRate, startMs);
+        if (frames) {
+          await frames;
+          if (!request.signal.aborted) await this.frameBuffer?.prepare(map, startMs, request.signal);
+        }
         if (request.signal.aborted) {
           void audio?.body.cancel();
           return;
         }
-        if (audio) await this.playAudio(audio, request, startMs, true);
+        if (audio) await this.playAudio(audio, request, startMs, !frames);
+        else if (this.request === request) {
+          this.request = null;
+          this.set({ loading: false, seekBeats: null });
+        }
       } catch (error) {
         if (request.signal.aborted) return;
         if (this.request === request) {
@@ -349,12 +432,22 @@ export class ServerPlaybackController implements PlaybackController {
   pause(): void {
     this.seekRequest?.abort();
     this.seekRequest = null;
-    if (!this.state.playing) return;
-    const timeMs = this.getTimeMs();
     const request = this.request;
-    this.set({ playing: false, paused: true, seekBeats: null, timeMs, timeBeats: this.state.map ? beatAtTime(this.state.map, timeMs) : this.state.timeBeats });
-    void this.player.pause().catch((error) => {
-      if (this.request === request) this.fail(error);
+    if (!this.state.playing || !request) return;
+    if (this.transportIntent?.running === false) {
+      void this.play();
+      return;
+    }
+    const intent = { running: false };
+    this.transportIntent = intent;
+    this.set({ seekBeats: null });
+    const current = () => this.request === request && this.transportIntent === intent;
+    void this.player.pause().then((position) => {
+      if (current()) this.set({ ...this.positionPatch(this.clock.hold() ?? position ?? this.state.timeMs), playing: false, paused: true });
+    }).catch((error) => {
+      if (current()) this.fail(error);
+    }).finally(() => {
+      if (this.transportIntent === intent) this.transportIntent = null;
     });
   }
 
@@ -369,19 +462,25 @@ export class ServerPlaybackController implements PlaybackController {
     this.seekRequest = null;
     this.request?.abort();
     this.request = null;
+    this.transportIntent = null;
     this.player.stop();
     if (releasePreview) this.previews.release();
     this.set({ playing: false, loading: false, paused: false, previewing: false, seekBeats: null, activeCarrierIds: [] });
   }
 
   private audioState(running: boolean): void {
-    if (!this.request || this.request.signal.aborted || this.state.loading) return;
-    if (running && this.state.paused) {
-      this.set({ paused: false, playing: true });
-    } else if (!running && this.state.playing) {
-      const timeMs = this.getTimeMs();
-      this.set({ playing: false, paused: true, timeMs });
-    }
+    if (!this.request || this.request.signal.aborted || (running && (this.state.loading || this.transportIntent))) return;
+    if (running ? !this.state.paused : !this.state.playing) return;
+    const timeMs = (running ? null : this.clock.hold()) ?? this.player.positionMs() ?? this.state.timeMs;
+    this.set({ ...this.positionPatch(timeMs), playing: running, paused: !running });
+  }
+
+  private positionPatch(timeMs: number): Pick<PlaybackState, 'timeMs' | 'timeBeats' | 'activeCarrierIds'> {
+    const { map, timeBeats, activeCarrierIds } = this.state;
+    if (!map) return { timeMs, timeBeats, activeCarrierIds };
+    const active = map.anchors.filter((anchor) => anchor.startMs <= timeMs && timeMs < anchor.endMs).map((anchor) => anchor.carrierId);
+    const same = active.length === activeCarrierIds.length && active.every((id, index) => id === activeCarrierIds[index]);
+    return { timeMs, timeBeats: beatAtTime(map, Math.min(timeMs, map.extentMs)), activeCarrierIds: same ? activeCarrierIds : active };
   }
 
   private fail(error: unknown, retry?: () => void): void {
@@ -401,13 +500,37 @@ export class ServerPlaybackController implements PlaybackController {
     if (Number.isFinite(total) && total >= 0) this.set({ totalBeats: total, timeBeats: Math.min(total, this.state.timeBeats) });
   }
 
+  setFrameBuffer(buffer: PlaybackFrameBuffer): () => void {
+    this.frameBuffer = buffer;
+    return () => {
+      if (this.frameBuffer === buffer) this.frameBuffer = undefined;
+    };
+  }
+
   getState(): PlaybackState {
     return this.state;
   }
 
   getTimeMs(): number {
-    if (!this.state.playing) return this.state.timeMs;
-    return Math.min(this.player.positionMs() ?? this.state.timeMs, this.state.map?.extentMs ?? Infinity);
+    if (!this.state.playing && !(this.state.paused && this.transportIntent?.running)) {
+      this.clock.reset();
+      return this.state.timeMs;
+    }
+    // Starting again from a pause, the picture goes on from where it was held, not from the sound.
+    return this.clock.at(this.player.positionMs() ?? this.state.timeMs, this.state.paused ? this.state.timeMs : undefined);
+  }
+
+  getTimeBeats(): number {
+    const { map, timeBeats } = this.state;
+    return map ? beatAtTime(map, Math.min(this.getTimeMs(), map.extentMs)) : timeBeats;
+  }
+
+  getOutputDelayMs(): number {
+    return this.clock.outputDelayMs;
+  }
+
+  setOutputDelayMs(milliseconds: number): void {
+    this.clock.setOutputDelay(milliseconds);
   }
 
   subscribe(listener: PlaybackListener): () => void {
