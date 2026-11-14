@@ -26,22 +26,27 @@ export function inkBox(element: SVGGraphicsElement): InkBox {
   const root = svg?.getCTM();
   const local = element.getCTM();
   if (!root || !local) return box;
-  const matrix = root.inverse().multiply(local);
-  const corners = [[box.x, box.y], [box.x + box.width, box.y],
-    [box.x, box.y + box.height], [box.x + box.width, box.y + box.height]]
-    .map(([x, y]) => new DOMPoint(x, y).matrixTransform(matrix));
-  const x = Math.min(...corners.map((p) => p.x)), y = Math.min(...corners.map((p) => p.y));
-  return { x, y, width: Math.max(...corners.map((p) => p.x)) - x,
-    height: Math.max(...corners.map((p) => p.y)) - y };
+  const { a, b, c, d, e, f } = root.inverse().multiply(local);
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (const cornerX of [box.x, box.x + box.width]) {
+    for (const cornerY of [box.y, box.y + box.height]) {
+      xs.push(a * cornerX + c * cornerY + e);
+      ys.push(b * cornerX + d * cornerY + f);
+    }
+  }
+  const x = Math.min(...xs), y = Math.min(...ys);
+  return { x, y, width: Math.max(...xs) - x, height: Math.max(...ys) - y };
 }
 export function intersects(a: InkBox, b: InkBox, gap = 0, gapX = gap): boolean {
   return a.x < b.x + b.width + gapX && a.x + a.width + gapX > b.x &&
     a.y < b.y + b.height + gap && a.y + a.height + gap > b.y;
 }
 
-/** Monotone interval constraints: measured deficiencies can only enlarge the next engraving pass. */
+/** Monotone interval constraints: measured deficiencies can only enlarge the next engraving pass.
+ *  A growth under a pixel is invisible but would cost a whole further pass, so it is ignored. */
 export function growMinimum(map: Map<string, number>, key: string, value: number): boolean {
-  if (value <= (map.get(key) ?? 0) + 0.25) return false;
+  if (value <= (map.get(key) ?? 0) + 1) return false;
   map.set(key, value);
   return true;
 }
