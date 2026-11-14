@@ -8,7 +8,8 @@ const executablePath=engine==='chromium'?process.env.PLAYWRIGHT_CHROMIUM_EXECUTA
 const browser=await playwright[engine].launch({headless:true,...(executablePath?{executablePath}:{})});
 try {
  const page=await browser.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
- await page.route('**/__playback_regression__',r=>r.fulfill({contentType:'text/html',body:'<button id="run">Run audio regression</button>'}));
+ await page.route('**/__playback_regression__',r=>r.fulfill({contentType:'text/html',body:
+   '<button id="run">Run audio regression</button><button id="prepared-play" hidden>Play prepared recording</button>'}));
  await page.goto(new URL('/__playback_regression__',process.env.VITE_URL||'http://localhost:5173').href);
  await page.evaluate(async forcedRate=>{
   if (forcedRate) {
@@ -36,9 +37,20 @@ try {
     check(await hash(bytes.slice(fragment.startFrame * 8)) === await hash(fragmentBytes), 'nonzero fragment must match the exact original sample frames');
     check(await hash(bytes)===await hash(replay),'cached replay must preserve PCM exactly');rateHashes.push([rate,await hash(bytes)]);cache.clear();
    }
+   // A held note and its release end without a step: the voice filter follows the modulation envelope continuously.
+   const {FluidSynthEngine}=await import('/src/core/playback/FluidSynthEngine.ts');
+   const synth=new FluidSynthEngine(48000);await synth.prepare();
+   for(const pitch of [47,61,66]){
+    synth.noteOn(0,pitch,86);const parts=[synth.render(48000*5)];synth.noteOff(0,pitch);parts.push(synth.render(48000));
+    const left=parts.flatMap(p=>Array.from({length:p.length/2},(_,i)=>p[2*i]));
+    const peaks=[];for(let i=2;i<left.length;i++){const block=i>>6;peaks[block]=Math.max(peaks[block]??0,Math.abs(left[i]-2*left[i-1]+left[i-2]))}
+    for(let block=78;block<peaks.length;block++){const local=peaks.slice(block-48,block-2).sort((a,b)=>a-b)[23];check(peaks[block]<6*Math.max(local,2e-5),`note ${pitch} steps at ${(block*64/48000).toFixed(2)} s`)}
+    synth.silence();
+   }
+   synth.close();
    let mapReads=0;
    const previewStub={async prepare(){},async unlock(){},close(){},release(){},bindDraft(){},invalidate(){},async preview(){}};
-   const controller=new ServerPlaybackController({async map(){mapReads++;return map},async previewMap(){throw Error('not used')}},previewStub);
+   const controller=new ServerPlaybackController({async map(){mapReads++;return map},async previewCarrier(){throw Error('not used')}},previewStub);
    controller.bindDraft('test');controller.setTotalBeats(12);const completed=controller.play();await until(()=>controller.getState().playing,'play did not start');
    const player=controller.player,context=player.context,records=[];
    const source=`class Meter extends AudioWorkletProcessor { process(inputs){const a=inputs[0]?.[0];if(a){let e=0;for(const x of a)e+=x*x;this.port.postMessage({time:currentTime,rms:Math.sqrt(e/a.length)})}return true;} } registerProcessor('local-synth-meter',Meter);`;
@@ -51,10 +63,41 @@ try {
    const first=records.findIndex(r=>r.rms>.0001),last=records.findLastIndex(r=>r.rms>.0001);let silence=0,maxSilence=0;
    for(const row of records.slice(first,last+1)){silence=row.rms<1e-7?silence+128/context.sampleRate:0;maxSilence=Math.max(maxSilence,silence)}
    check(maxSilence<.02,`seek/output gap ${maxSilence}s`);
-   check(mapReads===1,'seek/replay must reuse the resolved plan');controller.pause();const paused=controller.getTimeMs();await wait(100);check(controller.getTimeMs()===paused,'paused clock moved');await controller.play();await until(()=>controller.getTimeMs()>paused+30,'resume did not advance');
-   controller.stop();await completed;controller.bindDraft(null);meter.disconnect();
+   check(mapReads===1,'seek/replay must reuse the resolved plan');
+   controller.pause();
+   check(controller.getState().playing,'Pause was published before the audible boundary');
+   await until(()=>controller.getState().paused,'Pause never reached the audible boundary');
+   const paused=controller.getTimeMs();
+   const silenceFrom=context.currentTime;
+   await wait(100);
+   const held=records.filter(row=>row.time>=silenceFrom);
+   check(held.length>0&&held.every(row=>row.rms<1e-7),'the output produced sound after the acknowledged Pause');
+   check(controller.getTimeMs()===paused&&context.state==='running','Pause did not hold the PCM position in a running graph');
+   const resume=controller.play();
+   const afterResume=[];const watch=frameTime=>{afterResume.push([frameTime,controller.getTimeMs()]);if(afterResume.length<30)requestAnimationFrame(watch)};requestAnimationFrame(watch);
+   check(controller.getState().paused,'Resume was published before the audible boundary');
+   await resume;
+   await until(()=>controller.getTimeMs()>paused+30,'resume did not advance');
+   // After Resume the picture waits for the sound and then runs evenly: no step back, no change of speed.
+   await until(()=>afterResume.length>=30,'the frames after Resume were not recorded');
+   const resumeSteps=afterResume.slice(1).map((row,index)=>[row[0]-afterResume[index][0],row[1]-afterResume[index][1]]);
+   check(resumeSteps.every(([,moved])=>moved>=0),'the picture ran backwards after Resume');
+   check(resumeSteps.filter(([,moved])=>moved>0).slice(1).every(([elapsed,moved])=>Math.abs(moved/elapsed-1)<=.15),
+     `the picture changed speed after Resume (${resumeSteps.map(([elapsed,moved])=>(moved/elapsed).toFixed(2)).join(' ')})`);
+   // Stop fades the sound out over its whole ramp instead of cutting it, even when the fade message arrives late.
+   const post=MessagePort.prototype.postMessage;
+   MessagePort.prototype.postMessage=function(data,...rest){if(data?.type==='envelope')setTimeout(()=>post.call(this,data,...rest),30);else post.call(this,data,...rest)};
+   const stopAt=context.currentTime;controller.stop();await completed;await wait(100);MessagePort.prototype.postMessage=post;
+   const beforeStop=records.filter(row=>row.time<stopAt&&row.time>=stopAt-.05).map(row=>row.rms).sort((a,b)=>a-b);
+   const stopLevel=beforeStop[beforeStop.length>>1]??0;check(stopLevel>.0001,'the output was silent before Stop');
+   // A released output stops sending blocks, which counts as silence.
+   const afterStop=records.filter(row=>row.time>=stopAt);const silent=afterStop.findIndex(row=>row.rms<1e-7);
+   const silentAt=silent<0?afterStop.length:silent;
+   const fading=afterStop.slice(0,silentAt).filter(row=>row.rms<.9*stopLevel&&row.rms>.05*stopLevel).length;
+   check(fading*128/context.sampleRate>=.008,`Stop cut the sound: ${fading} fading blocks (${afterStop.slice(0,silentAt+1).map(row=>(row.rms/stopLevel).toFixed(2)).join(' ')})`);
+   controller.bindDraft(null);meter.disconnect();
    let previewReads=0,finished=0;
-   const preview=new LocalPreview({async previewMap(){previewReads++;return {version:1,carriers:[{carrierId:'c',notes:[{sourceId:'n',pitch:60,velocity:80,durationMs:650}]}]}}});
+   const preview=new LocalPreview({async previewCarrier(){previewReads++;return {version:1,carrierId:'c',notes:[{sourceId:'n',pitch:60,velocity:80,durationMs:650}]}}});
    preview.bindDraft('test');await preview.prepare();await preview.unlock();
    const analyzer=preview.player.context.createAnalyser();preview.player.gain.connect(analyzer);
    const rms=()=>{const a=new Float32Array(analyzer.fftSize);analyzer.getFloatTimeDomainData(a);return Math.sqrt(a.reduce((s,x)=>s+x*x,0)/a.length)};
@@ -67,9 +110,14 @@ try {
    audioContext.getOutputTimestamp = () => ({ contextTime: audioContext.currentTime, performanceTime: performance.now() });
    const levels = [], positions = [];
    const meterCode = `class HandoffMeter extends AudioWorkletProcessor {
+     last = 0;
      process(inputs) {
        const samples = inputs[0]?.[0];
-       if (samples) this.port.postMessage({ time: currentTime, min: Math.min(...samples), max: Math.max(...samples) });
+       if (samples) {
+         let step = 0;
+         for (const sample of samples) { step = Math.max(step, Math.abs(sample - this.last)); this.last = sample; }
+         this.port.postMessage({ time: currentTime, min: Math.min(...samples), max: Math.max(...samples), step });
+       }
        return true;
      }
    } registerProcessor('handoff-meter', HandoffMeter);`;
@@ -122,6 +170,46 @@ try {
    check(rapidLevels.every(level => level.min > 0.098 && level.max < 0.102), 'rapid handoffs caused an amplitude hole');
    check(output.fadingOutputs.size === 1, 'obsolete audio nodes survived after their fades');
    check(maximumRetiring < 12, `retiring audio nodes grew during rapid seeks: ${maximumRetiring}`);
+   const pauseRequested = audioContext.currentTime;
+   const pausePosition = await output.pause();
+   const heldClock = output.clock.anchors.at(-1);
+   check(!heldClock.advancing && Math.abs(pausePosition - heldClock.frames / audioContext.sampleRate * 1000) < 0.05,
+     'Pause did not settle at its PCM source frame');
+   check(audioContext.currentTime - heldClock.contextTime >= 0.159, 'Pause settled before the delayed output device heard silence');
+   await wait(70);
+   check(output.positionMs() === pausePosition && output.clock.anchors.at(-1).frames === heldClock.frames,
+     'the paused worklet discarded queued PCM');
+   check(levels.filter(row => row.time > heldClock.contextTime + 0.01).every(row => row.min === 0 && row.max === 0),
+     'the master output was not silent while held');
+   const resumed = await output.resume();
+   const resumeClock = output.clock.anchors.find(row => row.contextTime > heldClock.contextTime && row.advancing);
+   check(resumeClock && resumeClock.frames === heldClock.frames, 'Resume skipped or repeated a source frame');
+   check(resumed >= pausePosition && audioContext.currentTime - resumeClock.contextTime >= 0.159,
+     'Resume settled before delayed audio reached the device');
+   await wait(40);
+   const maximumPauseStep = Math.max(...levels.filter(row => row.time >= pauseRequested).map(row => row.step));
+   check(maximumPauseStep < 0.003, `transport introduced a discontinuity of ${maximumPauseStep}`);
+   const superseded = output.pause().then(() => false, error => error.name === 'AbortError');
+   await output.resume();
+   check(await superseded, 'rapid Resume published an obsolete Pause');
+   const coincident = { anchors: [{ frames: 768, queued: 256, contextTime: .03, advancing: true }],
+     startFrame: 0, rate: 25600, lastMs: 30 };
+   output.recordClock(coincident, { frames: 768, queued: 256, contextTime: .03, advancing: false, held: true });
+   check(output.clockPosition(coincident, .05) === 30, 'block progress overwrote the sample-exact Pause boundary');
+
+   const interruptedPause = output.pause();
+   await audioContext.suspend();
+   await interruptedPause;
+   check(!output.transport && !output.transportRunning, 'device interruption left the user Pause pending');
+   const deviceResumedAt = audioContext.currentTime;
+   await audioContext.resume();
+   await wait(210);
+   const restored = levels.filter(row => row.time > deviceResumedAt + 0.02);
+   check(restored.length > 0 && restored.every(row => row.min === 0 && row.max === 0),
+     'the device restarted PCM on its own after the interrupted Pause');
+   const restoredPosition = output.positionMs();
+   await output.resume();
+   await until(() => output.positionMs() > restoredPosition, 'explicit Resume did not restore the held queue');
    active.abort(); output.dispose(); await Promise.all([originalDone, replacementDone, ...rapidDone]); handoffMeter.disconnect();
 
    const longMap = { ...map, extentMs: 600000, pedals: [], anchors: [],
@@ -136,27 +224,39 @@ try {
    const playOutput = longController.player.play.bind(longController.player);
    longController.player.play = (audio, signal, started, start, tick, live, ready) =>
      playOutput(audio, signal, started, start, tick, live, () => { primedAt = performance.now(); ready(); });
-   let requestedAt = performance.now();
-   const longPlaying = longController.play();
+   // The preceding transport checks can outlive the initial browser gesture.
+   const preparedPlay = document.querySelector('#prepared-play');
+   const firstPlay = await new Promise(resolve => {
+     preparedPlay.addEventListener('click', () => {
+       const at = performance.now();
+       resolve({ at, playing: longController.play() });
+     }, { once: true });
+     preparedPlay.hidden = false;
+   });
+   let requestedAt = firstPlay.at;
+   const longPlaying = firstPlay.playing;
    await until(() => primedAt !== null, 'prepared Play did not prime');
    const preparedPlayMs = primedAt - requestedAt;
    check(preparedPlayMs < 150, `prepared Play took ${preparedPlayMs}ms`);
-   await until(() => longController.getState().playing && longController.cache.entry.complete, 'long cache did not complete');
+   await until(() => longController.getState().playing && longController.cache.entry.chunks.size > 0, 'long cache did not start');
    const seekMs = [];
    for (const beat of [2, 600, 1100, 2]) {
      primedAt = null; requestedAt = performance.now(); longController.seek(beat);
-     await until(() => primedAt !== null, 'cached seek did not prime');
+     await until(() => primedAt !== null, 'seek did not prime');
      seekMs.push(primedAt - requestedAt);
-     check(seekMs.at(-1) < 150, `cached seek at beat ${beat} took ${seekMs.at(-1)}ms`);
+     check(seekMs.at(-1) < 150, `seek at beat ${beat} took ${seekMs.at(-1)}ms (a window render started at the target)`);
      await until(() => longController.getState().seekBeats === null, 'audible seek never completed');
    }
    longController.stop(); await longPlaying; longController.bindDraft(null);
    return {rateHashes,mapReads,previewReads,maxSilenceMs:maxSilence*1000,tailRms,
-     transitionMin,transitionMax,maximumRetiring,preparedPlayMs,seekMs};
+     transitionMin,transitionMax,maximumRetiring,maximumPauseStep,preparedPlayMs,seekMs};
   };
   document.querySelector('#run').onclick=()=>run().then(result=>window.result=result,error=>window.result={error:error.message,stack:error.stack});
  }, Number(process.env.AUDIO_RATE || 0));
- await page.click('#run');await page.waitForFunction(()=>window.result,{},{timeout:60000});
+ await page.click('#run');
+ await page.waitForFunction(() => window.result || !document.querySelector('#prepared-play').hidden, {}, { timeout: 60000 });
+ if (!(await page.evaluate(() => Boolean(window.result)))) await page.click('#prepared-play');
+ await page.waitForFunction(()=>window.result,{},{timeout:60000});
  const result=await page.evaluate(()=>window.result);assert.equal(result.error,undefined,JSON.stringify(result));assert.deepEqual(errors,[]);
  console.log(`PASS ${engine}: ${JSON.stringify(result)}`);
 } finally {await browser.close()}
