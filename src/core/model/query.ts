@@ -297,7 +297,7 @@ export function describeSelection(doc: ScoreDocument, selectedIds: string[]): Se
 export function barAtBeat(doc: ScoreDocument, timeBeats: number): { index: number; beat: number } {
   let start = 0;
   for (let i = 0; i < doc.measures.length; i++) {
-    const { beats, beatValue } = doc.measures[i].timeSignature;
+    const { beats } = doc.measures[i].timeSignature;
     const length = measureBeats(doc.measures[i].timeSignature);
     if (timeBeats < start + length || i === doc.measures.length - 1) {
       const unit = length / beats;
