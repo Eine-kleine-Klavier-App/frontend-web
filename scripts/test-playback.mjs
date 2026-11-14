@@ -5,12 +5,14 @@ import vm from 'node:vm';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url), ts = require('typescript');
 const root = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..');
+// The controller writes the playing time to its state every 50 ms; the test moves this clock between ticks.
+let fakeNow = 0;
 function load(file, stubs = {}, cache = new Map()) {
   const full = path.join(root, file);
   if (cache.has(full)) return cache.get(full).exports;
   const module = { exports: {} }; cache.set(full, module);
   const js = ts.transpileModule(fs.readFileSync(full, 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
-  vm.runInNewContext(js, { module, exports: module.exports, console, AbortController, DOMException, ReadableStream, Response, Uint8Array, Float32Array, DataView, setTimeout, clearTimeout,
+  vm.runInNewContext(js, { module, exports: module.exports, console, AbortController, DOMException, ReadableStream, Response, Uint8Array, Float32Array, DataView, setTimeout, clearTimeout, performance: { now: () => fakeNow },
     require(name) {
       if (name in stubs) return stubs[name];
       if (name.startsWith('@/')) return load('src/' + name.slice(2) + '.ts', stubs, cache);
@@ -75,6 +77,35 @@ ordered.replace({...map,pedals:[{downMs:500,upMs:1000}]}); ordered.render(600);
 assert.ok(boundary.events.findIndex(x=>x[0]==='off'&&x[1]===500)<boundary.events.findIndex(x=>x[0]==='pedal'&&x[1]===500&&x[2]));
 console.log('PASS frame-exact key release, pedal boundaries and overlapping same-pitch voices');
 
+const { renderStartFrame, CHUNK_FRAMES } = load('src/core/playback/SynthScheduler.ts');
+const longMap = { ...map, extentMs: 40000, pedals: [{ downMs: 500, upMs: 20000 }], notes: [
+  { sourceId: 'held', pitch: 60, startMs: 1000, keyReleaseMs: 3000, endMs: 20000, velocity: 80 },
+  { sourceId: 'late', pitch: 62, startMs: 30000, keyReleaseMs: 31000, endMs: 31500, velocity: 80 },
+] };
+assert.equal(CHUNK_FRAMES, 4096);
+assert.equal(renderStartFrame(longMap, 30000, 1000), 24576, 'a target after everything has faded starts three seconds early, on a chunk');
+assert.equal(renderStartFrame(longMap, 25000, 1000), 0, 'a note that still sounds at the target is played from its start');
+assert.equal(renderStartFrame(longMap, 0, 1000), 0);
+class Silent extends Engine { silences = 0; silence() { this.silences++; this.events.push(['silence', this.frame]); } }
+const cut = new Silent(), startScheduler = new SynthScheduler(cut);
+startScheduler.replaceFrom(longMap, 24576);
+assert.equal(cut.frame, 0, 'the first start renders no silence');
+while (startScheduler.remaining) startScheduler.render(512);
+assert.deepEqual(cut.events.filter(x => x[0] === 'on').map(x => x[1]), [30000 - 24576], 'only notes that begin after the start are played, at their distance from it');
+assert.ok(!cut.events.some(x => x[0] === 'pedal' && x[2] === true), 'a pedal that ended before the start is not played');
+cut.events.length = 0;
+const before = cut.frame;
+startScheduler.replaceFrom({ ...longMap, pedals: [{ downMs: 20000, upMs: 35000 }] }, 24576);
+assert.equal(cut.silences, 2, 'every start cuts the sounding voices');
+assert.equal(cut.frame - before, 4000, 'a later start first renders four seconds of silence');
+cut.events.length = 0;
+startScheduler.render(4096);
+const down = cut.events.find(x => x[0] === 'pedal' && x[2] === true);
+assert.ok(down, 'a pedal that is down at the start is down from the first frame');
+while (startScheduler.remaining) startScheduler.render(1024);
+assert.ok(cut.events.some(x => x[0] === 'pedal' && x[2] === false), 'and comes up when it did');
+console.log('PASS windowed synthesis start: audible-note search, chunk alignment, notes and pedal from the start, silence between starts');
+
 class Worker {
   static instances=[]; sent=[]; terminated=false;
   constructor(){Worker.instances.push(this);}
@@ -84,25 +115,50 @@ class Worker {
 }
 const { PlaybackCache }=load('src/core/playback/PlaybackCache.ts',{'./Synthesis.worker?worker':{default:Worker}});
 const cache=new PlaybackCache(), audio=await cache.open(map,48000), worker=Worker.instances.at(-1);
-await flush(); assert.equal(worker.sent.filter(x=>x.type==='render').length,1);
+await flush();
+const renders=()=>worker.sent.filter(x=>x.type==='render');
+assert.equal(renders().length,1);assert.equal(renders()[0].targetFrame,0);assert.equal(renders()[0].token,1);
+const aheadChunks=Math.ceil(40*48000/4096);
+assert.equal(renders()[0].untilChunk,aheadChunks,'the render is asked for the window ahead only');
+worker.emit({type:'started',token:1,firstChunk:0});
 const a=audio.body.getReader(), b=(await cache.open(map,48000)).body.getReader();
+assert.equal(renders().length,1,'a second open at the same place carries on the same render');
 const first=a.read(), second=b.read();
-const samples=Float32Array.from([.1,-.1,.2,-.2]);worker.emit({type:'chunk',samples});
+const samples=Float32Array.from([.1,-.1,.2,-.2]);worker.emit({type:'chunk',token:1,index:0,samples});
 assert.deepEqual(Array.from((await first).value),Array.from((await second).value));
 let prepared=false;const seekAbort=new AbortController();
 const waiting=cache.prepareAt(1400,seekAbort.signal).then(()=>prepared=true);
-await flush();assert.equal(prepared,false);worker.emit({type:'done'});await waiting;assert.equal(prepared,true);
+await flush();assert.equal(prepared,false,'a seek waits for the chunk after the prime buffer');
+worker.emit({type:'done',token:1,endChunk:25});await waiting;assert.equal(prepared,true,'a seek target at the end of the piece does not wait for more');
 await a.cancel();await b.cancel();
-const again=await new Response((await cache.open(map,48000)).body).arrayBuffer();assert.deepEqual(Array.from(new Float32Array(again)),Array.from(samples));
 assert.equal(Worker.instances.length,1);
+// A target far ahead of the render starts a new render there instead of rendering the gap; the old reader ends, the new one follows.
+const windowed=new PlaybackCache(), start=await windowed.open(map,48000), windowWorker=Worker.instances.at(-1);
+await flush();windowWorker.emit({type:'started',token:1,firstChunk:0});
+const oldReader=start.body.getReader();
+const farMs=100000, farChunk=Math.floor(Math.round(farMs*48000/1000)/4096);
+const far=await windowed.open(map,48000,farMs);
+const farRenders=windowWorker.sent.filter(x=>x.type==='render');
+assert.equal(farRenders.length,2,'a far seek restarts the render');assert.equal(farRenders[1].token,2);assert.equal(farRenders[1].targetFrame,farChunk*4096);
+windowWorker.emit({type:'started',token:2,firstChunk:farChunk-100});
+const farReader=far.body.getReader(), farRead=farReader.read();
+const farData=Float32Array.from({length:4096*2},(_,i)=>i);
+windowWorker.emit({type:'chunk',token:2,index:farChunk,samples:farData});
+assert.deepEqual(Array.from((await farRead).value),Array.from(new Uint8Array(farData.buffer)).slice(Math.round(farMs*48000/1000)%4096*8),'the stream starts inside the chunk at the target frame');
+assert.equal((await oldReader.read()).done,true,'the reader of the replaced render ends instead of waiting forever');
+assert.ok(windowWorker.sent.some(x=>x.type==='extend'&&x.token===2&&x.untilChunk>farChunk+aheadChunks),'reading moves the render limit ahead');
+for(let index=farChunk-100;index<farChunk+1100;index++)windowWorker.emit({type:'chunk',token:2,index,samples:Float32Array.from([index,index])});
+assert.ok(windowed.entry.chunks.size<=Math.ceil(20*48000/4096)+aheadChunks+4+1,`the window is bounded (${windowed.entry.chunks.size} chunks)`);
+await farReader.cancel();windowed.clear();
 cache.clear();await cache.open(map,48000);const obsolete=Worker.instances.at(-1);
 const blocked=(await cache.open(map,48000)).body.getReader().read();const rejected=assert.rejects(blocked,{name:'AbortError'});cache.clear();await rejected;assert.equal(obsolete.terminated,true);
 await cache.open(map,48000);const broken=Worker.instances.at(-1);broken.emit({type:'failed',message:'instrument unavailable'});await cache.open(map,48000);assert.notEqual(Worker.instances.at(-1),broken);cache.clear();
 const indexed = new PlaybackCache(); await indexed.prepare(1000); const preparedWorker=Worker.instances.at(-1);
 await indexed.open(map,1000); await flush(); assert.equal(Worker.instances.at(-1),preparedWorker,'open must reuse the warmed synth');
-const chunk=Float32Array.from({length:4096*2},(_,i)=>i);preparedWorker.emit({type:'chunk',samples:chunk});preparedWorker.emit({type:'chunk',samples:chunk.map(x=>x+8192)});preparedWorker.emit({type:'done'});
+preparedWorker.emit({type:'started',token:1,firstChunk:0});
+const chunk=Float32Array.from({length:4096*2},(_,i)=>i);preparedWorker.emit({type:'chunk',token:1,index:0,samples:chunk});preparedWorker.emit({type:'chunk',token:1,index:1,samples:chunk.map(x=>x+8192)});preparedWorker.emit({type:'done',token:1,endChunk:2});
 const fragment=await indexed.open(map,1000,4100);assert.equal(fragment.startFrame,4100);const fragmentSamples=new Float32Array(await new Response(fragment.body).arrayBuffer());assert.equal(fragmentSamples[0],8200);assert.equal(fragmentSamples.length,(8192-4100)*2);indexed.clear();
-console.log('PASS progressive full cache, direct frame access, warmed engine reuse, prepared seek, cancellation and retry');
+console.log('PASS windowed audio cache: render on demand, far seek restart, bounded window, warmed engine reuse, prepared seek, cancellation and retry');
 
 let player;
 class Player {
@@ -111,7 +167,7 @@ class Player {
   async prepare(){} async unlock(){if(this.unlockGate)await this.unlockGate;} async pause(){} stop(){} dispose(){}
   positionMs(){return this.clock;}
   async play(audio,signal,started,start,tick,live,ready){
-    const call={signal,start,tick,ready:()=>{ready();this.clock=start;started();}};this.calls.push(call);
+    const call={signal,start,tick:(ms)=>{fakeNow+=100;tick(ms);},ready:()=>{ready();this.clock=start;started();}};this.calls.push(call);
     await new Promise((resolve,reject)=>{call.fail=reject;signal.addEventListener('abort',resolve,{once:true});});
   }
 }
@@ -154,18 +210,102 @@ await controller.previewCarrier('a','d');const obsoleteFinish=preview.finish;con
 assert.equal(timeAtBeat(map,1.5),1000);assert.equal(beatAtTime(map,1000),1.5);
 console.log('PASS uninterrupted seek handoff, stale tick isolation, pause/resume and document invalidation');
 
+const buffered = new ServerPlaybackController({ map: async () => map }, new Preview());
+buffered.bindDraft('buffered');
+buffered.setTotalBeats(2);
+const readyFrames = new Set();
+const frameRequests = [];
+const detachFrameBuffer = buffered.setFrameBuffer({
+  active: () => true,
+  prepare(_, time, signal) {
+    if (readyFrames.has(time)) return;
+    return new Promise(resolve => {
+      frameRequests.push({ time, signal, ready() { readyFrames.add(time); resolve(); } });
+      signal.addEventListener('abort', resolve, { once: true });
+    });
+  },
+});
+const bufferedStart = buffered.play();
+await flush();
+assert.equal(buffered.getState().loading, true);
+assert.equal(player.calls.length, 0, 'cold play waits for visuals before handing audio to the player');
+assert.equal(frameRequests[0].time, 0);
+frameRequests[0].ready();
+await flush();
+const outgoing = player.calls[0];
+outgoing.ready();
+player.clock = 240;
+outgoing.tick(240);
+buffered.seek(1.5);
+await flush();
+const cancelled = frameRequests.at(-1);
+assert.equal(cancelled.time, 1000);
+assert.equal(outgoing.signal.aborted, true, 'a cold seek stops the previous audio');
+assert.equal(buffered.getTimeMs(), 240, 'the visible clock holds its previous position');
+assert.equal(buffered.getState().seekBeats, 1.5);
+assert.equal(buffered.getState().loading, true);
+assert.equal(player.calls.length, 1, 'no replacement audio before frame readiness');
+buffered.seek(1);
+await flush();
+const latest = frameRequests.at(-1);
+assert.equal(cancelled.signal.aborted, true, 'a newer seek cancels old frame preparation');
+assert.equal(buffered.getState().seekBeats, 1);
+assert.equal(buffered.getTimeMs(), 240);
+cancelled.ready();
+await flush();
+assert.equal(player.calls.length, 1, 'a late frame window cannot start superseded audio');
+latest.ready();
+await flush();
+const incoming = player.calls.at(-1);
+assert.equal(incoming.start, timeAtBeat(map, 1));
+incoming.ready();
+assert.equal(buffered.getState().loading, false);
+assert.equal(buffered.getState().seekBeats, null);
+buffered.seek(1.5);
+await flush();
+assert.equal(incoming.signal.aborted, false, 'an already buffered seek keeps the smooth handoff');
+player.calls.at(-1).ready();
+await flush();
+assert.equal(incoming.signal.aborted, true);
+buffered.seek(0.25);
+await flush();
+const stopped = frameRequests.at(-1);
+buffered.stop();
+await bufferedStart;
+assert.equal(stopped.signal.aborted, true, 'stop cancels buffering');
+const stoppedOutputs = player.calls.length;
+stopped.ready();
+await flush();
+assert.equal(player.calls.length, stoppedOutputs);
+assert.equal(buffered.getState().loading, false);
+const ending = buffered.play();
+await flush();
+player.calls.at(-1).ready();
+readyFrames.delete(timeAtBeat(map, 1));
+buffered.seek(1);
+await flush();
+assert.equal(buffered.getState().loading, true);
+const beforeEnd = frameRequests.at(-1);
+buffered.seek(2);
+await flush();
+await ending;
+assert.equal(beforeEnd.signal.aborted, true);
+assert.equal(buffered.getTimeMs(), map.extentMs, 'seeking to the end clears a pending hold at the requested endpoint');
+assert.equal(buffered.getState().timeBeats, 2);
+assert.equal(buffered.getState().loading, false);
+detachFrameBuffer();
+console.log('PASS cold play and seek preparation, frozen clock, latest-seek wins, hot handoff and stop');
+
 let payload={version:4,extent_ms:1500,notes:[{source_id:'n',pitch:60,start_ms:0,key_release_ms:200,end_ms:900,velocity:80}],pedals:[{down_ms:0,up_ms:900}],anchors:[],segments:[]};
 const requests=[];
 const fetcher=async(url,options)=>{requests.push(url);return new Response(JSON.stringify(payload),{headers:{'content-type':'application/json'}})};
 const {HttpPlaybackGateway}=load('src/core/playback/HttpPlaybackGateway.ts',{'@/core/auth/authorizedFetch':{authorizedFetch:fetcher,optionalAuthFetch:fetcher},'@/core/gateway/apiBase':{API_BASE:'/api'}});
 const http=new HttpPlaybackGateway(),signal=new AbortController().signal;
-const parsed=await http.map('d/a',signal);assert.equal(parsed.notes[0].keyReleaseMs,200);assert.equal(parsed.pedals[0].upMs,900);
-await http.mapScore('s',signal);assert.ok(requests.includes('/api/scores/s/playback/map'));
-payload.notes[0].key_release_ms=901;await assert.rejects(http.map('d',signal),/Invalid playback note/);
-payload={version:4,carriers:[{carrier_id:'c',notes:[{source_id:'n',pitch:60,velocity:80,duration_ms:650}]}]};
-assert.equal((await http.previewMap('d',signal)).carriers[0].notes[0].durationMs,650);
-assert.equal((await http.previewMapScore('saved/a',signal)).carriers[0].notes[0].pitch,60);
-assert.ok(requests.includes('/api/scores/saved%2Fa/playback/preview/map'));
+const parsed=await http.mapScore('s',signal);assert.equal(parsed.notes[0].keyReleaseMs,200);assert.equal(parsed.pedals[0].upMs,900);assert.ok(requests.includes('/api/scores/s/playback/map'));
+payload.notes[0].key_release_ms=901;await assert.rejects(http.mapScore('s',signal),/Invalid playback note/);
+payload={version:4,carrier_id:'c',notes:[{source_id:'n',pitch:60,velocity:80,duration_ms:650}]};
+const savedChord=await http.previewCarrierScore('saved/a','c',signal);assert.equal(savedChord.notes[0].durationMs,650);assert.equal(savedChord.notes[0].pitch,60);
+assert.ok(requests.includes('/api/scores/saved%2Fa/playback/preview/carriers/c'));
 console.log('PASS JSON-only gateways, physical release vs sustain and invalid metadata rejection');
 
 // Equal raw ids still name distinct resources; saved reading never asks for a draft plan.
