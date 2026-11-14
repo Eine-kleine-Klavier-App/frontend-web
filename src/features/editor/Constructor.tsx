@@ -5,7 +5,7 @@ import { isSpanMark, type MarkSpec } from '@/core/model/markTools';
 import { useState, type ReactNode } from 'react';
 import { useEditor, hotbarSlotKey } from '@/app/store';
 import { ChoiceGroup } from '@/ui/ChoiceGroup';
-import { MinusIcon, PinIcon, PlusIcon } from '@/ui/icons';
+import { PinIcon } from '@/ui/icons';
 import { NOTE_VALUES, toolId, toolLabel, type InsertSpec } from '@/core/model/insertItems';
 import type { Accidental, ArticulationMark, DurationValue } from '@/core/model/score';
 import { ARTICULATION_GROUPS, ARTICULATION_LABEL, withMark } from '@/core/model/articulation';
@@ -15,7 +15,6 @@ import { KeySignatureChoices, SmuflIcon, ToolIcon } from './icons';
 import {
   ACCIDENTAL_GLYPH,
   ARTICULATION_GLYPH,
-  VALUE_WORD,
   beginToolDrag,
   endToolDrag,
   type BuildPreset,
@@ -27,11 +26,6 @@ import {
 // time signature n/m and the marks. Previewed on paper, engraved by VexFlow. Insert arms it as the
 // insert tool; Pin puts it in the first empty hotbar slot (or drag the preview onto any slot).
 
-const DOT_OPTIONS = [
-  { value: '0', label: 'None' },
-  { value: '1', label: <SmuflIcon codes={['augmentationDot']} />, ariaLabel: 'One dot' },
-  { value: '2', label: <SmuflIcon codes={['augmentationDot', 'augmentationDot']} />, ariaLabel: 'Two dots' },
-];
 /** the note composite's marks: the length and the loudness groups (an arpeggio is set on a chord) */
 const MARK_GROUPS = ARTICULATION_GROUPS.filter((g) => g.category !== 'arpeggio').map((g) => ({
   ...g,
@@ -59,33 +53,6 @@ const FIRST_OPTIONS = [
   { value: 'note', label: 'Note' },
   { value: 'rest', label: 'Rest' },
 ];
-const BEAT_VALUES = ['1', '2', '4', '8', '16', '32'];
-
-const valueOptions = (values: readonly DurationValue[]) =>
-  values.map((v) => ({ value: v, label: <ToolIcon id={v} />, ariaLabel: VALUE_WORD[v], title: VALUE_WORD[v] }));
-
-/** A number with − / + — `avoid` is skipped (a tuplet's n can't equal its m). */
-function Stepper({ label, value, min, max, avoid, onChange }: { label: string; value: number; min: number; max: number; avoid?: number; onChange: (v: number) => void }) {
-  const step = (d: number) => {
-    let v = value + d;
-    if (v === avoid) v += d;
-    if (v >= min && v <= max) onChange(v);
-  };
-  const canDown = value - 1 >= min && !(value - 1 === avoid && value - 2 < min);
-  const canUp = value + 1 <= max && !(value + 1 === avoid && value + 2 > max);
-  return (
-    <div className="hp-stepper" role="group" aria-label={label}>
-      <button type="button" className="editor-action" aria-label={`Fewer: ${label}`} disabled={!canDown} onClick={() => step(-1)}>
-        <MinusIcon />
-      </button>
-      <output aria-live="polite">{value}</output>
-      <button type="button" className="editor-action" aria-label={`More: ${label}`} disabled={!canUp} onClick={() => step(1)}>
-        <PlusIcon />
-      </button>
-    </div>
-  );
-}
-
 const Field = ({ label, children }: { label: string; children: ReactNode }) => (
   <div className="props-section">
     <div className="props-section-label">{label}</div>
