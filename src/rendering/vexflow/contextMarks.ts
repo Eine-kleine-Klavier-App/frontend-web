@@ -78,7 +78,8 @@ export function createKeySignature(alterations: KeyAlteration[], clef: ClefName,
 }
 
 export interface MarkEnv {
-  svg: SVGSVGElement;
+  /** the group of each system: a mark, and each piece of a span, is drawn into the group of the system it stands in */
+  systemGroups: SVGGElement[];
   ctx: RenderContext;
   doc: ScoreDocument;
   index: ContextIndex;
@@ -95,6 +96,8 @@ export interface MarkEnv {
   spanPreview?: SpanPreview | null;
   collisions: CollisionLayout;
   inlineWidths: Map<string, number>;
+  /** the systems drawn when a preview draws only some: a mark that touches none of them is left out */
+  systems?: ReadonlySet<number>;
 }
 
 interface Point {
@@ -102,9 +105,11 @@ interface Point {
   beats: number;
 }
 
-export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurShapes: SlurShape[] } {
+export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes: SVGGElement[]; slurShapes: SlurShape[] } {
   const { doc, index, zones, systemOf } = env;
   const shapes: ContextShape[] = [];
+  /** the drawn mark of each shape, in the same order */
+  const nodes: SVGGElement[] = [];
   const slurShapes: SlurShape[] = [];
   const staffOrder = doc.staffOrder;
   let activeContext: ScoreContext;
@@ -182,7 +187,6 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
     const g = document.createElementNS(SVG_NS, 'g');
     g.setAttribute('data-layout-piece', piece.measureId);
     g.setAttribute('data-piece-left', String(piece.x0));
-    g.setAttribute('data-piece-right', String(piece.x1));
     parent.appendChild(g);
     return g;
   };
@@ -250,7 +254,9 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
     const span = resting && { x0: resting.x0, x1: resting.x1 };
     // a refrain's signs span the staves and stand on the barlines: they are not laid out against other marks (an item ink
     // box across two staves would be re-measured against the staff below it on every pass, and never settle)
-    if (c.kind === 'refrain' || c.kind === 'volta') { /* stays where it is drawn */ } else if (c.kind === 'slur') env.collisions.add(node, { ...placement, kind: node.hasAttribute('data-cross-staff') ? 'bridge' : 'attached' }, undefined, span);
+    // a pedal's height is the system's, set where it is drawn: it is registered, never moved
+    if (c.kind === 'refrain' || c.kind === 'volta') { /* stays where it is drawn */ } else if (c.kind === 'sustain') env.collisions.add(node, placement, undefined, span);
+    else if (c.kind === 'slur') env.collisions.add(node, { ...placement, kind: node.hasAttribute('data-cross-staff') ? 'bridge' : 'attached' }, undefined, span);
     else env.collisions.placeOutside(node, placement, sideOf(c), span, 'endMeasureId' in c);
     let reference: number | undefined;
     let manualOffset = 0;
@@ -273,7 +279,10 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
         if (node.hasAttribute(name)) node.setAttribute(name, String(Number(node.getAttribute(name)) + manualOffset));
       }
     }
-    if (publish) shapes.push({ id: c.id, html: node.innerHTML, offset, reference, side: sideOf(c) });
+    if (publish) {
+      shapes.push({ id: c.id, html: node.innerHTML, offset, reference, side: sideOf(c) });
+      nodes.push(node);
+    }
     return reference;
   };
 
@@ -288,24 +297,34 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
     g.setAttribute('class', 'vf-context-mark');
     g.setAttribute('data-object-id', id);
     g.style.setProperty('--voice-color', 'var(--color-accent)');
-    env.svg.appendChild(g);
+    env.systemGroups[systemOf.get(activeContext.measureId) ?? 0].appendChild(g);
     build(g);
     if (!g.childNodes.length) { g.remove(); return; }
     const parts = [...g.querySelectorAll<SVGGElement>('[data-layout-piece]')];
     let reference: number | undefined;
     if (parts.length) {
-      // a span is as long as the music it covers: it only takes the hover colour, it is not enlarged about its centre
-      g.classList.add('vf-span');
+      // each piece of a span is a mark of its own in its system's group, with the span's id
+      const pieceMarks: SVGGElement[] = [];
       for (const part of parts) {
+        const pieceMark = g.cloneNode(false) as SVGGElement;
+        // a span is as long as the music it covers: it only takes the hover colour, it is not enlarged about its centre
+        pieceMark.classList.add('vf-span');
+        pieceMark.append(part);
+        env.systemGroups[systemOf.get(part.getAttribute('data-layout-piece')!) ?? 0].appendChild(pieceMark);
         if (voiceId && g.style.getPropertyValue('--voice-color')) part.style.setProperty('--voice-color', g.style.getPropertyValue('--voice-color'));
         const partReference = finish(part, activeContext, part.getAttribute('data-layout-piece')!, offset, false);
         reference ??= partReference;
         for (const edge of ['start', 'end']) for (const axis of ['x', 'y']) {
           const name = `data-context-${edge}-${axis}`;
-          if (part.hasAttribute(name)) g.setAttribute(name, part.getAttribute(name)!);
+          if (part.hasAttribute(name)) pieceMark.setAttribute(name, part.getAttribute(name)!);
         }
+        pieceMarks.push(pieceMark);
       }
-      shapes.push({ id, html: g.innerHTML, offset, reference, side: sideOf(activeContext) });
+      g.remove();
+      for (const pieceMark of pieceMarks) {
+        shapes.push({ id, html: pieceMark.innerHTML, offset, reference, side: sideOf(activeContext) });
+        nodes.push(pieceMark);
+      }
     } else finish(g, activeContext, activeContext.measureId, offset);
   };
 
@@ -378,18 +397,32 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
   const expanded = doc.contexts.flatMap((c): ScoreContext[] => {
     if (!('voiceIds' in c)) return [c];
     const seen = new Set<string>();
-    return c.voiceIds.flatMap((voiceId) => {
+    // a dynamic or hairpin shared by voices of both staffs is drawn once, under the topmost staff
+    const drawnOnce = c.kind === 'dynamic' || c.kind === 'hairpin';
+    const staffRank = (voiceId: string): number =>
+      staffOrder.indexOf(index.staffOfVoice(voiceId, c.measureId, toBeats(c.position)));
+    const voiceIds = drawnOnce ? [...c.voiceIds].sort((a, b) => staffRank(a) - staffRank(b)) : c.voiceIds;
+    return voiceIds.flatMap((voiceId) => {
       if (c.kind !== 'dynamic' && !index.voiceSounds(voiceId)) return [];
       const staff = index.staffOfVoice(voiceId, c.measureId, toBeats(c.position));
-      const key = c.kind === 'slur' ? voiceId : staff;
+      const key = c.kind === 'slur' ? voiceId : drawnOnce ? c.id : staff;
       if (seen.has(key)) return [];
       seen.add(key);
       return [{ ...c, voiceIds: [voiceId] }];
     });
   });
-  const priority = (c: ScoreContext) => c.kind === 'clef' || c.kind === 'keySignature' ? 0 : c.kind === 'slur' ? 1 : 2;
+  // a pedal stands under everything else in its system, so it is drawn after every other mark
+  const priority = (c: ScoreContext) => c.kind === 'clef' || c.kind === 'keySignature' ? 0 : c.kind === 'slur' ? 1 : c.kind === 'sustain' ? 3 : 2;
   expanded.sort((a, b) => priority(a) - priority(b));
   for (const c of expanded) {
+    if (env.systems) {
+      const from = index.measureIndex.get(c.measureId) ?? 0;
+      const endId = 'endMeasureId' in c ? c.endMeasureId : c.measureId;
+      const to = endId === null ? doc.measures.length - 1 : index.measureIndex.get(endId) ?? from;
+      let touched = false;
+      for (let i = from; i <= to && !touched; i++) touched = env.systems.has(systemOf.get(doc.measures[i].id) ?? -1);
+      if (!touched) continue;
+    }
     activeContext = c;
     switch (c.kind) {
       case 'dynamic': {
@@ -435,7 +468,6 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
               const g = document.createElementNS(SVG_NS, 'g');
               g.setAttribute('data-layout-piece', piece.measureId);
               g.setAttribute('data-piece-left', String(piece.x0));
-              g.setAttribute('data-piece-right', String(piece.x1));
               parent.appendChild(g);
               const row = rowUnder(piece.measureId, staffId);
               if (!row) continue;
@@ -472,7 +504,6 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
               const g = document.createElementNS(SVG_NS, 'g');
               g.setAttribute('data-layout-piece', piece.measureId);
               g.setAttribute('data-piece-left', String(piece.x0));
-              g.setAttribute('data-piece-right', String(piece.x1));
               parent.appendChild(g);
               const inPiece = items.filter((it) => (systemOf.get(it.measureId) ?? -1) === (systemOf.get(piece.measureId) ?? -2));
               if (!inPiece.length) continue;
@@ -551,7 +582,6 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
               const g = document.createElementNS(SVG_NS, 'g');
               g.setAttribute('data-layout-piece', piece.measureId);
               g.setAttribute('data-piece-left', String(piece.x0));
-              g.setAttribute('data-piece-right', String(piece.x1));
               parent.appendChild(g);
             const bottom = bottomOf(piece.measureId, c.staffId);
             if (bottom === null) continue;
@@ -614,7 +644,6 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
               const g = document.createElementNS(SVG_NS, 'g');
               g.setAttribute('data-layout-piece', piece.measureId);
               g.setAttribute('data-piece-left', String(piece.x0));
-              g.setAttribute('data-piece-right', String(piece.x1));
               parent.appendChild(g);
               const r = rowAbove(piece.measureId);
               if (!r) continue;
@@ -699,20 +728,45 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
       case 'sustain': {
         const start = startOf(c);
         const end = endOf(c);
+        // where one pedal is released and the next pressed at the same place the two ticks become one peak
+        const pointKey = (p: Point) => `${p.measureId}:${p.beats}`;
+        const others = doc.contexts.filter((o) => o.kind === 'sustain' && o.id !== c.id) as (typeof c)[];
+        const joinedBefore = others.some((o) => pointKey(endOf(o)) === pointKey(start));
+        const joinedAfter = others.some((o) => pointKey(startOf(o)) === pointKey(end));
+        const lastStaff: string = staffOrder[staffOrder.length - 1];
+        const sustainIds: Set<string> = new Set(others.map((o) => o.id));
+        sustainIds.add(c.id);
         group(c.id, (g) => {
           const parent = g;
             for (const piece of pieces(start, end)) {
               const g = document.createElementNS(SVG_NS, 'g');
               g.setAttribute('data-layout-piece', piece.measureId);
               g.setAttribute('data-piece-left', String(piece.x0));
-              g.setAttribute('data-piece-right', String(piece.x1));
               parent.appendChild(g);
-            const bottom = bottomOf(piece.measureId, staffOrder[staffOrder.length - 1]);
+            const bottom = bottomOf(piece.measureId, lastStaff);
             if (bottom === null) continue;
-            const y = bottom + 6 * STAFF_SPACE;
-            if (piece.first) handle(g, 'start', piece.x0, y);
+            // every pedal of a system stands on one line, under the lowest ink of the whole system on the last staff
+            const system: number | undefined = systemOf.get(piece.measureId);
+            let floor: number = bottom;
+            for (const item of env.collisions.items) {
+              if (item.staffId !== lastStaff || systemOf.get(item.measureId) !== system) continue;
+              if (sustainIds.has(item.element.getAttribute('data-layout-context') ?? '')) continue;
+              const box = item.spacingBox ?? item.box;
+              floor = Math.max(floor, box.y + box.height);
+            }
+            const y: number = Math.max(bottom + 6 * STAFF_SPACE, floor + env.collisions.gap + STAFF_SPACE);
+            // a pedal that follows another one into the next measure of the same system starts on the barline the other ends on
+            const measureAt: number = index.measureIndex.get(piece.measureId) ?? 0;
+            const opens = piece.first && joinedBefore;
+            const meetsOnBarline: boolean = opens && start.beats === 0 && measureAt > 0 && systemOf.get(doc.measures[measureAt - 1].id) === system;
+            const left: number = meetsOnBarline ? zoneOf.get(`${piece.measureId}:${staffOrder[0]}`)?.x0 ?? piece.x0 : piece.x0;
+            if (piece.first) handle(g, 'start', left, y);
             if (piece.last) handle(g, 'end', piece.x1, y);
-            g.appendChild(make('path', { d: `M${piece.x0} ${y - (piece.first ? STAFF_SPACE : 0)} V${y} H${piece.x1} V${y - (piece.last ? STAFF_SPACE : 0)}`, fill: 'none', stroke: env.ink, 'stroke-width': 1.2 }));
+            // a peak is as wide as it is tall, half on each side of the place the pedals meet
+            const closes = piece.last && joinedAfter;
+            const head = `M${left} ${y - (piece.first ? STAFF_SPACE : 0)}${opens ? ` L${left + STAFF_SPACE / 2} ${y}` : ` V${y}`}`;
+            const tail = closes ? ` H${piece.x1 - STAFF_SPACE / 2} L${piece.x1} ${y - STAFF_SPACE}` : ` H${piece.x1} V${y - (piece.last ? STAFF_SPACE : 0)}`;
+            g.appendChild(make('path', { d: head + tail, fill: 'none', stroke: env.ink, 'stroke-width': 1.2 }));
             }
         }, undefined, SPAN_NUDGE);
         break;
@@ -729,7 +783,13 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
         key.setX((inlineRight.get(c.id) ?? x - STAFF_SPACE) - key.getWidth());
         key.draw();
         const el = key.getSVGElement();
-        if (el) { el.setAttribute('data-object-id', c.id); env.collisions.add(el, { staffId: c.staffId, measureId: c.measureId, beat: at.beats, kind: 'inline' }); shapes.push({ id: c.id, html: el.innerHTML }); }
+        if (el) {
+          env.systemGroups[systemOf.get(c.measureId) ?? 0].appendChild(el);
+          el.setAttribute('data-object-id', c.id);
+          env.collisions.add(el, { staffId: c.staffId, measureId: c.measureId, beat: at.beats, kind: 'inline' });
+          shapes.push({ id: c.id, html: el.innerHTML });
+          nodes.push(el as SVGGElement);
+        }
         break;
       }
       case 'clef': {
@@ -746,14 +806,16 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; slurSh
         Glyph.renderGlyph(env.ctx, left, bottom - (4 - line) * STAFF_SPACE, 32, c.clef === 'treble' ? 'gClef' : 'fClef');
         env.ctx.closeGroup();
         if (c.octaveTransposition) mark.appendChild(text(String(Math.abs(c.octaveTransposition) * 7 + 1), left + 0.4 * STAFF_SPACE, bottom + (c.octaveTransposition > 0 ? -10 * STAFF_SPACE : 2 * STAFF_SPACE), { 'font-size': STAFF_SPACE }));
+        env.systemGroups[systemOf.get(c.measureId) ?? 0].appendChild(mark);
         mark.setAttribute('data-object-id', c.id);
         env.collisions.add(mark, { staffId: c.staffId, measureId: c.measureId, beat: at.beats, kind: 'inline' });
         shapes.push({ id: c.id, html: mark.innerHTML });
+        nodes.push(mark);
         break;
       }
       default:
         break;
     }
   }
-  return { shapes, slurShapes };
+  return { shapes, nodes, slurShapes };
 }
