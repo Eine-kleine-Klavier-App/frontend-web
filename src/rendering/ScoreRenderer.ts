@@ -127,7 +127,7 @@ export interface StemHandle {
  *  only on it) selects it. A beam cut by a system break has one shape per run, all with its id. */
 export interface BeamShape {
   /** `leftLength` and `rightLength` are the automatic stem lengths at the two ends, the ones a factor multiplies; `direction` is the beam's stems (1 up, -1 down) */
-  handles?: { x0: number; x1: number; y0: number; y1: number; staffSpace: number; localX0: number; leftLength: number; rightLength: number; direction: 1 | -1 };
+  handles?: { x0: number; x1: number; y0: number; y1: number; staffSpace: number; localX0: number; leftLength: number; rightLength: number; direction: 1 | -1; leftCarrierId: string; rightCarrierId: string };
   id: string;
   paths: string[];
 }
@@ -226,7 +226,13 @@ export interface ScoreLayout {
   contextShapes: ContextShape[];
   /** where a grace note can be put, beside each carrier. */
   graceSlots: GraceSlot[];
+  /** the same lists cut by system, each drawn `offsetY` lower than its own coordinates: a system a drag preview
+   *  only moves keeps the very objects it had, so what is drawn from it need not be drawn again */
+  systems: { layout: SystemLayout; offsetY: number }[];
 }
+
+/** the lists of a layout that one system publishes: all but the page's size, the piece's length and the cut by system */
+export type SystemLayout = Omit<ScoreLayout, 'width' | 'height' | 'engravedFor' | 'totalBeats' | 'systems'>;
 
 
 /** The x a beat is drawn at on a staff: piecewise between the measure's real onsets. */
@@ -281,6 +287,47 @@ export function staffInsertionSpans(zone: StaffZone, startBeat: number, endBeat:
     spans.push({ x: a.x + (start - a.beat) * scale, width: (end - start) * scale });
   }
   return spans;
+}
+
+/** The highest and the lowest notehead of the chord at an end of a beam, as y on the sheet. */
+export interface ChordSpan { top: number; bottom: number }
+
+/** What a drag of a beam gives: the factors of its two ends and the direction of its stems. As with a single stem, a
+ *  dragged end that goes past the notes of its chord turns the stems over, every stem of the beam at once since a beam
+ *  has one direction; the end that is not dragged keeps its factor. `ends` are the beam's ends as the drag found them.
+ *  A center drag moves both ends by the same distance, so the slope stays. */
+export function beamDragResult(
+  initial: { leftFactor: number; rightFactor: number },
+  side: 'left' | 'center' | 'right',
+  delta: number,
+  ends: { y0: number; y1: number; leftLength: number; rightLength: number },
+  chords: { left: ChordSpan; right: ChordSpan },
+  direction: 1 | -1,
+  minLength: number,
+): { direction: 1 | -1; override: { leftFactor: number; rightFactor: number } } {
+  const movesLeft = side !== 'right';
+  const movesRight = side !== 'left';
+  const leftTip = ends.y0 + (movesLeft ? delta : 0);
+  const rightTip = ends.y1 + (movesRight ? delta : 0);
+  let turned = direction;
+  const pass = (tip: number, chord: ChordSpan) => {
+    if (turned === -1 && tip < chord.top) turned = 1;
+    else if (turned === 1 && tip > chord.bottom) turned = -1;
+  };
+  if (movesLeft) pass(leftTip, chords.left);
+  if (movesRight) pass(rightTip, chords.right);
+  const factor = (moved: boolean, factorNow: number, tip: number, chord: ChordSpan, automatic: number) => {
+    if (!moved) return factorNow;
+    const base = turned === 1 ? chord.bottom : chord.top;
+    return Math.max((chord.bottom - chord.top + minLength) / automatic, ((base - tip) * turned) / automatic);
+  };
+  return {
+    direction: turned,
+    override: {
+      leftFactor: factor(movesLeft, initial.leftFactor, leftTip, chords.left, ends.leftLength),
+      rightFactor: factor(movesRight, initial.rightFactor, rightTip, chords.right, ends.rightLength),
+    },
+  };
 }
 
 /** A center drag preserves slope; an endpoint drag leaves the opposite endpoint fixed. */
