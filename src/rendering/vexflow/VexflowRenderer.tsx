@@ -1,8 +1,10 @@
 import { bodyFactor, bodyFraction } from '@/core/model/presentation';
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useDeferredValue, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { CollisionLayout, growMinimum, inkBox, type InkBox } from './collisionLayout';
+import { hashOf, readSeed, seedKey, writeSeed, type LayoutSeed } from './layoutSeeds';
 import {
   Renderer,
+  type SVGContext,
   Stave,
   StaveNote,
   GraceNote,
@@ -26,6 +28,7 @@ import {
   Modifier,
   Stroke,
   Glyph,
+  BarlineType,
 } from 'vexflow';
 import type {
   Accidental as AccidentalValue,
@@ -42,18 +45,85 @@ import type {
   BeamOverride,
 } from '@/core/model/score';
 import { TREMOLO_STROKES, type OrnamentSign } from '@/core/model/ornament';
-import type { ScoreLayout, GraceSlot, TimeMapEntry, NoteBox, ModifierBox, StaffZone, StemHandle, MeasureBox, BeamShape, TupletShape, TimeSignatureShape, ContextShape, SlurShape, SpanPreview } from '@/rendering/ScoreRenderer';
+import type { ScoreLayout, SystemLayout, GraceSlot, TimeMapEntry, NoteBox, ModifierBox, StaffZone, StemHandle, MeasureBox, BeamShape, TupletShape, TimeSignatureShape, ContextShape, SlurShape, SpanPreview } from '@/rendering/ScoreRenderer';
 import type { SlurOffsets } from '@/core/model/slurHandles';
 import { resolveVoiceColor } from '@/core/model/voiceColors';
 import { readCssToken } from '@/ui/cssToken';
 import { staffStepToKey } from '@/core/model/pitch';
-import { ContextIndex, keyOfAlterations, letterOfStep, measureBeats as lengthOfMeasure } from '@/core/model/contexts';
+import { ContextIndex, letterOfStep, measureBeats as lengthOfMeasure } from '@/core/model/contexts';
 import { drawContextMarks, createKeySignature } from '@/rendering/vexflow/contextMarks';
 import { repeatBarlines } from '@/core/model/repeats';
 import { shrinkWholeNotehead, getNotePaddingPx, fixLedgerLineWidth, REPEAT_SIGN_ROOM, STAFF_SPACE } from '@/rendering/vexflow/engravingScale';
 
 /** the most times a score is laid out again after a measurement asked for more room */
 const MAX_LAYOUT_PASSES = 40;
+/** a score of more systems than this draws the ones near the screen first; a smaller one is drawn whole */
+const ZONE_MIN_SYSTEMS = 12;
+/** the systems drawn before the screen is known */
+const DEFAULT_ZONE = 6;
+/** the zone reaches this many screen heights above and below the screen */
+const ZONE_MARGIN = 0.75;
+/** the room above a system's upper staff that still belongs to the system */
+const SYSTEM_ROOM = 40;
+/** the screen stands still this long (ms without a scroll) before the systems it is missing are drawn: a drawing inside a scroll drops frames */
+const SCROLL_IDLE_MS = 100;
+
+/** what a system is: drawn, drawn for a document that has changed since (shown until it comes near the screen), or not drawn yet */
+type SystemState = 'drawn' | 'stale' | 'blank';
+
+/** whether a layout keeps the breaks of the drawing it is drawn over: every system that is shown and not drawn again keeps its
+ *  measures' places and widths; the systems not drawn yet, and those drawn again, may change as they like */
+function sameBreaks(signature: string, drawing: BaseDrawing, only: ReadonlySet<number>): boolean {
+  const lines = signature.split('\n');
+  const before = drawing.signature.split('\n');
+  return before.every((line, si) => drawing.state[si] === 'blank' || only.has(si) || lines[si] === line);
+}
+
+/** the nearest ancestor that scrolls, or null when the page itself does */
+function scrollerOf(element: Element): Element | null {
+  for (let node = element.parentElement; node; node = node.parentElement) {
+    const overflow = getComputedStyle(node).overflowY;
+    if (overflow === 'auto' || overflow === 'scroll') return node;
+  }
+  return null;
+}
+
+/** where a system's band starts on the screen, read from where the drawing placed it */
+function systemTop(drawing: BaseDrawing, si: number): number {
+  const rect = drawing.svg.getBoundingClientRect();
+  const unit = drawing.height > 0 ? rect.height / drawing.height : 1;
+  return rect.top + (drawing.tops[si] + drawing.applied[si] + drawing.shiftY - SYSTEM_ROOM) * unit;
+}
+
+function screenOf(scroller: Element | null): { top: number; bottom: number } {
+  return scroller ? scroller.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
+}
+
+/** the systems near the screen: those whose band meets the screen widened by the margin */
+function systemsNearScreen(drawing: BaseDrawing, scroller: Element | null): Set<number> {
+  const view = screenOf(scroller);
+  const margin = (view.bottom - view.top) * ZONE_MARGIN;
+  const bottomOfDrawing = drawing.svg.getBoundingClientRect().bottom;
+  const near = new Set<number>();
+  for (let si = 0; si < drawing.tops.length; si++) {
+    const bottom = si + 1 < drawing.tops.length ? systemTop(drawing, si + 1) : bottomOfDrawing;
+    if (bottom >= view.top - margin && systemTop(drawing, si) <= view.bottom + margin) near.add(si);
+  }
+  return near;
+}
+
+/** the first measure of the first system in view and where it stands on the screen: what stays put while the systems above it are drawn */
+function anchorOf(drawing: BaseDrawing, scroller: Element | null): { measureId: string; top: number } | null {
+  const view = screenOf(scroller);
+  const bottomOfDrawing = drawing.svg.getBoundingClientRect().bottom;
+  for (let si = 0; si < drawing.tops.length; si++) {
+    const bottom = si + 1 < drawing.tops.length ? systemTop(drawing, si + 1) : bottomOfDrawing;
+    if (bottom <= view.top) continue;
+    const measureId = drawing.signature.split('\n')[si]?.split(' ')[0]?.split(':')[0];
+    return measureId ? { measureId, top: systemTop(drawing, si) } : null;
+  }
+  return null;
+}
 
 const BEATS: Record<string, number> = { w: 4, h: 2, q: 1, '8': 0.5, '16': 0.25, '32': 0.125 };
 
@@ -314,6 +384,8 @@ function buildGraceNotes(set: GraceSet, clef: string, inkColor: string): void {
 
 /** VexFlow's default extension, used only for interaction bounds and fallback geometry. */
 export const VEXFLOW_STEM_HEIGHT = 3.5 * STAFF_SPACE;
+/** the thickness of a bar of a beam drawn between stems that point different ways: VexFlow's own beam width */
+const KNEED_BEAM_WIDTH = 5;
 // Minimum protrusion of a stem beyond a chord's outer notehead: a stem is never set shorter, by a drag or by a saved length.
 export const MIN_STEM_LENGTH = 2 * STAFF_SPACE;
 
@@ -385,6 +457,64 @@ function naturalStemInkBox(sn: StaveNote): InkBox {
   }
 }
 
+/** Moves every coordinate of a layout by (dx, dy): the whole score off its origin when ink sticks out to the left
+ *  or above, and the systems below one that a drag made taller. */
+/** The last full engraving: a drag preview draws again only the systems it changes and moves the ones below. */
+interface BaseDrawing {
+  svg: SVGSVGElement;
+  /** each system's group as the full engraving drew it, and the group that stands for the system now */
+  groups: SVGGElement[];
+  current: SVGGElement[];
+  /** each system's measures with their x and width: a preview that keeps them all draws only its own systems */
+  signature: string;
+  /** where each system's upper staff stands, and how far each group is moved down now */
+  tops: number[];
+  applied: number[];
+  layouts: SystemLayout[];
+  /** the drawn mark of each context shape */
+  nodes: Map<ContextShape, Element>;
+  systemOf: Map<string, number>;
+  /** what each system is now: the groups of the others are empty, or a picture of an earlier document */
+  state: SystemState[];
+  /** each measure as the full engraving built it, without its VexFlow objects: a preview takes the measures of the
+   *  systems it does not draw from here (their widths, notes and headers cannot change while it is shown) */
+  facts: Map<string, Built>;
+  shiftX: number;
+  shiftY: number;
+  width: number;
+  height: number;
+  /** the height the systems took before the score's own bounds were added */
+  totalH: number;
+}
+
+function shiftLayout(layout: SystemLayout, dx: number, dy: number): void {
+  for (const box of layout.noteBoxes) { box.x += dx; box.y += dy; }
+  for (const box of layout.modifierBoxes) { box.x += dx; box.y += dy; }
+  for (const slot of layout.graceSlots) slot.x += dx;
+  for (const box of layout.measures) { box.x += dx; box.y += dy; }
+  for (const zone of layout.staffZones) { zone.x0 += dx; zone.x1 += dx; zone.left += dx; zone.bottomLineY += dy; }
+  const segments = new Set(layout.staffZones.flatMap((z) => [...z.segments, ...(z.insertionSegments ?? [])]));
+  for (const segment of segments) segment.x += dx;
+  for (const entry of layout.timeMap) { entry.x += dx; entry.y0 += dy; entry.y1 += dy; }
+  for (const stem of layout.stemHandles) {
+    stem.x += dx; stem.baseY += dy; stem.tipY += dy;
+    if (stem.flag) { stem.flag.dx += dx; stem.flag.dy += dy; }
+    if (stem.topNoteY !== undefined) stem.topNoteY += dy;
+    if (stem.bottomNoteY !== undefined) stem.bottomNoteY += dy;
+    if (stem.hitY1 !== undefined) stem.hitY1 += dy;
+    if (stem.hitY2 !== undefined) stem.hitY2 += dy;
+  }
+  const wrap = (html: string) => `<g transform="translate(${dx} ${dy})">${html}</g>`;
+  for (const shape of [...layout.contextShapes, ...layout.timeSignatureShapes, ...layout.tupletShapes]) shape.html = wrap(shape.html);
+  for (const slur of layout.slurShapes) for (const point of [...Object.values(slur.base), ...Object.values(slur.frame ?? {})]) { point.x += dx; point.y += dy; }
+  for (const beam of layout.beamShapes) {
+    if (beam.handles) { beam.handles.x0 += dx; beam.handles.x1 += dx; beam.handles.y0 += dy; beam.handles.y1 += dy; }
+    // Beam hit geometry stores paths, so its coordinates need the same shift.
+    beam.paths = beam.paths.map((path) => path.replace(/([ML])([\d.e+-]+)[ ,]+([\d.e+-]+)/g,
+      (_, op: string, x: string, y: string) => `${op}${Number(x) + dx} ${Number(y) + dy}`));
+  }
+}
+
 interface Drawn {
   staffId: string;
   voiceIndex: number;
@@ -412,16 +542,17 @@ interface Built {
   contextWidths: Map<number, number>;
   /** Carrier ids split across staffs; their stemmed halves share one connecting stem and flag. */
   crossStaffCarrierIds: Set<string>;
-  /** the time signature differs from the previous measure's, so it is drawn here even mid-system. */
-  timeSignatureChanged: boolean;
+  /** the time signature is drawn at this measure: the score's first, or one that differs from the previous measure's (even mid-system). */
+  showsTimeSignature: boolean;
   /** the clef each of the two staffs has at the start of the measure */
   startClefs: [ClefName, ClefName];
   /** the key (VexFlow's name for it) each staff has at the start of the measure, and the previous
    *  measure's — to cancel it when the key changes here */
   startKeys: [KeyAlteration[], KeyAlteration[]];
   prevKeys: [KeyAlteration[], KeyAlteration[]];
-  /** a clef / key change sits exactly on the measure's start, so it is drawn here even mid-system. */
-  clefChanged: boolean;
+  /** a clef / key change sits exactly on the measure's start, so it is drawn here even mid-system; a clef
+   *  only on the staff it changes (in staff order) */
+  clefChanged: [boolean, boolean];
   keyChanged: boolean;
   /** the grace notes of the measure, drawn beside their carriers once those are placed */
   graceSets: GraceSet[];
@@ -429,7 +560,8 @@ interface Built {
 
 /** what a measure's header draws, in order: clef, key signature, time signature */
 interface HeaderSpec {
-  clefs: [ClefName, ClefName] | null;
+  /** the clef each staff draws; null on a staff whose clef stays */
+  clefs: [ClefName | null, ClefName | null] | null;
   small: boolean;
   keys: [KeyAlteration[], KeyAlteration[]] | null;
   keyClefs?: [ClefName, ClefName];
@@ -441,6 +573,8 @@ interface HeaderSpec {
 
 interface Props {
   document: ScoreDocument;
+  /** A mounted score can sit behind Waterfall while its current engraving is retained. */
+  scoreActive?: boolean;
   selectedIds: string[];
   /** carrier ids selected at CARRIER granularity (stem-click / chord double-click) — see
    *  app/store.ts. Lets a single-note carrier's stem/notehead group tint on selection when it was
@@ -476,15 +610,18 @@ interface Props {
   /** entities an insert just created — flashed once (CSS `.insert-flash`, 400ms). Optional:
    *  thumbnails never pass it. */
   flash?: { ids: string[] } | null;
+  /** a document the engraver cannot draw: the previous drawing and layout stay, the message goes here. Optional: thumbnails never pass it. */
+  onEngraveError?: (message: string) => void;
 }
 
 export function VexflowRenderer({
   document: doc,
+  scoreActive = true,
   selectedIds,
   carrierSelectedIds,
   pageContentWidth,
   onLayout,
-  voiceColors,
+  voiceColors: currentVoiceColors,
   stemOverrides,
   beamPreview,
   slurPreview,
@@ -493,9 +630,16 @@ export function VexflowRenderer({
   hoveredNoteIds,
   selectedObjectIds,
   flash,
+  onEngraveError,
 }: Props) {
   const hostRef = useRef<HTMLDivElement>(null);
+  const voiceColors = useDeferredValue(currentVoiceColors);
+  const settled = useRef<{ doc: ScoreDocument; width: number; horizontal: Map<string, number>; reaches: Map<string, number>; inlineWidths: Map<string, number>; widthMinimum: Map<string, number>; signatures: Map<string, string>; structure: string; voiceColors: Props['voiceColors']; drawing: BaseDrawing } | null>(null);
   const effectivePageContentWidth = pageContentWidth ?? PAGE_CONTENT_W;
+  // the systems near the screen, and a count that draws again when they change: only the ones not drawn yet are then drawn
+  const zoneRef = useRef<ReadonlySet<number> | null>(null);
+  const [zoneVersion, setZoneVersion] = useState(0);
+  const refreshZoneRef = useRef<() => void>(() => {});
   const selectionKey = selectedIds.join(',');
   const carrierSelectionKey = carrierSelectedIds.join(',');
   const hoverKey = hoveredNoteIds.join(',');
@@ -503,18 +647,169 @@ export function VexflowRenderer({
 
   useLayoutEffect(() => {
     const host = hostRef.current;
-    if (!host) return;
-    const horizontal = new Map<string, number>();
-    const reaches = new Map<string, number>();
+    if (!host || !scoreActive) return;
+    const known = settled.current?.doc === doc && settled.current.width === effectivePageContentWidth ? settled.current : null;
+    const previewing = Boolean(beamPreview || slurPreview || spanPreview || placementPreview) || stemOverrides !== doc.stemOverrides;
+    // a drag only moves ink up and down: drawn from the settled spacing, the measures keep their widths, so a preview never re-breaks the lines
+    const widen = known && previewing ? (): boolean => false : growMinimum;
+    const previewBase = known?.drawing.svg === host.querySelector('svg') ? known.drawing : null;
+    // the systems a drag preview changes: those of the dragged stems (with the beams they are in), beam, slur or mark;
+    // null when a preview cannot be traced to its measures: the whole score is drawn
+    let previewSystems: Set<number> | null = null;
+    if (previewing && previewBase) {
+      const measureOf = new Map<string, string>();
+      for (const measure of doc.measures) for (const voice of measure.voices) for (const item of voice.items) measureOf.set(item.id, measure.id);
+      const carriers = new Set<string>();
+      for (const id of new Set([...Object.keys(stemOverrides), ...Object.keys(doc.stemOverrides)])) {
+        if (stemOverrides[id] !== doc.stemOverrides[id]) carriers.add(id);
+      }
+      const measureIds: (string | undefined)[] = [];
+      if (beamPreview && !doc.beams.some((beam) => beam.id === beamPreview.id)) measureIds.push(undefined);
+      for (const beam of doc.beams) {
+        if (beam.id === beamPreview?.id || beam.carrierIds.some((id) => carriers.has(id))) for (const id of beam.carrierIds) carriers.add(id);
+      }
+      for (const id of carriers) measureIds.push(measureOf.get(id));
+      for (const id of [slurPreview?.id, spanPreview?.id, placementPreview?.id]) {
+        if (id === undefined) continue;
+        const context = doc.contexts.find((c) => c.id === id);
+        const endId = context && 'endMeasureId' in context ? context.endMeasureId : context?.measureId;
+        const from = doc.measures.findIndex((m) => m.id === context?.measureId);
+        const to = endId === null ? doc.measures.length - 1 : doc.measures.findIndex((m) => m.id === endId);
+        if (from < 0 || to < 0) measureIds.push(undefined);
+        else for (let i = from; i <= to; i++) measureIds.push(doc.measures[i].id);
+      }
+      const systems = measureIds.map((id) => (id === undefined ? undefined : previewBase.systemOf.get(id)));
+      // a preview over more than two systems is drawn with the whole score
+      const touched = new Set(systems);
+      if (!touched.has(undefined) && touched.size <= 2) previewSystems = touched as Set<number>;
+    }
+    // what each measure is drawn from (itself, the stem overrides, beams, tuplets, ties, glissandos and contexts that touch it), and what the
+    // spacing of all of them depends on: an edit that leaves the structure alone keeps the spacing of every measure it did not touch
+    const measureOfId = new Map<string, string>();
+    for (const measure of doc.measures) for (const voice of measure.voices) for (const item of voice.items) {
+      measureOfId.set(item.id, measure.id);
+      for (const note of item.notes) measureOfId.set(note.noteId, measure.id);
+      for (const group of [item.graceBefore, item.graceAfter]) for (const grace of group?.carriers ?? []) {
+        measureOfId.set(grace.id, measure.id);
+        for (const note of grace.notes) measureOfId.set(note.noteId, measure.id);
+      }
+    }
+    const touching = new Map<string, string[]>();
+    const touch = (ids: readonly string[], part: string): void => {
+      for (const measureId of new Set(ids.map((id) => measureOfId.get(id)))) {
+        if (measureId !== undefined) touching.set(measureId, [...(touching.get(measureId) ?? []), part]);
+      }
+    };
+    for (const beam of doc.beams) touch(beam.carrierIds, JSON.stringify(beam));
+    for (const tuplet of doc.tuplets) touch(tuplet.carrierIds, JSON.stringify(tuplet));
+    for (const tie of doc.ties) touch([tie.startNoteId, tie.endNoteId], JSON.stringify(tie));
+    for (const glissando of doc.glissandos) touch([glissando.startNoteId, glissando.endNoteId], JSON.stringify(glissando));
+    for (const [id, placement] of Object.entries(doc.stemOverrides)) touch([id], `${id}:${JSON.stringify(placement)}`);
+    for (const context of doc.contexts) {
+      const from = doc.measures.findIndex((m) => m.id === context.measureId);
+      const endId = 'endMeasureId' in context ? context.endMeasureId : context.measureId;
+      const to = endId === null ? doc.measures.length - 1 : doc.measures.findIndex((m) => m.id === endId);
+      for (let i = Math.max(from, 0); i <= to; i++) touching.set(doc.measures[i].id, [...(touching.get(doc.measures[i].id) ?? []), JSON.stringify(context)]);
+    }
+    const signatures = new Map<string, string>(doc.measures.map((m) => [m.id, JSON.stringify([m, touching.get(m.id)])]));
+    const structure = JSON.stringify([doc.staffOrder, doc.voices, doc.presentation, doc.measures.map((m) => [m.id, m.timeSignature]),
+      doc.contexts.filter((c) => c.kind === 'clef' || c.kind === 'keySignature' || c.kind === 'refrain' || c.kind === 'volta')]);
+    const earlier = settled.current;
+    const zone = zoneRef.current;
+    const changedVoices = new Set<number>();
+    if (earlier && earlier.voiceColors !== voiceColors) {
+      doc.voices.forEach((voice, index) => {
+        if (resolveVoiceColor(voice.id, voice.index, earlier.voiceColors) !== resolveVoiceColor(voice.id, voice.index, voiceColors)) changedVoices.add(index);
+      });
+    }
+    // a preview draws its systems; scrolling draws the next missing system. Edits and voice colours redraw
+    // affected systems near the screen and mark the rest stale. A different structure or width starts a new drawing.
+    let baseDrawing: BaseDrawing | null = null;
+    let partial: Set<number> | null = null;
+    const stale = new Set<number>();
+    if (previewing) {
+      baseDrawing = previewBase;
+      partial = previewSystems;
+    } else if (previewBase && changedVoices.size === 0) {
+      // the screen asks for the systems it is missing one at a time, the nearest to the middle of it first, so that no task draws more than one
+      const screen = screenOf(scrollerOf(host));
+      const middle = (screen.top + screen.bottom) / 2;
+      let nearest: number | undefined;
+      let nearestGap = Infinity;
+      for (const si of zone ?? []) {
+        if (previewBase.state[si] === undefined || previewBase.state[si] === 'drawn') continue;
+        const top = systemTop(previewBase, si);
+        const bottom = si + 1 < previewBase.tops.length ? systemTop(previewBase, si + 1) : previewBase.svg.getBoundingClientRect().bottom;
+        const gap = Math.max(top - middle, middle - bottom, 0);
+        if (gap < nearestGap) {
+          nearest = si;
+          nearestGap = gap;
+        }
+      }
+      if (nearest === undefined) return;
+      baseDrawing = previewBase;
+      partial = new Set([nearest]);
+    } else if (earlier && earlier.width === effectivePageContentWidth && earlier.structure === structure && earlier.drawing.svg === host.querySelector('svg')) {
+      const changedSystems = new Set(doc.measures.filter((m) => earlier.signatures.get(m.id) !== signatures.get(m.id)).map((m) => earlier.drawing.systemOf.get(m.id)));
+      if (!changedSystems.has(undefined)) {
+        const wanted = new Set<number>();
+        for (const si of changedSystems as Set<number>) {
+          if (earlier.drawing.state[si] === 'blank') continue;
+          if (!zone || zone.has(si)) wanted.add(si);
+          else stale.add(si);
+        }
+        if (changedVoices.size > 0) {
+          const colorZone = systemsNearScreen(earlier.drawing, scrollerOf(host));
+          for (const [id, measure] of earlier.drawing.facts) {
+            const si = earlier.drawing.systemOf.get(id);
+            if (si === undefined || earlier.drawing.state[si] === 'blank') continue;
+            if (!measure.drawn.some((part) => !part.isEmpty && changedVoices.has(part.voiceIndex))) continue;
+            if (colorZone.has(si)) wanted.add(si);
+            else stale.add(si);
+          }
+        }
+        if (!previewBase) {
+          for (const si of zone ?? []) if (earlier.drawing.state[si] !== undefined && earlier.drawing.state[si] !== 'drawn') wanted.add(si);
+        }
+        baseDrawing = earlier.drawing;
+        partial = wanted;
+      }
+    }
+    /** the systems of a drawing from scratch: those near the screen, or the first ones before it is known */
+    const zoneFor = (count: number): ReadonlySet<number> => {
+      const wanted = new Set<number>();
+      for (const si of zone ?? []) if (si < count) wanted.add(si);
+      if (wanted.size === 0) for (let si = 0; si < Math.min(count, DEFAULT_ZONE); si++) wanted.add(si);
+      return wanted;
+    };
+    const seed = known ?? (!previewing && earlier && earlier.width === effectivePageContentWidth && earlier.structure === structure ? earlier : null);
+    // a score opened again (or in another tab) starts from the spacing it settled on last time
+    const stored: LayoutSeed | null = !seed && !previewing ? readSeed(seedKey(structure, effectivePageContentWidth)) : null;
+    const horizontal = new Map<string, number>((seed ?? stored)?.horizontal);
+    const reaches = new Map<string, number>((seed ?? stored)?.reaches);
     // a refrain or a volta that starts or ends on a measure line is that barline, drawn by the staves themselves: its sign sits on the line
     // (at a system start, before the clef), never beside it. One that starts or ends inside a measure is drawn by contextMarks.
     const barlines = repeatBarlines(doc);
     const repeatBeginMeasures = new Set(barlines.beginMeasureIds);
-    const inlineWidths = new Map<string, number>();
-    const widthMinimum = new Map<string, number>();
-    const engrave = (): void => {
+    // the last measure ends the piece with the final barline, unless a repeat ends there (contextMarks draws its sign)
+    const endsPiece = (b: Built): boolean => b.measure.id === doc.measures[doc.measures.length - 1]?.id && !barlines.endMeasureIds.has(b.measure.id);
+    const inlineWidths = new Map<string, number>((seed ?? stored)?.inlineWidths);
+    const widthMinimum = new Map<string, number>((seed ?? stored)?.widthMinimum);
+    if ((seed && !known) || stored) {
+      // the spacing of a measure that changed (or is new) is found again; a context that changed gives up its inline widths
+      const changedMeasures = new Set(doc.measures.filter((m) => (stored ? stored.signatures.get(m.id) !== hashOf(signatures.get(m.id)!) : seed!.signatures.get(m.id) !== signatures.get(m.id))).map((m) => m.id));
+      for (const map of [horizontal, reaches, widthMinimum]) for (const key of [...map.keys()]) if (changedMeasures.has(key.split(':')[0])) map.delete(key);
+      const changedContexts = doc.contexts.filter((c) => changedMeasures.has(c.measureId)).map((c) => c.id);
+      for (const key of [...inlineWidths.keys()]) if (changedContexts.some((id) => key.includes(id))) inlineWidths.delete(key);
+    }
+    /** `only`: the systems a preview draws again, over the base drawing; null draws the whole score */
+    const engrave = (requested: ReadonlySet<number> | null, fresh = false): void => {
       passCount += 1;
-      host.innerHTML = '';
+      // the drawing this pass is made over, and the systems it draws again; a drawing from scratch has neither, and a long score then
+      // draws the systems near the screen once the lines are known (below)
+      const base = fresh ? null : baseDrawing;
+      let only = requested;
+      if (!base) host.innerHTML = '';
       const collisions = new CollisionLayout(STAFF_SPACE * 0.6);
       let changed = false;
       const emptyRests: { element: SVGGraphicsElement; staffId: string; measureId: string; left: number; right: number; cx: number; cy: number; ids: string[] }[] = [];
@@ -528,8 +823,15 @@ export function VexflowRenderer({
       // renderer/context created up front (resized once the total layout is known below) so we
       // can MEASURE the real clef+time-sig glyph width via VexFlow instead of guessing a constant —
       // a guessed width lets notes drift past their own measure's barline.
-      const renderer = new Renderer(host, Renderer.Backends.SVG);
+      const renderer = new Renderer(base ? document.createElement('div') : host, Renderer.Backends.SVG);
       const ctx = renderer.getContext();
+      if (base && only) {
+        // a preview draws into the drawing that is already there
+        const svgContext = ctx as SVGContext;
+        svgContext.svg = base.svg;
+        svgContext.parent = base.svg;
+        svgContext.groups = [base.svg];
+      }
       // note-start x of a probe grand staff with the given begin modifiers, measured once per kind
       const noteStartByHeader = new Map<string, number>();
       const probeNoteStartX = (spec: HeaderSpec): number => {
@@ -538,7 +840,8 @@ export function VexflowRenderer({
         if (cached !== undefined) return cached;
         const probes = [new Stave(0, 0, 1000).setContext(ctx), new Stave(0, 0, 1000).setContext(ctx)];
         probes.forEach((probe, i) => {
-          if (spec.clefs) probe.addClef(spec.clefs[i], spec.small ? 'small' : undefined);
+          const clef = spec.clefs?.[i];
+          if (clef) probe.addClef(clef, spec.small ? 'small' : undefined);
           if (spec.keys) { const clef = spec.keyClefs?.[i] ?? (i === 0 ? 'treble' : 'bass'); probe.setClef(clef); createKeySignature(spec.keys[i], clef, spec.cancelKeys?.[i]).addToStave(probe); }
           if (spec.timeSignature) probe.addTimeSignature(spec.timeSignature);
         });
@@ -551,16 +854,19 @@ export function VexflowRenderer({
         const { beats, beatValue, dots = 0 } = m.timeSignature;
         return `${beats * (2 ** (dots + 1) - 1)}/${beatValue * 2 ** dots}`;
       };
-      // what a measure's header draws: the clef, key signature and time signature at a system start;
-      // whichever of them changes on the measure's own start where it is mid-system; nothing otherwise
+      // what a measure's header draws: the clef and key signature at a system start; the time signature
+      // only on the score's first measure and where it changes; whichever of the clef and key changes on
+      // the measure's own start where it is mid-system; nothing otherwise
       // (a plain measure's own barline padding is the baseline every measure has)
       const headerSpecOf = (b: Built, isFirst: boolean): HeaderSpec => ({
-        clefs: isFirst || b.clefChanged ? b.startClefs : null,
+        clefs: isFirst || b.clefChanged.some((changed) => changed)
+          ? [isFirst || b.clefChanged[0] ? b.startClefs[0] : null, isFirst || b.clefChanged[1] ? b.startClefs[1] : null]
+          : null,
         small: !isFirst,
         keys: isFirst || b.keyChanged ? b.startKeys : null,
         keyClefs: b.startClefs,
         cancelKeys: !isFirst && b.keyChanged ? b.prevKeys : null,
-        timeSignature: isFirst || b.timeSignatureChanged ? timeSignatureOf(b.measure) : null,
+        timeSignature: b.showsTimeSignature ? timeSignatureOf(b.measure) : null,
         repeatSign: repeatBeginMeasures.has(b.measure.id),
       });
       const headerW = (b: Built, isFirst: boolean): number =>
@@ -586,6 +892,9 @@ export function VexflowRenderer({
         onsets: number[];
       }
       const built: Built[] = doc.measures.map((measure, measureIndex) => {
+        // a preview builds only the measures of the systems it draws
+        const kept = base && only && !only.has(base.systemOf.get(measure.id)!) ? base.facts.get(measure.id) : undefined;
+        if (kept) return kept;
         const totalBeats = lengthOfMeasure(measure.timeSignature);
 
         const groups = new Map<string, Group>(); // key = `${staffId}:${voiceId}`
@@ -652,7 +961,9 @@ export function VexflowRenderer({
         // lands on under the clef then in effect).
         // A note's accidental is drawn only when it differs from that state, and drawing it sets the
         // state; a repeat of the same accidental later in the measure is not drawn. Walked in onset
-        // order across every voice on the staff.
+        // order across every voice on the staff. A note a tie ends on carries its accidental through the
+        // tie only: it draws none and leaves the state as it is, so a later note of its pitch in a new
+        // measure draws the accidental again.
         const keyStates = new Map<string, AccidentalValue>();
         // at one onset the grace notes before come first, then the notes, then the grace notes after
         [
@@ -662,6 +973,7 @@ export function VexflowRenderer({
           .sort((a, c) => a.onset - c.onset || a.cell - c.cell)
           .forEach(({ staffId, n, onset }) => {
             n.accidentals = n.accidentals.map((written, k) => {
+              if (tiedEnds.has(n.noteIds[k])) return null;
               const position = `${staffId}:${n.staffSteps[k]}:${contexts.keyAt(staffId, measure.id, onset)?.id}:${contexts.clefAt(staffId, measure.id, onset)?.id}`;
               const accidental = written ?? 'n';
               const clef = contexts.clefNameAt(staffId, measure.id, onset);
@@ -796,7 +1108,7 @@ export function VexflowRenderer({
         const naturalWidth = Math.max(cum, signatureW) + MEASURE_RIGHT_PAD;
 
         const previous = doc.measures[measureIndex - 1];
-        const timeSignatureChanged = !!previous && timeSignatureOf(previous) !== timeSignatureOf(measure);
+        const showsTimeSignature = !previous || timeSignatureOf(previous) !== timeSignatureOf(measure);
         const keyNameAt = (staffId: string, atMeasure: Measure): KeyAlteration[] =>
           contexts.keyAt(staffId, atMeasure.id, 0)?.alterations ?? Array(7).fill('natural');
         const startClefs = [0, 1].map((i) => contexts.clefNameAt(staffOrder[i], measure.id, 0)) as [ClefName, ClefName];
@@ -809,11 +1121,11 @@ export function VexflowRenderer({
           segmentX,
           contextWidths: contextWidth,
           crossStaffCarrierIds,
-          timeSignatureChanged,
+          showsTimeSignature,
           startClefs,
           startKeys,
           prevKeys,
-          clefChanged: !!previous && contexts.atMeasureStart('clef', measure.id).length > 0,
+          clefChanged: [0, 1].map((i) => !!previous && contexts.atMeasureStart('clef', measure.id).some((c) => c.staffId === staffOrder[i])) as [boolean, boolean],
           keyChanged: !!previous && contexts.atMeasureStart('keySignature', measure.id).length > 0,
           graceSets,
         };
@@ -932,6 +1244,10 @@ export function VexflowRenderer({
         cursorY = bassY + STAFF_H + Math.max(below(extentOf(ex, staffOrder[1]).min), measured(staffOrder[1], 'below')) + nextTrebleUp + SYSTEM_GAP;
       });
       const totalH = cursorY + 20;
+      const signature = placedSystems.map((placed) => placed.map((p) => `${p.b.measure.id}:${p.x}:${p.w}`).join(' ')).join('\n');
+      // a preview that would move a measure along a system, or into another, draws the whole score
+      if (base && only && !sameBreaks(signature, base, only)) { engrave(null, true); return; }
+      if (!base && !only && placedSystems.length > ZONE_MIN_SYSTEMS) only = zoneFor(placedSystems.length);
       renderer.resize(totalW, totalH);
 
 
@@ -939,24 +1255,30 @@ export function VexflowRenderer({
       // is cut into runs of members that share a system (a beam can cross a barline, but not a
       // system break); a run of one keeps its own flag. A cross-staff carrier is beamed by its half
       // on the upper staff; rests are left out, the beam runs over them. Direction comes from the
-      // first member with a stem override, otherwise VexFlow's automatic one for the run.
-      const carrierHalf = new Map<string, { sn: StaveNote; system: number }>();
+      // first member with a stem override, otherwise the run's outer notes decide (MuseScore): the one
+      // farther from the middle line turns the stems away from it, down when both are as far. A run
+      // across both staffs keeps VexFlow's automatic direction.
+      const carrierHalf = new Map<string, { sn: StaveNote; system: number; staffId: string }>();
       systems.forEach((sysMeasures, si) => {
         for (const b of sysMeasures) {
           for (const d of b.drawn) {
             d.sns.forEach((sn, ni) => {
               const n = d.notes[ni];
               // `drawn` runs in staff order, so the first half seen is the upper one
-              if (n.kind === 'note' && !carrierHalf.has(n.id)) carrierHalf.set(n.id, { sn, system: si });
+              if (n.kind === 'note' && !carrierHalf.has(n.id)) carrierHalf.set(n.id, { sn, system: si, staffId: d.staffId });
             });
           }
         }
       });
       const beamsBySystem: { id: string; vf: Beam }[][] = systems.map(() => []);
+      // a beam between stems that point different ways (the chords' own directions differ): VexFlow cannot draw it, so it is
+      // drawn here, from the stems' ends
+      const kneedBySystem: { id: string; carrierIds: string[]; sns: StaveNote[]; directions: (1 | -1)[] }[][] = systems.map(() => []);
       for (const beam of doc.beams) {
         const override = beam.carrierIds.map((id) => stemOverrides[id]).find((o) => o !== undefined);
+        const ownDirections = new Set(beam.carrierIds.flatMap((id) => stemOverrides[id]?.direction ?? []));
         const members = beam.carrierIds.flatMap((id) => carrierHalf.get(id) ?? []);
-        const runs: { sn: StaveNote; system: number }[][] = [];
+        const runs: { sn: StaveNote; system: number; staffId: string }[][] = [];
         for (const member of members) {
           const run = runs[runs.length - 1];
           if (run && run[0].system === member.system) run.push(member);
@@ -965,8 +1287,31 @@ export function VexflowRenderer({
         for (const run of runs) {
           if (run.length < 2) continue;
           const sns = run.map((m) => m.sn);
+          if (ownDirections.size > 1) {
+            // each chord keeps the direction it has; one without gets that of the chord before it (the first, of the one after)
+            const runIds = beam.carrierIds.filter((id) => carrierHalf.has(id) && carrierHalf.get(id)!.system === run[0].system);
+            const directions: (1 | -1)[] = [];
+            runIds.forEach((id, index) => {
+              const mine = stemOverrides[id]?.direction;
+              const before = directions[index - 1];
+              const after = runIds.slice(index + 1).map((other) => stemOverrides[other]?.direction).find((d) => d !== undefined);
+              directions.push(mine ?? before ?? after ?? 1);
+            });
+            sns.forEach((sn, index) => sn.setStemDirection(directions[index] ?? 1));
+            // the beam object only takes the flags off the notes and the stems out of their own drawing: it is never drawn
+            new Beam(sns, false);
+            kneedBySystem[run[0].system].push({ id: beam.id, carrierIds: runIds, sns, directions });
+            continue;
+          }
+          const oneStaff = run.every((member) => member.staffId === run[0].staffId);
           if (override) sns.forEach((sn) => sn.setStemDirection(override.direction));
-          beamsBySystem[run[0].system].push({ id: beam.id, vf: new Beam(sns, !override) });
+          else if (oneStaff) {
+            // VexFlow's line 3 is the middle line
+            const lines: number[] = sns.flatMap((sn) => sn.getKeyProps().map((key) => key.line));
+            const direction = Math.max(...lines) - 3 >= 3 - Math.min(...lines) ? Stem.DOWN : Stem.UP;
+            sns.forEach((sn) => sn.setStemDirection(direction));
+          }
+          beamsBySystem[run[0].system].push({ id: beam.id, vf: new Beam(sns, !override && !oneStaff) });
         }
       }
 
@@ -980,17 +1325,28 @@ export function VexflowRenderer({
         }
       });
 
-      const tupletsBySystem: { id: string; vf: Tuplet; measureId: string; staffId: string }[][] = systems.map(() => []);
+      const tupletsBySystem: { id: string; vf: Tuplet; measureId: string; staffId: string; below: boolean }[][] = systems.map(() => []);
       for (const b of built) for (const d of b.drawn) for (const local of d.tuplets) local.vf.detach();
+      // every drawn half of a carrier, by carrier: where a tuplet finds its notes
+      const halvesOf = new Map<string, { sn: StaveNote; system: number; staffId: string; measureId: string }[]>();
+      systems.forEach((sys, si) => {
+        for (const b of sys) for (const d of b.drawn) d.sns.forEach((sn, i) => {
+          halvesOf.set(d.notes[i].id, [...(halvesOf.get(d.notes[i].id) ?? []), { sn, system: si, staffId: d.staffId, measureId: b.measure.id }]);
+        });
+      });
       for (const t of doc.tuplets) {
-        systems.forEach((sys, si) => {
+        // in the tuplet's own order of carriers
+        const halves = t.carrierIds.flatMap((id) => halvesOf.get(id) ?? []);
+        systems.forEach((_, si) => {
           for (const staffId of staffOrder) {
-            const members = sys.flatMap((b) => b.drawn.filter((d) => d.staffId === staffId).flatMap((d) =>
-              d.sns.flatMap((sn, i) => t.carrierIds.includes(d.notes[i].id) ? [{ sn, carrierId: d.notes[i].id, measureId: b.measure.id }] : [])));
-            members.sort((a, b) => t.carrierIds.indexOf(a.carrierId) - t.carrierIds.indexOf(b.carrierId));
+            const members = halves.filter((half) => half.system === si && half.staffId === staffId);
             if (!members.length) continue;
-            tupletsBySystem[si].push({ id: t.id, staffId, measureId: members[0].measureId,
-              vf: new Tuplet(members.map((m) => m.sn), { num_notes: t.numNotes, notes_occupied: t.notesOccupied, bracketed: true }) });
+            // the number stands on the side of the stems: under notes whose stems all point down
+            const stemmed = members.filter((m) => m.sn.hasStem());
+            const below = stemmed.length > 0 && stemmed.every((m) => m.sn.getStemDirection() === Stem.DOWN);
+            tupletsBySystem[si].push({ id: t.id, staffId, measureId: members[0].measureId, below,
+              // VexFlow brackets a tuplet only when one of its notes has no beam
+              vf: new Tuplet(members.map((m) => m.sn), { num_notes: t.numNotes, notes_occupied: t.notesOccupied, location: below ? Tuplet.LOCATION_BOTTOM : Tuplet.LOCATION_TOP }) });
           }
         });
       }
@@ -1045,37 +1401,53 @@ export function VexflowRenderer({
       const tupletShapes: TupletShape[] = [];
       const timeSignatureShapes: TimeSignatureShape[] = [];
       const contextShapes: ContextShape[] = [];
+      /** the drawn mark of each context shape, in the same order */
+      const contextNodes: Element[] = [];
       const slurShapes: SlurShape[] = [];
       const systemOf = new Map<string, number>();
+      // the system each note stands in and its carrier, whether or not this engraving draws that system
+      const systemOfNote = new Map<string, number>();
+      const carrierOfNote = new Map<string, string>();
+      placedSystems.forEach((placed, si) => {
+        for (const { b } of placed) {
+          systemOf.set(b.measure.id, si);
+          for (const d of b.drawn) {
+            if (d.isEmpty) continue;
+            for (const n of d.notes) for (const noteId of n.noteIds) { systemOfNote.set(noteId, si); carrierOfNote.set(noteId, n.id); }
+          }
+        }
+      });
       // the voice a carrier belongs to, for the colour of the beam / tuplet drawn over it
       const voiceOfCarrier = new Map<string, number>();
       for (const b of built) for (const d of b.drawn) for (const n of d.notes) voiceOfCarrier.set(n.id, d.voiceIndex);
-      const objectVoiceColor = (carrierId: string | undefined): string | undefined => {
-        const index = carrierId ? (voiceOfCarrier.get(carrierId) ?? -1) : -1;
-        return index >= 0 ? resolveVoiceColor(doc.voices[index].id, index, voiceColors) : undefined;
+      const tagVoice = (el: SVGElement | undefined, index: number | undefined) => {
+        if (!el || index === undefined) return;
+        const voice = doc.voices[index];
+        if (!voice) return;
+        el.style.setProperty('--voice-color', resolveVoiceColor(voice.id, voice.index, voiceColors));
       };
       /** marks a drawn group as a pickable object: its id and its voice's colour */
-      const tagObject = (el: Element | undefined, id: string, carrierId?: string) => {
+      const tagObject = (el: SVGElement | undefined, id: string, carrierId?: string) => {
         if (!el) return;
         el.setAttribute('data-object-id', id);
-        const color = objectVoiceColor(carrierId);
-        (el as SVGElement).style.setProperty('--voice-color', color ?? 'var(--color-accent)');
+        const index = carrierId ? voiceOfCarrier.get(carrierId) : undefined;
+        if (index !== undefined && index >= 0) {
+          el.setAttribute('data-voice', String(index));
+          tagVoice(el, index);
+        } else el.style.setProperty('--voice-color', 'var(--color-accent)');
       };
       // one box per measure, from the DRAWN staves (top line to bottom line, plus the cursor's
       // overhang) — the area the measure-selection wash covers (Overlay.tsx)
       const measures: MeasureBox[] = [];
+      // the system each published entry belongs to: the layout is published system by system
+      const systemOfEntry = new Map<object, number>();
+      const systemLists = (): object[][] => [timeMap, noteBoxes, staffZones, stemHandles, beamShapes, tupletShapes, timeSignatureShapes, contextShapes, graceSlots, measures];
       let cumBeat = 0;
       // VexFlow's silent per-note stave-padding offset (see `padding` below) is a fixed quirk of
-      // its own `.setStave()`/draw pipeline, not a value specific to any one measure — so a
-      // measure's own real note is the BEST calibration source when it has one, but any other
-      // measure's real note in this same render pass is just as valid a source, and far better
-      // than assuming a false zero. Carried across the whole draw loop (last real measurement
-      // wins) so a measure with NO notes of its own (first insert into a fully empty measure) still
-      // gets the correct offset instead of the pure, uncorrected formula. Seeded from the
-      // always-available probe measurement (not 0) so this is correct even when NOTHING in the
-      // document has a real note yet, or the very first measure(s) in draw order are the empty
-      // ones — the systemic fix, not just "usually right because something upstream had content".
-      let documentPadding = getNotePaddingPx();
+      // its own `.setStave()`/draw pipeline, the same for every measure: a measure with NO notes of
+      // its own (first insert into a fully empty measure) takes it from the probe measurement, never
+      // from a neighbour, so a system is laid out the same whatever was drawn before it.
+      const documentPadding = getNotePaddingPx();
       // 1-based measure number, counted across the whole piece (document order = draw order).
       let measureNumber = 0;
 
@@ -1083,7 +1455,21 @@ export function VexflowRenderer({
       const drawnNoteAt = new Map<string, { sn: StaveNote; index: number; system: number }>();
       const sharedStems = new Map<string, { line: SVGPathElement; topNoteY: number; bottomNoteY: number }>();
 
+      // everything a system draws stands in its own group: the marks and ties drawn after the systems join theirs
+      const systemGroups: SVGGElement[] = [];
+      // what a preview draws for a system it does not change is left in a group that is removed again
+      const scratch = only ? (base?.svg ?? host.querySelector('svg')!).appendChild(document.createElementNS('http://www.w3.org/2000/svg', 'g')) : null;
       placedSystems.forEach((placed, si) => {
+        if (scratch && only && !only.has(si)) {
+          systemGroups[si] = scratch;
+          // the counts of measures and beats run on over a system that is not drawn again
+          for (const { b } of placed) { measureNumber += 1; cumBeat += lengthOfMeasure(b.measure.timeSignature); }
+          return;
+        }
+        const systemGroup = ctx.openGroup('system') as SVGGElement;
+        systemGroup.setAttribute('data-system', String(si));
+        systemGroups[si] = systemGroup;
+        const listLengths = systemLists().map((list) => list.length);
         const sysStaffs: { treble: Stave; bass: Stave }[] = [];
 
         placed.forEach(({ b, x, w, header, isFirst, trebleY, bassY, stretch }, mi) => {
@@ -1093,9 +1479,11 @@ export function VexflowRenderer({
           const bass = new Stave(x, bassY, w).setContext(ctx);
           const head = headerSpecOf(b, isFirst);
           [treble, bass].forEach((staff, i) => {
-            if (head.clefs) staff.addClef(head.clefs[i], head.small ? 'small' : undefined);
+            const clef = head.clefs?.[i];
+            if (clef) staff.addClef(clef, head.small ? 'small' : undefined);
             if (head.keys) { staff.setClef(b.startClefs[i]); createKeySignature(head.keys[i], b.startClefs[i], head.cancelKeys?.[i]).addToStave(staff); }
             if (head.timeSignature) staff.addTimeSignature(head.timeSignature);
+            if (endsPiece(b)) staff.setEndBarType(BarlineType.END);
           });
           // align both staffs' begin modifiers (treble & bass clefs differ in width) so notes
           // start at the same x → same-beat notes across the grand staff line up vertically
@@ -1118,7 +1506,7 @@ export function VexflowRenderer({
             area.setAttribute('x', String(x)); area.setAttribute('y', String(staff.getYForLine(0)));
             area.setAttribute('width', String(w)); area.setAttribute('height', String(STAFF_H));
             area.setAttribute('fill', 'none'); area.setAttribute('stroke', 'none');
-            host.querySelector('svg')!.appendChild(area);
+            systemGroup.appendChild(area);
             collisions.add(area, { measureId: b.measure.id, staffId: staffOrder[i], kind: 'staff' });
           });
           for (const staff of [treble, bass]) {
@@ -1153,10 +1541,10 @@ export function VexflowRenderer({
                 }
                 tagObject(drawn, context.id);
                 contextShapes.push({ id: context.id, html: drawn.innerHTML });
+                contextNodes.push(drawn);
               }
             }
           }
-          systemOf.set(b.measure.id, si);
           // measure number above each system's FIRST measure (engraving convention). Counted
           // from 1 across the piece, on every system including the first. Sits just above the top
           // staff line, at the measure's left edge.
@@ -1216,10 +1604,21 @@ export function VexflowRenderer({
               byStaffVoices.set(staff, arr);
             });
             byStaffVoices.forEach((voices) => formatter.joinVoices(voices));
+            // a note that VexFlow turns to clear another voice at its beat (`StaveNote.format`) loses its beam with the
+            // turn and would draw a stem and a flag of its own beside the beam's: it keeps its beam and the beam's direction
+            const beamed = realVoices.flatMap(({ voice }) => voice.getTickables()).flatMap((note) => {
+              const beam = note instanceof StaveNote ? note.getBeam() : undefined;
+              return note instanceof StaveNote && beam ? [{ note, beam, direction: note.getStemDirection() }] : [];
+            });
             formatter.format(
               realVoices.map((v) => v.voice),
               formatW,
             );
+            for (const { note, beam, direction } of beamed) {
+              if (note.getBeam() === beam) continue;
+              note.setStemDirection(direction);
+              note.setBeam(beam);
+            }
             // override the formatter's own x with the Gourlay-style position: cumulative width
             // over the measure's merged cross-voice onset timeline (built in step 1), scaled by
             // this system's justification factor — so a note's gap depends on the busiest voice
@@ -1250,6 +1649,13 @@ export function VexflowRenderer({
             });
           }
 
+          // every note of the measure stands on its staff before any voice draws: a mark drawn with one note reads the
+          // others at its beat (an arpeggio's stroke takes the y of every note there), and VexFlow gives a note its staff
+          // only when the note's own voice draws
+          for (const d of b.drawn) {
+            const staff = staffInfo[d.staffId]?.staff;
+            if (staff && !d.isEmpty) d.sns.forEach((sn) => sn.setStave(staff));
+          }
           // accumulates each half of a cross-staff chord (`b.crossStaffCarrierIds`) as it's drawn,
           // so a single connecting stem can be drawn ONCE both halves' real pixel positions are
           // known — see the merge pass right after this loop.
@@ -1359,10 +1765,7 @@ export function VexflowRenderer({
                 unit.append(stemEl, ...(flagEl ? [flagEl] : []));
               }
               if (d.notes[ni].kind === 'note' && d.notes[ni].duration === 'w') shrinkWholeNotehead(g);
-              const voiceId = doc.voices[d.voiceIndex]?.id;
-              if (voiceId) {
-                g?.style.setProperty('--voice-color', resolveVoiceColor(voiceId, d.voiceIndex, voiceColors));
-              }
+              tagVoice(g, d.voiceIndex);
               // hitbox = a tight box around the NOTEHEAD(S) only (never the stem). One box per
               // INDIVIDUAL note (a chord's several keys, tagged `data-individual-note-id`, each
               // click-selectable on its own) rather than one box spanning the whole chord — a real
@@ -1507,8 +1910,7 @@ export function VexflowRenderer({
             const dx = set.side === 'before' ? host.left - GRACE_PAD - (ink.x + ink.width) : host.right + GRACE_PAD - ink.x;
             group.setAttribute('transform', `translate(${dx} 0)`);
             group.setAttribute('data-voice', String(set.voiceIndex));
-            const voiceId = doc.voices[set.voiceIndex]?.id;
-            if (voiceId) group.style.setProperty('--voice-color', resolveVoiceColor(voiceId, set.voiceIndex, voiceColors));
+            tagVoice(group, set.voiceIndex);
             // each grace carrier is selectable like any carrier: its own id on the note, and one box per note
             set.vf.forEach((grace, i) => {
               const el = grace.getSVGElement();
@@ -1700,13 +2102,11 @@ export function VexflowRenderer({
           // lands here) has nothing of its own to calibrate from; falling back to a bare 0 assumed
           // VexFlow's silent stave-padding offset away entirely, landing the ghost measurably too
           // far left. Fall back to `documentPadding` instead — the offset is a fixed VexFlow quirk,
-          // not measure-specific data (see the comment above), so any other measure's real note in
-          // this same render is a valid source.
+          // not measure-specific data (see the comment above).
           const padding =
             sampleBeat !== undefined
               ? sampleX - (noteStartX + (b.segmentX.get(sampleBeat) ?? 0) * stretch)
               : documentPadding;
-          if (sampleBeat !== undefined) documentPadding = padding;
           // the LAST breakpoint (beat = measure end) is pinned to the true right edge (`x + w`),
           // not `noteStartX + cum*stretch` — `segmentX`'s cumulative value deliberately excludes
           // MEASURE_RIGHT_PAD (real notes must stop short of the barline), but that leaves the pad
@@ -1756,6 +2156,58 @@ export function VexflowRenderer({
         });
 
         // beams, then tuplet brackets — a bracket sits beyond the stems its notes' beam lengthened
+        kneedBySystem[si].forEach(({ id, carrierIds, sns, directions }) => {
+          // stems of the notes, each from its chord to the bar; the bar slants from the end of the first stem to the end of the last
+          const svgNs = 'http://www.w3.org/2000/svg';
+          const noteYs = sns.map((sn) => sn.getYs());
+          const xs = sns.map((sn) => sn.getStemX());
+          const lastIndex = sns.length - 1;
+          const tipAt = (index: number) => directions[index] === 1 ? Math.min(...noteYs[index]) - VEXFLOW_STEM_HEIGHT : Math.max(...noteYs[index]) + VEXFLOW_STEM_HEIGHT;
+          const y0 = tipAt(0), y1 = tipAt(lastIndex);
+          const lineY = (x: number) => xs[lastIndex] > xs[0] ? y0 + (y1 - y0) * (x - xs[0]) / (xs[lastIndex] - xs[0]) : y0;
+          const levels = Math.max(...sns.map((sn) => sn.getGlyphProps().beam_count));
+          const group = ctx.openGroup('beam', id) as SVGGElement;
+          const bars: string[] = [];
+          // the bars hang on the side of the first chord's notes; a further level lies a bar and a half beyond the one before
+          const toward = directions[0] === 1 ? 1 : -1;
+          for (let level = 0; level < levels; level++) {
+            const shift = level * toward * KNEED_BEAM_WIDTH * 1.5;
+            const thickness = toward * KNEED_BEAM_WIDTH;
+            const d = `M${xs[0]} ${y0 + shift}L${xs[lastIndex]} ${y1 + shift}L${xs[lastIndex]} ${y1 + shift + thickness}L${xs[0]} ${y0 + shift + thickness}Z`;
+            const bar = document.createElementNS(svgNs, 'path');
+            bar.setAttribute('d', d);
+            bar.setAttribute('fill', inkColor);
+            group.appendChild(bar);
+            bars.push(d);
+          }
+          ctx.closeGroup();
+          sns.forEach((sn, index) => {
+            const ys = noteYs[index];
+            const base = directions[index] === 1 ? Math.max(...ys) : Math.min(...ys);
+            const stem = document.createElementNS(svgNs, 'g');
+            stem.setAttribute('class', 'vf-stem');
+            stem.setAttribute('data-beam-stem', id);
+            const carrierId = sn.getSVGElement()?.getAttribute('data-note-id') ?? carrierIds[index];
+            if (carrierId) {
+              stem.setAttribute('data-stem-carrier', carrierId);
+              tagVoice(stem, voiceOfCarrier.get(carrierId));
+            }
+            const line = document.createElementNS(svgNs, 'path');
+            line.setAttribute('d', `M${xs[index]} ${base}L${xs[index]} ${lineY(xs[index])}`);
+            line.setAttribute('stroke', inkColor);
+            line.setAttribute('stroke-width', '1.5');
+            line.setAttribute('fill', 'none');
+            stem.appendChild(line);
+            group.parentNode?.appendChild(stem);
+            const handle = stemHandles.find((h) => h.noteId === carrierId);
+            if (handle) { handle.baseY = base; handle.tipY = lineY(xs[index]); handle.draggable = false; }
+          });
+          const firstCarrier = doc.beams.find((bm) => bm.id === id)?.carrierIds[0];
+          tagObject(group, id, firstCarrier);
+          const member = collisions.items.find((it) => it.element === sns[0].getSVGElement());
+          if (member) collisions.add(group, { measureId: member.measureId, staffId: member.staffId, kind: 'bridge' });
+          beamShapes.push({ id, paths: bars });
+        });
         beamsBySystem[si].forEach(({ id, vf }) => {
           vf.postFormat();
           const beamNotes = vf.getNotes();
@@ -1779,8 +2231,14 @@ export function VexflowRenderer({
           }
           vf.setContext(ctx).draw();
           for (const note of beamNotes) {
-            note.getStem()?.getSVGElement()?.setAttribute('data-beam-stem', id);
             const carrierId = note.getSVGElement()?.getAttribute('data-note-id');
+            const beamStem = note.getStem()?.getSVGElement();
+            beamStem?.setAttribute('data-beam-stem', id);
+            // a beamed stem is not inside its note's group, so it carries its note's id to be picked and hovered with it
+            if (carrierId) {
+              beamStem?.setAttribute('data-stem-carrier', carrierId);
+              tagVoice(beamStem, voiceOfCarrier.get(carrierId));
+            }
             const handle = stemHandles.find(h => h.noteId === carrierId);
             if (handle) {
               const extents = note.getStemExtents();
@@ -1797,7 +2255,7 @@ export function VexflowRenderer({
             }
           }
           const beamY = vf.getBeamYToDraw();
-          const handles = { x0: firstX, x1: lastX, y0: beamY, y1: beamY + vf.slope * (lastX - firstX), staffSpace, localX0: firstX, leftLength, rightLength, direction: beamDirection };
+          const handles = { x0: firstX, x1: lastX, y0: beamY, y1: beamY + vf.slope * (lastX - firstX), staffSpace, localX0: firstX, leftLength, rightLength, direction: beamDirection, leftCarrierId: beamNotes[0].getSVGElement()?.getAttribute('data-note-id') ?? '', rightCarrierId: beamNotes[beamNotes.length - 1].getSVGElement()?.getAttribute('data-note-id') ?? '' };
           const group = vf.getSVGElement();
           const firstCarrier = doc.beams.find((bm) => bm.id === id)?.carrierIds[0];
           tagObject(group, id, firstCarrier);
@@ -1810,40 +2268,49 @@ export function VexflowRenderer({
           if (paths.length) beamShapes.push({ id, paths, handles });
         });
         // The model lists parents first; place children first so collision clearance lifts parents above them.
-        [...tupletsBySystem[si]].reverse().forEach(({ id, vf, staffId, measureId }) => {
+        [...tupletsBySystem[si]].reverse().forEach(({ id, vf, staffId, measureId, below }) => {
           vf.setContext(ctx);
           const group = ctx.openGroup('tuplet', id) as SVGGElement;
           vf.draw();
           ctx.closeGroup();
           tagObject(group, id, doc.tuplets.find((t) => t.id === id)?.carrierIds[0]);
-          collisions.placeOutside(group, { measureId, staffId, kind: 'attached' }, -1);
+          // timed: tuplets one after another share a line; only one over another (a nested tuplet) lifts it
+          collisions.placeOutside(group, { measureId, staffId, kind: 'attached', timed: true }, below ? 1 : -1);
           tupletShapes.push({ id, html: group.innerHTML });
         });
 
         if (sysStaffs.length) {
           const first = sysStaffs[0];
-          const last = sysStaffs[sysStaffs.length - 1];
           new StaveConnector(first.treble, first.bass).setType('brace').setContext(ctx).draw();
           new StaveConnector(first.treble, first.bass).setType('singleLeft').setContext(ctx).draw();
           // every barline of the system joins the two staves across the gap between them (the signs of a repeat are drawn by contextMarks)
-          for (const entry of sysStaffs) new StaveConnector(entry.treble, entry.bass).setType('singleRight').setContext(ctx).draw();
+          sysStaffs.forEach((entry, mi) => {
+            const type = endsPiece(placed[mi].b) ? 'boldDoubleRight' : 'singleRight';
+            new StaveConnector(entry.treble, entry.bass).setType(type).setContext(ctx).draw();
+          });
         }
+        ctx.closeGroup();
+        systemLists().forEach((list, k) => { for (let i = listLengths[k]; i < list.length; i++) systemOfEntry.set(list[i], si); });
       });
 
       // ties, once every note is drawn: one tie within a system; across a system break, a half tie
       // out of the first note to its staff's end and a half tie into the second from its staff's start
       for (const tie of doc.ties) {
-        const start = drawnNoteAt.get(tie.startNoteId);
-        const end = drawnNoteAt.get(tie.endNoteId);
-        if (!start || !end) continue;
+        const startSystem = systemOfNote.get(tie.startNoteId);
+        const endSystem = systemOfNote.get(tie.endNoteId);
+        if (startSystem === undefined || endSystem === undefined) continue;
+        // a half is drawn with its own system: a preview may draw only one of them
+        const start = drawnNoteAt.get(tie.startNoteId) ?? null;
+        const end = drawnNoteAt.get(tie.endNoteId) ?? null;
         const halves =
-          start.system === end.system
+          startSystem === endSystem
             ? [{ first: start, last: end }]
             : [
                 { first: start, last: null },
                 { first: null, last: end },
               ];
         for (const { first, last } of halves) {
+          if (!first && !last) continue;
           const tieGroup = ctx.openGroup('tie', tie.id) as SVGElement;
           new StaveTie({
             first_note: first?.sn ?? null,
@@ -1854,7 +2321,8 @@ export function VexflowRenderer({
             .setContext(ctx)
             .draw();
           ctx.closeGroup();
-          tagObject(tieGroup, tie.id, noteBoxes.find(box => box.id === tie.startNoteId)?.carrierId);
+          systemGroups[(first ?? last)!.system].appendChild(tieGroup);
+          tagObject(tieGroup, tie.id, carrierOfNote.get(tie.startNoteId));
           const noteId = first ? tie.startNoteId : tie.endNoteId;
           const box = noteBoxes.find((it) => it.id === noteId);
           const member = collisions.items.find((it) => box && it.staffId === box.staffId && it.element.getAttribute('data-note-id') === box.carrierId);
@@ -1862,6 +2330,7 @@ export function VexflowRenderer({
           if (member) collisions.add(tieGroup, { measureId: member.measureId, staffId: member.staffId,
             kind: first && last && box && other && box.staffId !== other.staffId ? 'bridge' : 'attached' });
           tupletShapes.push({ id: tie.id, html: tieGroup.innerHTML });
+          systemOfEntry.set(tupletShapes[tupletShapes.length - 1], (first ?? last)!.system);
         }
       }
 
@@ -1893,6 +2362,7 @@ export function VexflowRenderer({
         line.setAttribute('stroke-linecap', 'round');
         glissGroup.appendChild(line);
         ctx.closeGroup();
+        systemGroups[start.system].appendChild(glissGroup);
         tagObject(glissGroup, gliss.id, noteBoxes.find(box => box.id === gliss.startNoteId)?.carrierId);
         const box = noteBoxes.find((it) => it.id === gliss.startNoteId);
         const member = collisions.items.find((it) => box && it.staffId === box.staffId && it.element.getAttribute('data-note-id') === box.carrierId);
@@ -1900,6 +2370,7 @@ export function VexflowRenderer({
         if (member) collisions.add(glissGroup, { measureId: member.measureId, staffId: member.staffId,
           kind: box && other && box.staffId !== other.staffId ? 'bridge' : 'attached' });
         tupletShapes.push({ id: gliss.id, html: glissGroup.innerHTML });
+        systemOfEntry.set(tupletShapes[tupletShapes.length - 1], start.system);
       }
 
       // the contexts the stave does not draw itself: dynamics, hairpins, slurs, octave lines, tempos
@@ -1908,7 +2379,7 @@ export function VexflowRenderer({
       const hostSvg = host.querySelector('svg');
       if (hostSvg) {
         const marks = drawContextMarks({
-            svg: hostSvg,
+            systemGroups,
             ctx,
             doc,
             index: contexts,
@@ -1921,16 +2392,29 @@ export function VexflowRenderer({
             spanPreview,
             collisions,
             inlineWidths,
+            systems: only ?? undefined,
           });
-        contextShapes.push(...marks.shapes);
-        slurShapes.push(...marks.slurShapes);
+        marks.shapes.forEach((shape, i) => {
+          const system = marks.nodes[i].closest('[data-system]')?.getAttribute('data-system');
+          if (system === undefined || system === null) return;
+          contextShapes.push(shape);
+          contextNodes.push(marks.nodes[i]);
+          systemOfEntry.set(shape, Number(system));
+        });
+        for (const slur of marks.slurShapes) {
+          const system = systemOf.get(doc.contexts.find((c) => c.id === slur.id)!.measureId)!;
+          if (only && !only.has(system)) continue;
+          slurShapes.push(slur);
+          systemOfEntry.set(slur, system);
+        }
       }
+      scratch?.remove();
 
       for (const rest of emptyRests) {
         const cx = collisions.restX(rest.left, rest.right, rest.cy - DASH_THICK / 2, DASH_THICK, DASH_W, rest.staffId, rest.measureId);
         if (cx === null) {
           const b = built.find((item) => item.measure.id === rest.measureId)!;
-          changed = growMinimum(widthMinimum, rest.measureId, b.naturalWidth + DASH_W + 2 * STAFF_SPACE) || changed;
+          changed = widen(widthMinimum, rest.measureId, b.naturalWidth + DASH_W + 2 * STAFF_SPACE) || changed;
         } else {
           rest.element.setAttribute('transform', `translate(${cx - rest.cx} 0)`);
           for (const box of noteBoxes) if (rest.ids.includes(box.carrierId)) box.x += cx - rest.cx;
@@ -1947,7 +2431,7 @@ export function VexflowRenderer({
               it.box.y < note.box.y + note.box.height && it.box.y + it.box.height > note.box.y);
             // what a first note carries to its left (an accidental, an arpeggio line) must also clear the barline
             const deficiency = Math.max(0, placed.x + collisions.gap - note.box.x, ...headers.map((it) => it.box.x + it.box.width + collisions.gap - note.box.x));
-            if (deficiency > 0.25) changed = growMinimum(horizontal, `${b.measure.id}:0`, (b.segmentX.get(0) ?? 0) + deficiency / placed.stretch) || changed;
+            if (deficiency > 0.25) changed = widen(horizontal, `${b.measure.id}:0`, (b.segmentX.get(0) ?? 0) + deficiency / placed.stretch) || changed;
           }
           for (const a of rhythmic) for (const z of rhythmic) {
             if (a.beat! >= z.beat! || a.box.y >= z.box.y + z.box.height || z.box.y >= a.box.y + a.box.height) continue;
@@ -1956,43 +2440,24 @@ export function VexflowRenderer({
             const end = onsets.indexOf(z.beat!);
             const previous = onsets[end - 1];
             const gap = (b.segmentX.get(z.beat!)! - b.segmentX.get(previous)!) + deficiency / placed.stretch;
-            changed = growMinimum(horizontal, `${b.measure.id}:${z.beat}`, gap) || changed;
+            changed = widen(horizontal, `${b.measure.id}:${z.beat}`, gap) || changed;
           }
         }
       }
       for (const item of collisions.items) {
         if (item.kind === 'staff') continue;
         const context = doc.contexts.find((c) => c.id === (item.element.getAttribute('data-layout-context') ?? item.element.getAttribute('data-object-id')));
-        if (item.kind === 'context' && context && 'endMeasureId' in context && context.endPosition !== null) {
-          const textBounds = [...item.element.querySelectorAll<SVGGraphicsElement>('text')].map(inkBox);
-          const pieceRight = Number(item.element.getAttribute('data-piece-right'));
-          const deficiency = Math.max(0, ...textBounds.map((box) => box.x + box.width + STAFF_SPACE - pieceRight));
-          if (deficiency > 0.25 && (context.endMeasureId !== context.measureId || context.endPosition.numerator / context.endPosition.denominator > context.position.numerator / context.position.denominator)) {
-            const system = placedSystems.find((items) => items.some((p) => p.b.measure.id === item.measureId))!;
-            // the piece's end stands in this system, unless the span ends at the start of the next one (it is then drawn to the end of this system)
-            const endsHere = item.element.hasAttribute('data-context-end-x') ? system.find((p) => p.b.measure.id === context.endMeasureId) : undefined;
-            const last = endsHere ?? system[system.length - 1];
-            const beat = endsHere
-              ? context.endPosition.numerator / context.endPosition.denominator * 4 : lengthOfMeasure(last.b.measure.timeSignature);
-            const beats = [...last.b.segmentX.keys()].sort((a, z) => a - z);
-            const previous = beats[beats.indexOf(beat) - 1];
-            if (previous !== undefined) {
-              const gap = last.b.segmentX.get(beat)! - last.b.segmentX.get(previous)!;
-              changed = growMinimum(horizontal, `${last.b.measure.id}:${beat}`, gap + deficiency / last.stretch) || changed;
-            }
-          }
-        }
         if (item.kind === 'context' && context && !('endMeasureId' in context)) {
           const placed = placedSystems.flat().find((p) => p.b.measure.id === item.measureId)!;
           const b = placed.b;
           const left = Math.max(0, placed.x + STAFF_SPACE - item.box.x);
           const right = Math.max(0, item.box.x + item.box.width + STAFF_SPACE - placed.x - placed.w);
-          if (left > 0.25) changed = growMinimum(horizontal, `${item.measureId}:0`, (b.segmentX.get(0) ?? 0) + left / placed.stretch) || changed;
+          if (left > 0.25) changed = widen(horizontal, `${item.measureId}:0`, (b.segmentX.get(0) ?? 0) + left / placed.stretch) || changed;
           if (right > 0.25 && context.position.numerator / context.position.denominator * 4 < lengthOfMeasure(b.measure.timeSignature)) {
             const end = lengthOfMeasure(b.measure.timeSignature);
             const beats = [...b.segmentX.keys()].sort((a, z) => a - z);
             const gap = b.segmentX.get(end)! - b.segmentX.get(beats[beats.length - 2])!;
-            changed = growMinimum(horizontal, `${item.measureId}:${end}`, gap + right / placed.stretch) || changed;
+            changed = widen(horizontal, `${item.measureId}:${end}`, gap + right / placed.stretch) || changed;
           }
         }
         const zone = staffZones.find((z) => z.measureId === item.measureId && z.staffId === item.staffId);
@@ -2007,13 +2472,17 @@ export function VexflowRenderer({
         item.element.setAttribute('data-ink-y', String(item.box.y));
         item.element.setAttribute('data-ink-width', String(item.box.width));
         item.element.setAttribute('data-ink-height', String(item.box.height));
-        if (item.kind === 'inline') changed = growMinimum(inlineWidths, item.element.getAttribute('data-object-id')!, item.box.width) || changed;
+        if (item.kind === 'inline') changed = widen(inlineWidths, item.element.getAttribute('data-object-id')!, item.box.width) || changed;
       }
       // the layout settles in a few passes; a score it cannot settle is drawn as it is rather than stalling the page
-      if (changed && passCount < MAX_LAYOUT_PASSES) { engrave(); return; }
+      if (changed && passCount < MAX_LAYOUT_PASSES) {
+        if (base && only) for (const si of only) systemGroups[si].remove();
+        engrave(requested, fresh);
+        return;
+      }
       // the marks drawn with a chord, as click targets: each mark's ink, and the augmentation dots (bare paths of the note's group)
       const modifierBoxes: ModifierBox[] = [];
-      hostSvg!.querySelectorAll<SVGGraphicsElement>('.vf-stavenote').forEach((group) => {
+      systemGroups.forEach((systemGroup, si) => systemGroup !== scratch && systemGroup.querySelectorAll<SVGGraphicsElement>('.vf-stavenote').forEach((group) => {
         const carrierId = group.getAttribute('data-note-id');
         if (!carrierId) return;
         const marks = [
@@ -2024,76 +2493,298 @@ export function VexflowRenderer({
         for (const el of marks) {
           const box = inkBox(el);
           modifierBoxes.push({ carrierId, noteId: el.getAttribute('data-modifier-note'), x: box.x, y: box.y, w: box.width, h: box.height });
+          systemOfEntry.set(modifierBoxes[modifierBoxes.length - 1], si);
         }
-      });
-      const bounds = (hostSvg as SVGGraphicsElement).getBBox();
-      const shiftX = Math.max(0, -bounds.x + collisions.gap);
-      const shiftY = Math.max(0, -bounds.y + collisions.gap);
-      if (shiftX || shiftY) {
-        const root = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-        root.setAttribute('transform', `translate(${shiftX} ${shiftY})`);
-        for (const mark of hostSvg!.querySelectorAll('[data-object-id]')) {
-          for (const edge of ['start', 'end']) for (const [axis, shift] of [['x', shiftX], ['y', shiftY]] as const) {
+      }));
+      const lists: SystemLayout = { timeMap, noteBoxes, modifierBoxes, staffZones, stemHandles, beamShapes, tupletShapes, timeSignatureShapes, contextShapes, graceSlots, slurShapes, measures };
+      /** the anchors a mark's edges hand to the overlay (`data-context-*`) move with it; a mark without them takes its ink's centre */
+      const shiftMarks = (root: ParentNode, dx: number, dy: number) => {
+        for (const mark of root.querySelectorAll('[data-object-id]')) {
+          for (const edge of ['start', 'end']) for (const [axis, shift] of [['x', dx], ['y', dy]] as const) {
             const name = `data-context-${edge}-${axis}`;
             const box = inkBox(mark as SVGGraphicsElement);
             const coordinate = axis === 'x' ? box.x + box.width / 2 : box.y + box.height / 2;
             mark.setAttribute(name, String(Number(mark.getAttribute(name) ?? coordinate) + shift));
           }
         }
-        root.append(...hostSvg!.childNodes);
-        hostSvg!.appendChild(root);
-        for (const box of noteBoxes) { box.x += shiftX; box.y += shiftY; }
-        for (const box of modifierBoxes) { box.x += shiftX; box.y += shiftY; }
-        for (const slot of graceSlots) slot.x += shiftX;
-        for (const box of measures) { box.x += shiftX; box.y += shiftY; }
-        for (const zone of staffZones) { zone.x0 += shiftX; zone.x1 += shiftX; zone.left += shiftX; zone.bottomLineY += shiftY; }
-        const segments = new Set(staffZones.flatMap((z) => [...z.segments, ...(z.insertionSegments ?? [])]));
-        for (const segment of segments) segment.x += shiftX;
-        for (const entry of timeMap) { entry.x += shiftX; entry.y0 += shiftY; entry.y1 += shiftY; }
-        for (const stem of stemHandles) {
-          stem.x += shiftX; stem.baseY += shiftY; stem.tipY += shiftY;
-          if (stem.flag) { stem.flag.dx += shiftX; stem.flag.dy += shiftY; }
-          if (stem.topNoteY !== undefined) stem.topNoteY += shiftY;
-          if (stem.bottomNoteY !== undefined) stem.bottomNoteY += shiftY;
-          if (stem.hitY1 !== undefined) stem.hitY1 += shiftY;
-          if (stem.hitY2 !== undefined) stem.hitY2 += shiftY;
+      };
+      let shiftX: number;
+      let shiftY: number;
+      let finalW: number;
+      let finalH: number;
+      if (base && only) {
+        // a system drawn again keeps the full engraving's shift of the origin; one that needs more is drawn with the whole score
+        const redrawn = [...only].map((si) => systemGroups[si]);
+        for (const group of redrawn) {
+          const box = group.getBBox();
+          if (Math.max(0, -box.x + collisions.gap) > base.shiftX || Math.max(0, -box.y + collisions.gap) > base.shiftY) {
+            for (const drawnGroup of redrawn) drawnGroup.remove();
+            engrave(null, true);
+            return;
+          }
         }
-        const wrap = (html: string) => `<g transform="translate(${shiftX} ${shiftY})">${html}</g>`;
-        for (const shape of [...contextShapes, ...timeSignatureShapes, ...tupletShapes]) shape.html = wrap(shape.html);
-        for (const slur of slurShapes) for (const point of [...Object.values(slur.base), ...Object.values(slur.frame ?? {})]) { point.x += shiftX; point.y += shiftY; }
-        for (const beam of beamShapes) {
-          if (beam.handles) { beam.handles.x0 += shiftX; beam.handles.x1 += shiftX; beam.handles.y0 += shiftY; beam.handles.y1 += shiftY; }
-          // Beam hit geometry stores paths, so its coordinates need the same score-origin shift.
-          beam.paths = beam.paths.map((path) => path.replace(/([ML])([\d.e+-]+)[ ,]+([\d.e+-]+)/g,
-            (_, op: string, x: string, y: string) => `${op}${Number(x) + shiftX} ${Number(y) + shiftY}`));
+        shiftX = base.shiftX;
+        shiftY = base.shiftY;
+        if (shiftX || shiftY) for (const group of redrawn) shiftMarks(group, shiftX, shiftY);
+        finalW = base.width;
+        finalH = base.height + totalH - base.totalH;
+      } else {
+        const bounds = (hostSvg as SVGGraphicsElement).getBBox();
+        shiftX = Math.max(0, -bounds.x + collisions.gap);
+        shiftY = Math.max(0, -bounds.y + collisions.gap);
+        if (shiftX || shiftY) {
+          const root = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+          root.setAttribute('transform', `translate(${shiftX} ${shiftY})`);
+          shiftMarks(hostSvg!, shiftX, shiftY);
+          root.append(...hostSvg!.childNodes);
+          hostSvg!.appendChild(root);
         }
+        finalW = Math.max(totalW, bounds.x + bounds.width + shiftX + MARGIN_L);
+        finalH = Math.max(totalH, bounds.y + bounds.height + shiftY + MARGIN_T);
       }
-      const finalW = Math.max(totalW, bounds.x + bounds.width + shiftX + MARGIN_L);
-      const finalH = Math.max(totalH, bounds.y + bounds.height + shiftY + MARGIN_T);
+      if (shiftX || shiftY) shiftLayout(lists, shiftX, shiftY);
       renderer.resize(finalW, finalH);
       hostSvg!.setAttribute('data-layout-passes', String(passCount));
+      const nodeOfShape = new Map<ContextShape, Element>(contextShapes.map((shape, i) => [shape, contextNodes[i]]));
+      // what each system draws from, for the overlay: a system the preview only moves hands on the objects it had and its move
+      const drawnSystems: ScoreLayout['systems'] = [];
+      // what each system is now: drawn, shown from an earlier document until it comes near the screen, or not drawn yet
+      const stateNow: SystemState[] = placedSystems.map((_, si) => {
+        if (!only || only.has(si)) return 'drawn';
+        const was = base?.state[si];
+        if (was === 'drawn') return stale.has(si) ? 'stale' : 'drawn';
+        return was === 'stale' ? 'stale' : 'blank';
+      });
+      // a system that is not drawn yet is an empty group of the room it will take, so that the drawing has its size and a place for it
+      const blankGroups = new Map<number, SVGGElement>();
+      const beatOfMeasure = new Map<string, number>();
+      let beatsBefore = 0;
+      for (const placed of placedSystems) for (const { b } of placed) {
+        beatOfMeasure.set(b.measure.id, beatsBefore);
+        beatsBefore += lengthOfMeasure(b.measure.timeSignature);
+      }
+      const blankOf = (si: number, placed: (typeof placedSystems)[number]): SVGGElement => {
+        const group = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+        group.setAttribute('class', 'vf-system vf-blank');
+        group.setAttribute('data-system', String(si));
+        const room = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+        const top = placed[0].trebleY - SYSTEM_ROOM;
+        room.setAttribute('x', '0');
+        room.setAttribute('y', String(top));
+        room.setAttribute('width', String(totalW));
+        room.setAttribute('height', String(placed[0].bassY + STAFF_H + SYSTEM_ROOM - top));
+        room.setAttribute('fill', 'none');
+        room.setAttribute('pointer-events', 'none');
+        group.append(room);
+        return group;
+      };
+      const systemLayouts: SystemLayout[] = placedSystems.map((placed, si) => {
+        if (stateNow[si] === 'blank') {
+          blankGroups.set(si, blankOf(si, placed));
+          // what the playback cursor and the bar wash need of a system not drawn yet: where its measures stand and when they begin and end,
+          // from the plan; the drawing gives the real onsets when it comes near the screen
+          const layout: SystemLayout = { timeMap: [], noteBoxes: [], modifierBoxes: [], staffZones: [], stemHandles: [], beamShapes: [], tupletShapes: [], timeSignatureShapes: [], contextShapes: [], graceSlots: [], slurShapes: [], measures: [] };
+          const y0 = placed[0].trebleY + 4 * STAFF_SPACE - CURSOR_OVERHANG;
+          const y1 = placed[0].bassY + 4 * STAFF_SPACE + STAFF_H + CURSOR_OVERHANG;
+          for (const { b, x, w, header } of placed) {
+            const start = beatOfMeasure.get(b.measure.id)!;
+            const previous = layout.timeMap.at(-1);
+            if (previous?.timeBeats === start) layout.timeMap.pop();
+            layout.timeMap.push({ timeBeats: start, x: x + header, y0, y1 }, { timeBeats: start + lengthOfMeasure(b.measure.timeSignature), x: x + w, y0, y1 });
+            layout.measures.push({ id: b.measure.id, x, y: y0, w, h: y1 - y0 });
+          }
+          drawnSystems[si] = { layout, offsetY: 0 };
+          return layout;
+        }
+        if (base && only && !only.has(si)) {
+          // a system the preview does not change: the full engraving's drawing and layout, moved down by what the systems above grew
+          if (base.current[si] !== base.groups[si]) {
+            base.current[si].replaceWith(base.groups[si]);
+            base.current[si] = base.groups[si];
+          }
+          const dy = placed[0].trebleY - base.tops[si];
+          const delta = dy - base.applied[si];
+          if (delta) {
+            const group = base.groups[si];
+            if (dy) group.setAttribute('transform', `translate(0 ${dy})`);
+            else group.removeAttribute('transform');
+            for (const mark of group.querySelectorAll('[data-object-id]')) for (const name of ['data-context-start-y', 'data-context-end-y']) {
+              if (mark.hasAttribute(name)) mark.setAttribute(name, String(Number(mark.getAttribute(name)) + delta));
+            }
+            base.applied[si] = dy;
+          }
+          const kept = base.layouts[si];
+          const layout = dy ? structuredClone(kept) : kept;
+          if (dy) shiftLayout(layout, 0, dy);
+          layout.contextShapes.forEach((shape, i) => nodeOfShape.set(shape, base.nodes.get(kept.contextShapes[i])!));
+          drawnSystems[si] = { layout: kept, offsetY: dy };
+          return layout;
+        }
+        const own = <T extends object>(list: T[]): T[] => list.filter((entry) => systemOfEntry.get(entry) === si);
+        const layout: SystemLayout = { timeMap: own(timeMap), noteBoxes: own(noteBoxes), modifierBoxes: own(modifierBoxes), staffZones: own(staffZones), stemHandles: own(stemHandles),
+          beamShapes: own(beamShapes), tupletShapes: own(tupletShapes), timeSignatureShapes: own(timeSignatureShapes), contextShapes: own(contextShapes),
+          graceSlots: own(graceSlots), slurShapes: own(slurShapes), measures: own(measures) };
+        drawnSystems[si] = { layout, offsetY: 0 };
+        return layout;
+      });
+      // the groups that stand for the systems now: kept ones stay, those drawn again take the place of what stood for them, empty ones are put
+      // among them in order
+      const kept = (si: number): boolean => Boolean(base && only && !only.has(si) && stateNow[si] !== 'blank');
+      const groups: SVGGElement[] = placedSystems.map((_, si) => blankGroups.get(si) ?? (kept(si) ? base!.groups[si] : systemGroups[si]));
+      if (base) {
+        placedSystems.forEach((_, si) => {
+          if (!kept(si)) base.current[si]?.remove();
+        });
+        for (let si = placedSystems.length; si < base.current.length; si++) base.current[si]?.remove();
+      }
+      groups.forEach((group, si) => {
+        if (group.isConnected) return;
+        const next = groups.slice(si + 1).find((other) => other.isConnected);
+        if (next) next.before(group);
+        else groups.slice(0, si).reverse().find((other) => other.isConnected)?.after(group);
+      });
+      // a preview frame draws over the same base again: the next one removes what this one put in place
+      if (base) base.current = [...groups];
+      // the spacing this score settled on and its drawing, kept for the redraws that change only a preview (a stem, beam or
+      // slur being dragged): they start from it, draw once and only the systems they change
+      if (!previewing) {
+        // a drawing in part keeps the groups, tops, layouts and context marks of the systems it did not draw again
+        const redrawn = base && only ? only : null;
+        const nodes = new Map<ContextShape, Element>(redrawn ? base!.nodes : nodeOfShape);
+        if (redrawn) for (const si of redrawn) for (const shape of drawnSystems[si].layout.contextShapes) {
+          const node = nodeOfShape.get(shape);
+          if (node) nodes.set(shape, node);
+        }
+        // what a drawing settled on is kept for the next opening: the spacing of the measures it has measured
+        writeSeed(seedKey(structure, effectivePageContentWidth), { horizontal, reaches, inlineWidths, widthMinimum, signatures: new Map([...signatures].map(([id, signature]) => [id, hashOf(signature)])) });
+        settled.current = {
+          doc, width: effectivePageContentWidth, horizontal: new Map(horizontal), reaches: new Map(reaches), inlineWidths: new Map(inlineWidths), widthMinimum: new Map(widthMinimum), signatures, structure, voiceColors,
+          drawing: {
+            svg: hostSvg!, groups, current: [...groups], signature, state: stateNow,
+            tops: placedSystems.map((placed, si) => (kept(si) ? base!.tops[si] : placed[0].trebleY)),
+            applied: placedSystems.map((_, si) => (kept(si) ? base!.applied[si] : 0)),
+            layouts: placedSystems.map((_, si) => (kept(si) ? base!.layouts[si] : drawnSystems[si].layout)),
+            nodes, systemOf, shiftX, shiftY, width: finalW, height: finalH, totalH,
+            facts: new Map(built.map((b) => [b.measure.id, { ...b, drawn: b.drawn.map((d) => ({ ...d, sns: [], voice: null, tuplets: [] })), graceSets: [] }])),
+          },
+        };
+      }
+      const published = <K extends keyof SystemLayout>(key: K): SystemLayout[K] => systemLayouts.flatMap((layout) => layout[key] as object[]) as SystemLayout[K];
+      // a context's shapes in the order its marks stand in the score: Overlay pairs the nth shape of an id with its nth drawn mark
+      const contextsInOrder = published('contextShapes');
+      const slotsOfContext = new Map<string, number[]>();
+      contextsInOrder.forEach((shape, slot) => slotsOfContext.set(shape.id, [...(slotsOfContext.get(shape.id) ?? []), slot]));
+      const orderedContextShapes = [...contextsInOrder];
+      for (const slots of slotsOfContext.values()) {
+        const inScoreOrder = [...slots].sort((a, b) => nodeOfShape.get(contextsInOrder[a])!.compareDocumentPosition(nodeOfShape.get(contextsInOrder[b])!) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+        slots.forEach((slot, k) => { orderedContextShapes[slot] = contextsInOrder[inScoreOrder[k]]; });
+      }
       onLayout({
         width: finalW,
         height: finalH,
         engravedFor: effectivePageContentWidth,
-        timeMap,
+        timeMap: published('timeMap'),
         totalBeats: cumBeat,
-        noteBoxes,
-        modifierBoxes,
-        staffZones,
-        stemHandles,
-        beamShapes,
-        tupletShapes,
-        timeSignatureShapes,
-        contextShapes,
-        graceSlots,
-        slurShapes,
-        measures,
+        noteBoxes: published('noteBoxes'),
+        modifierBoxes: published('modifierBoxes'),
+        staffZones: published('staffZones'),
+        stemHandles: published('stemHandles'),
+        beamShapes: published('beamShapes'),
+        tupletShapes: published('tupletShapes'),
+        timeSignatureShapes: published('timeSignatureShapes'),
+        contextShapes: orderedContextShapes,
+        graceSlots: published('graceSlots'),
+        slurShapes: published('slurShapes'),
+        measures: published('measures'),
+        systems: drawnSystems,
       });
     };
     let passCount = 0;
-    engrave();
-  }, [doc, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview]);
+    // the systems above the screen may be drawn at another height than they were planned: what is in view stays where it is
+    const scroller = scrollerOf(host);
+    const before = settled.current?.drawing;
+    const anchor = before && scroller && before.tops.length > ZONE_MIN_SYSTEMS ? anchorOf(before, scroller) : null;
+    const anchorScrollTop = scroller?.scrollTop;
+    // a throw here would unmount the whole editor: the last drawing and its layout stay instead
+    const previous: ChildNode[] = [...host.childNodes];
+    try {
+      engrave(partial);
+    } catch (error) {
+      // a drawing in part that fails is drawn whole
+      if (partial) {
+        try {
+          passCount = 0;
+          engrave(null, true);
+          return;
+        } catch {
+          // reported below, with the first failure
+        }
+      }
+      host.replaceChildren(...previous);
+      onEngraveError?.(error instanceof Error ? error.message : String(error));
+    }
+    // once drawn, the systems near the screen are read again: heights drawn differ from the ones planned
+    const refresh = requestAnimationFrame(() => {
+      const after = settled.current?.drawing;
+      const si = anchor && after ? after.systemOf.get(anchor.measureId) : undefined;
+      // A new scroll since engraving began belongs to the user or the playback cursor.
+      if (anchor && after && scroller && si !== undefined && anchorScrollTop !== undefined &&
+          Math.abs(scroller.scrollTop - anchorScrollTop) <= 1) {
+        const shift = systemTop(after, si) - anchor.top;
+        if (Math.abs(shift) > 1) scroller.scrollTop += shift;
+      }
+      refreshZoneRef.current();
+    });
+    return () => cancelAnimationFrame(refresh);
+  }, [doc, scoreActive, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, onEngraveError, zoneVersion]);
+
+  // the zone follows the screen: once it has stood still, the systems near it that are not drawn yet are drawn one a task, so that a scroll
+  // itself never carries a drawing
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host || !scoreActive) return;
+    const scroller = scrollerOf(host);
+    let timer = 0;
+    let scrolledAt = 0;
+    let leftBefore = Infinity;
+    const settle = (): void => {
+      timer = 0;
+      const drawing = settled.current?.drawing;
+      if (!drawing) return;
+      if (drawing.tops.length <= ZONE_MIN_SYSTEMS && !drawing.state.includes('stale')) {
+        zoneRef.current = null;
+        return;
+      }
+      const wait = SCROLL_IDLE_MS - (performance.now() - scrolledAt);
+      if (wait > 0) {
+        timer = window.setTimeout(settle, wait);
+        return;
+      }
+      const near = systemsNearScreen(drawing, scroller);
+      const was = zoneRef.current;
+      const moved = !was || was.size !== near.size || [...near].some((si) => !was.has(si));
+      zoneRef.current = near;
+      const left = [...near].filter((si) => drawing.state[si] !== 'drawn').length;
+      const progressed = left < leftBefore;
+      leftBefore = left;
+      if (left > 0 && (moved || progressed)) setZoneVersion((version) => version + 1);
+    };
+    refreshZoneRef.current = () => { if (!timer) timer = window.setTimeout(settle, 0); };
+    const onMove = (): void => {
+      scrolledAt = performance.now();
+      refreshZoneRef.current();
+    };
+    const target: EventTarget = scroller ?? window;
+    target.addEventListener('scroll', onMove, { passive: true });
+    window.addEventListener('resize', onMove);
+    refreshZoneRef.current();
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      target.removeEventListener('scroll', onMove);
+      window.removeEventListener('resize', onMove);
+      refreshZoneRef.current = () => {};
+    };
+  }, [scoreActive]);
 
   // selection = DOM recolour on the already-rendered SVG (CSS class), no re-layout. MUST also
   // re-run on every dep the MAIN draw effect rebuilds the DOM from (`voiceColors`, `stemOverrides`)
@@ -2122,9 +2813,14 @@ export function VexflowRenderer({
   // note click).
   useEffect(() => {
     const host = hostRef.current;
-    if (!host) return;
+    if (!host || !scoreActive) return;
     const set = new Set(selectedIds);
     const carrierSet = new Set(carrierSelectedIds);
+    const stems = new Map<string, SVGElement[]>();
+    host.querySelectorAll<SVGElement>('[data-stem-carrier]').forEach((stem) => {
+      const carrierId = stem.getAttribute('data-stem-carrier') || '';
+      stems.set(carrierId, [...(stems.get(carrierId) ?? []), stem]);
+    });
     host.querySelectorAll<SVGElement>('[data-note-id]').forEach((g) => {
       const keyEls = [...g.querySelectorAll<SVGElement>('[data-individual-note-id]')];
       const carrierId = g.getAttribute('data-note-id') || '';
@@ -2134,6 +2830,7 @@ export function VexflowRenderer({
         (keyEls.length > 1 || carrierSet.has(carrierId));
       g.classList.toggle('selected', allSelected);
       g.classList.toggle('carrier-selected', allSelected && carrierSet.has(carrierId));
+      stems.get(carrierId)?.forEach((stem) => stem.classList.toggle('selected', allSelected));
       keyEls.forEach((el) => {
         el.classList.toggle('selected', set.has(el.getAttribute('data-individual-note-id') || ''));
       });
@@ -2142,7 +2839,7 @@ export function VexflowRenderer({
         el.classList.toggle('selected', set.has(el.getAttribute('data-modifier-note') || ''));
       });
     });
-  }, [selectionKey, carrierSelectionKey, doc, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview]);
+  }, [selectionKey, carrierSelectionKey, doc, scoreActive, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, zoneVersion]);
 
   // hover = same DOM-recolour pattern as selection (must re-run whenever the main effect could
   // have rebuilt the DOM) — a light tint on the note glyph itself, per-individual-note like
@@ -2150,7 +2847,7 @@ export function VexflowRenderer({
   // is lifted UI state in EditorView.tsx, not the global store — too ephemeral to belong there.
   useEffect(() => {
     const host = hostRef.current;
-    if (!host) return;
+    if (!host || !scoreActive) return;
     const set = new Set(hoveredNoteIds);
     host.querySelectorAll<SVGElement>('[data-individual-note-id]').forEach((el) => {
       el.classList.toggle('hovered', set.has(el.getAttribute('data-individual-note-id') || ''));
@@ -2159,23 +2856,26 @@ export function VexflowRenderer({
     host.querySelectorAll<SVGElement>('[data-note-id]').forEach((el) => {
       el.classList.toggle('hovered', set.has(`carrier:${el.getAttribute('data-note-id') || ''}`));
     });
+    host.querySelectorAll<SVGElement>('[data-stem-carrier]').forEach((el) => {
+      el.classList.toggle('hovered', set.has(`carrier:${el.getAttribute('data-stem-carrier') || ''}`));
+    });
     host.querySelectorAll<SVGElement>('[data-modifier-note]').forEach((el) => {
       el.classList.toggle('hovered', set.has(el.getAttribute('data-modifier-note') || ''));
     });
     host.querySelectorAll<SVGElement>('[data-object-id]').forEach((el) => {
       el.classList.toggle('hovered', set.has(el.getAttribute('data-object-id') || ''));
     });
-  }, [hoverKey, doc, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview]);
+  }, [hoverKey, doc, scoreActive, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, zoneVersion]);
 
   // picked beams / tuplets / time signatures / clefs: the same recolour-in-place as a note's
   useEffect(() => {
     const host = hostRef.current;
-    if (!host) return;
+    if (!host || !scoreActive) return;
     const set = new Set(selectedObjectIds ?? []);
     host.querySelectorAll<SVGElement>('[data-object-id]').forEach((el) => {
       el.classList.toggle('selected', set.has(el.getAttribute('data-object-id') || ''));
     });
-  }, [objectSelectionKey, doc, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview]);
+  }, [objectSelectionKey, doc, scoreActive, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, zoneVersion]);
 
   // insert flash: the same DOM-class pattern as hover/selection, applied once per insert (the
   // flash object's identity is the trigger). The class removes itself when its animation ends;
