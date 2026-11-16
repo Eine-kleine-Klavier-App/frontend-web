@@ -151,8 +151,8 @@ textarea,
   --select-ink: var(--voice-color, var(--color-accent-deep));
 }
 @supports (color: oklch(from red l c h)) {
-  [data-object-id].hovered,
-  [data-object-id].selected {
+  [data-object-id]:not([data-voice]).hovered,
+  [data-object-id]:not([data-voice]).selected {
     --select-ink: oklch(from var(--voice-color, var(--color-accent)) 0.58 max(c, 0.19) h);
   }
 }
@@ -333,6 +333,14 @@ textarea,
 .vf-stavenote.selected rect:not(.vf-ledger),
 .vf-stavenote.playback-active path:not(.vf-ledger),
 .vf-stavenote.playback-active rect:not(.vf-ledger) {
+  fill: var(--select-ink);
+  stroke: var(--select-ink);
+}
+/* the stem of a beamed note is drawn outside the note's group: it takes the tint of its note by its own class */
+.vf-stem[data-stem-carrier].selected path,
+.vf-stem[data-stem-carrier].selected rect,
+.vf-stem[data-stem-carrier].hovered path,
+.vf-stem[data-stem-carrier].hovered rect {
   fill: var(--select-ink);
   stroke: var(--select-ink);
 }
@@ -3992,19 +4000,11 @@ body[data-auth-scene] #root {
   mix-blend-mode: multiply;
   pointer-events: none;
 }
-/* the colour a picked or hovered note takes: its voice's hue, made vivid. The voice colours are
-   muted mid-tones, close in lightness to the black engraving — a note in one barely changed when
-   picked; the same hue at a fixed lightness and a higher chroma reads at a glance (the plain
-   voice colour where relative colours aren't supported) */
+/* A note, its stem and its handles use the same voice colour as the staff marker. */
 .vf-stavenote,
+.vf-stem[data-stem-carrier],
 .overlay .stem-handle-group {
   --select-ink: var(--voice-color, var(--color-accent-deep));
-}
-@supports (color: oklch(from red l c h)) {
-  .vf-stavenote,
-  .overlay .stem-handle-group {
-    --select-ink: oklch(from var(--voice-color, var(--color-accent)) 0.58 max(c, 0.19) h);
-  }
 }
 /* selection = the voice colour, recoloured and slightly emboldened (no box, no halo) */
 .vf-notehead.selected path {
