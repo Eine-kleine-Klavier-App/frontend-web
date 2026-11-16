@@ -6,6 +6,7 @@ import { VexflowRenderer } from '@/rendering/vexflow/VexflowRenderer';
 import { Overlay } from './Overlay';
 import type { ScoreLayout } from '@/rendering/ScoreRenderer';
 import { StaffMarker } from './StaffMarker';
+import { ScoreErrorBoundary } from './ScoreErrorBoundary';
 import type { BeamOverride } from '@/core/model/score';
 import type { SlurOffsets } from '@/core/model/slurHandles';
 import type { SpanPreview } from '@/rendering/ScoreRenderer';
@@ -45,11 +46,16 @@ export function createHoverFeedback(show: (ids: string[]) => void) {
   };
 }
 
-export function EditorView({ title }: { title?: string } = {}) {
+export function EditorView({ title, scoreActive = true, onFirstPaint }: {
+  title?: string;
+  scoreActive?: boolean;
+  onFirstPaint?: (ready: boolean) => void;
+} = {}) {
   const tool = useEditor(s => s.tool);
   const reading = useEditor(s => s.source?.kind === 'saved');
   const document = useEditor((s) => s.document);
   const selectedIds = useEditor((s) => s.selectedIds);
+  const scrollToSelection = useEditor((s) => s.scrollToSelection);
   const carrierSelectedIds = useEditor((s) => s.carrierSelectedIds);
   const zoom = useEditor((s) => s.zoom);
   const voiceColors = useEditor((s) => s.voiceColors);
@@ -92,6 +98,9 @@ export function EditorView({ title }: { title?: string } = {}) {
   const onLayout = useCallback((l: ScoreLayout) => {
     setLayout(l);
     playback.setTotalBeats(l.totalBeats);
+  }, []);
+  const onEngraveError = useCallback((message: string) => {
+    useEditor.setState({ error: `The score could not be drawn: ${message}` });
   }, []);
 
   // Reflow-zoom: the rendered sheet width stays pinned to the desk's available width (capped at
@@ -200,6 +209,11 @@ export function EditorView({ title }: { title?: string } = {}) {
     const prev = prevSelectedIdsRef.current;
     const changed = selectedIds.length !== prev.length || selectedIds.some((id, i) => id !== prev[i]);
     prevSelectedIdsRef.current = selectedIds;
+    if (!scrollToSelection) {
+      selectionScrollAnimRef.current?.stop();
+      selectionScrollAnimRef.current = null;
+      return;
+    }
     if (!changed || !selectedIds.length || !layout) return;
 
     const area = canvasAreaRef.current;
@@ -250,7 +264,7 @@ export function EditorView({ title }: { title?: string } = {}) {
         area.scrollTop = startT + (targetT - startT) * t;
       },
     });
-  }, [selectedIds, layout, reduce, scale]);
+  }, [selectedIds, scrollToSelection, layout, reduce, scale]);
 
   const w = layout?.width ?? 0;
   const h = layout?.height ?? 0;
@@ -314,6 +328,18 @@ export function EditorView({ title }: { title?: string } = {}) {
     };
   }, []);
 
+  const paintReady = scoreActive && pageContentWidth !== undefined && layout?.engravedFor === pageContentWidth && w > 0;
+  useLayoutEffect(() => {
+    if (!onFirstPaint) return;
+    if (!paintReady) { onFirstPaint(false); return; }
+    // Motion values applied by syncSizes and the SVG have both reached the screen.
+    let afterPaint = 0;
+    const frame = requestAnimationFrame(() => {
+      afterPaint = requestAnimationFrame(() => onFirstPaint(true));
+    });
+    return () => { cancelAnimationFrame(frame); cancelAnimationFrame(afterPaint); };
+  }, [onFirstPaint, paintReady, pageContentWidth]);
+
   return (
     <div
       className="canvas-area"
@@ -344,37 +370,43 @@ export function EditorView({ title }: { title?: string } = {}) {
             className="score-content"
             style={{ scale, transformOrigin: 'top left', width: w, height: h, position: 'relative' }}
           >
-            {pageContentWidth !== undefined && <VexflowRenderer
-              document={document}
-              selectedIds={selectedIds}
-              carrierSelectedIds={carrierSelectedIds}
-              pageContentWidth={pageContentWidth}
-              onLayout={onLayout}
-              voiceColors={voiceColors}
-              stemOverrides={stemOverrides}
-              beamPreview={beamPreview}
-              slurPreview={slurPreview}
-              spanPreview={spanPreview}
-              placementPreview={placementPreview}
-              hoveredNoteIds={tool === 'select' ? hoveredNoteIds : []}
-              selectedObjectIds={selectedObjectIds}
-              flash={flash}
-            />}
-            {layout && !reading && <StaffMarker layout={layout} />}
-            {layout && (
-              <Overlay
-                layout={layout}
-                // pointer moves report the same hover again and again: only a change re-renders
-                onHoverNote={hoverFeedback.hover}
-                onInserted={onInserted}
-                onBeamPreview={onBeamPreview}
+            <ScoreErrorBoundary document={document}>
+              {pageContentWidth !== undefined && <VexflowRenderer
+                document={document}
+                scoreActive={scoreActive}
+                selectedIds={selectedIds}
+                carrierSelectedIds={carrierSelectedIds}
+                pageContentWidth={pageContentWidth}
+                onLayout={onLayout}
+                voiceColors={voiceColors}
+                stemOverrides={stemOverrides}
+                beamPreview={beamPreview}
                 slurPreview={slurPreview}
-                onSlurPreview={setSlurPreview}
                 spanPreview={spanPreview}
-                onSpanPreview={setSpanPreview}
-                onPlacementPreview={setPlacementPreview}
-              />
-            )}
+                placementPreview={placementPreview}
+                hoveredNoteIds={tool === 'select' ? hoveredNoteIds : []}
+                selectedObjectIds={selectedObjectIds}
+                flash={flash}
+                onEngraveError={onEngraveError}
+              />}
+              {layout && !reading && <StaffMarker layout={layout} />}
+              {layout && (
+                <Overlay
+                  layout={layout}
+                  scoreActive={scoreActive}
+                  playbackLayoutReady={layout.engravedFor === pageContentWidth}
+                  // pointer moves report the same hover again and again: only a change re-renders
+                  onHoverNote={hoverFeedback.hover}
+                  onInserted={onInserted}
+                  onBeamPreview={onBeamPreview}
+                  slurPreview={slurPreview}
+                  onSlurPreview={setSlurPreview}
+                  spanPreview={spanPreview}
+                  onSpanPreview={setSpanPreview}
+                  onPlacementPreview={setPlacementPreview}
+                />
+              )}
+            </ScoreErrorBoundary>
           </motion.div>
         </motion.div>
       </motion.div>

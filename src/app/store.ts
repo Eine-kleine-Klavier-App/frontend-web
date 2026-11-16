@@ -135,6 +135,7 @@ interface EditorState {
   auditionSuppressed: boolean;
   setContextFactor: (id: string, factor: number) => void;
   selectedIds: string[];
+  scrollToSelection: boolean;
   // carrier ids that were selected AT CARRIER GRANULARITY (via the stem handle or a chord
   // double-click), not derived from `selectedIds`/note counts — needed specifically to
   // distinguish a single-note carrier's "select the carrier" action (stem-click / double-click,
@@ -192,7 +193,7 @@ interface EditorState {
   select: (id: string | null, additive?: boolean) => void;
   selectStructure: (id: string, additive: boolean) => void;
   /** Replace or union a group pick; carriers control whole-glyph tint, structures its relations. */
-  selectMany: (ids: string[], additive: boolean, carrierIds?: string[], structureIds?: string[]) => void;
+  selectMany: (ids: string[], additive: boolean, carrierIds?: string[], structureIds?: string[], options?: { scroll?: boolean }) => void;
   /** the double-click rule for a context: select what it is applied to — the backend owns that rule */
   selectContextContent: (contextId: string, additive: boolean) => Promise<void>;
   /** select a measure — alone when `noteIds` is empty, with its content (`noteIds`) otherwise;
@@ -247,6 +248,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     { kind: 'vertical', target: { entity_id: id, reference: 'body' }, offset: factor === 1 ? null : factor },
   ] }); },
   selectedIds: [],
+  scrollToSelection: true,
   selectedStructureIds: [],
   carrierSelectedIds: [],
   selectedMeasureIds: [],
@@ -459,15 +461,15 @@ export const useEditor = create<EditorState>((set, get) => ({
   select: (id, additive = false) =>
     set((s) => {
       if (s.locked) return {};
-      if (id === null) return { selectedIds: [], carrierSelectedIds: [], selectedMeasureIds: [], selectedStructureIds: [] };
+      if (id === null) return { selectedIds: [], scrollToSelection: true, carrierSelectedIds: [], selectedMeasureIds: [], selectedStructureIds: [] };
       if (additive) {
         return s.selectedIds.includes(id)
-          ? { selectedIds: s.selectedIds.filter((x) => x !== id), selectedMeasureIds: [] }
-          : { selectedIds: [...s.selectedIds, id], selectedMeasureIds: [] };
+          ? { selectedIds: s.selectedIds.filter((x) => x !== id), scrollToSelection: true, selectedMeasureIds: [] }
+          : { selectedIds: [...s.selectedIds, id], scrollToSelection: true, selectedMeasureIds: [] };
       }
       // a fresh plain click is a NOTE-granularity pick, even if it happens to land on a
       // single-note carrier — drop any prior carrier-level selection.
-      return { selectedIds: [id], carrierSelectedIds: [], selectedMeasureIds: [], selectedStructureIds: [] };
+      return { selectedIds: [id], scrollToSelection: true, carrierSelectedIds: [], selectedMeasureIds: [], selectedStructureIds: [] };
     }),
 
   selectStructure: (id, additive) =>
@@ -481,12 +483,13 @@ export const useEditor = create<EditorState>((set, get) => ({
       };
     }),
 
-  selectMany: (ids, additive, carrierIds = [], structureIds = []) =>
+  selectMany: (ids, additive, carrierIds = [], structureIds = [], { scroll = true } = {}) =>
     set((s) => {
       if (s.locked) return {};
       if (additive) {
         return {
           selectedIds: [...new Set([...s.selectedIds, ...ids])],
+          scrollToSelection: scroll,
           carrierSelectedIds: [...new Set([...s.carrierSelectedIds, ...carrierIds])],
           selectedStructureIds: carrierIds.length
             ? contentSelection(s.document, [...s.selectedIds, ...ids], [...s.selectedStructureIds, ...structureIds]).structureIds
@@ -494,7 +497,7 @@ export const useEditor = create<EditorState>((set, get) => ({
           selectedMeasureIds: [],
         };
       }
-      return { selectedIds: [...new Set(ids)], carrierSelectedIds: [...new Set(carrierIds)], selectedMeasureIds: [], selectedStructureIds: [...new Set(structureIds)] };
+      return { selectedIds: [...new Set(ids)], scrollToSelection: scroll, carrierSelectedIds: [...new Set(carrierIds)], selectedMeasureIds: [], selectedStructureIds: [...new Set(structureIds)] };
     }),
 
   selectMeasure: (measureId, noteIds, additive) =>
@@ -505,12 +508,13 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (additive && s.selectedMeasureIds.length) {
         return {
           selectedIds: [...new Set([...s.selectedIds, ...noteIds])],
+          scrollToSelection: true,
           carrierSelectedIds: [...new Set([...s.carrierSelectedIds, ...group.carrierIds])],
           selectedStructureIds: contentSelection(s.document, [...s.selectedIds, ...noteIds], [...s.selectedStructureIds, ...group.structureIds]).structureIds,
           selectedMeasureIds: [...new Set([...s.selectedMeasureIds, measureId])],
         };
       }
-      return { selectedIds: group.noteIds, carrierSelectedIds: group.carrierIds, selectedMeasureIds: [measureId], selectedStructureIds: group.structureIds };
+      return { selectedIds: group.noteIds, scrollToSelection: true, carrierSelectedIds: group.carrierIds, selectedMeasureIds: [measureId], selectedStructureIds: group.structureIds };
     }),
 
   selectContextContent: async (contextId, additive) => {
@@ -566,7 +570,12 @@ export const useEditor = create<EditorState>((set, get) => ({
     }),
 
   previewStem: (carrierId, override) =>
-    set((s) => (s.locked || s.source?.kind === 'saved' ? {} : { stemOverrides: { ...s.stemOverrides, [carrierId]: override } })),
+    set((s) => {
+      const shown = s.stemOverrides[carrierId];
+      // the same preview again is no change: no new object, no new drawing
+      const same = shown?.direction === override.direction && shown.lengthFactor === override.lengthFactor;
+      return s.locked || s.source?.kind === 'saved' || same ? {} : { stemOverrides: { ...s.stemOverrides, [carrierId]: override } };
+    }),
 
   commitStems: async (carrierIds, override) => {
     if (carrierIds.length) {
