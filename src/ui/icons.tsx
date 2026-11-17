@@ -297,6 +297,17 @@ export function LockIcon({ locked }: { locked: boolean }) {
     </>,
   );
 }
+// lucide-static 0.468.0: file-up, file-diff
+export function FileUpIcon() {
+  return glyph(
+    <>
+      <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z" {...STROKE} />
+      <path d="M14 2v4a2 2 0 0 0 2 2h4" {...STROKE} />
+      <path d="M12 12v6" {...STROKE} />
+      <path d="m15 15-3-3-3 3" {...STROKE} />
+    </>,
+  );
+}
 export function HelpIcon() {
   return glyph(
     <>
