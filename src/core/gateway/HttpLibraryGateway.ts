@@ -1,5 +1,5 @@
-import type { BranchSummary, CollectionSummary, DraftSummary, LibraryGateway, ScoreSummary } from './LibraryGateway';
-import type { ContextCoverage, ScoreDocument } from '@/core/model/score';
+import type { BranchSummary, CollectionSummary, DraftSummary, ImportJob, ImportState, LibraryGateway, ScoreSummary } from './LibraryGateway';
+import type { ContextCoverage, Fraction, ScoreDocument } from '@/core/model/score';
 import { fromView, type ScoreView } from '@/core/model/fromView';
 import { API_BASE } from './apiBase';
 import { authorizedFetch, optionalAuthFetch } from '@/core/auth/authorizedFetch';
@@ -47,6 +47,24 @@ function toScoreSummary(dto: ScoreCardDto): ScoreSummary {
     updatedAt: dto.updated_at,
     authorId: dto.author_id,
     authorName: dto.author_name,
+  };
+}
+
+interface ImportJobDto {
+  job_id: string;
+  state: ImportState;
+  draft_id: string | null;
+  comparison: { kind: 'skipped' | 'changed' | 'mismatch'; measure_index: number | null; onset: Fraction | null; message: string }[];
+  error: string | null;
+}
+
+function toImportJob(dto: ImportJobDto): ImportJob {
+  return {
+    jobId: dto.job_id,
+    state: dto.state,
+    draftId: dto.draft_id,
+    comparison: dto.comparison.map((issue) => ({ kind: issue.kind, measureIndex: issue.measure_index, onset: issue.onset, message: issue.message })),
+    error: dto.error,
   };
 }
 
@@ -135,6 +153,31 @@ export class HttpLibraryGateway implements LibraryGateway {
     if (!res.ok) throw await readError(res, `Failed to create draft (${res.status})`);
     const dto = (await res.json()) as { draft_id: string };
     return { draftId: dto.draft_id };
+  }
+
+  /** The file goes up as the raw request body; the answer is the job that reads it in the background. */
+  private async postFile(path: string, file: File): Promise<ImportJob> {
+    const res = await authorizedFetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/octet-stream' },
+      body: file,
+    });
+    if (!res.ok) throw await readError(res, `Failed to upload the file (${res.status})`);
+    return toImportJob((await res.json()) as ImportJobDto);
+  }
+
+  startImport(file: File): Promise<ImportJob> {
+    return this.postFile(`/imports?filename=${encodeURIComponent(file.name)}`, file);
+  }
+
+  startComparison(draftId: string, file: File): Promise<ImportJob> {
+    return this.postFile(`/drafts/${encodeURIComponent(draftId)}/compare?filename=${encodeURIComponent(file.name)}`, file);
+  }
+
+  async getImportJob(jobId: string): Promise<ImportJob> {
+    const res = await authorizedFetch(`${API_BASE}/imports/${encodeURIComponent(jobId)}`);
+    if (!res.ok) throw await readError(res, `Failed to read the import (${res.status})`);
+    return toImportJob((await res.json()) as ImportJobDto);
   }
 
   async saveDraftAsScore(draftId: string, details: { title: string; composer: string | null; isPublic: boolean }): Promise<{ scoreId: string }> {

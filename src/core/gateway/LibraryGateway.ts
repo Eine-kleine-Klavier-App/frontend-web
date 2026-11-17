@@ -1,4 +1,4 @@
-import type { ContextCoverage, ScoreDocument } from '@/core/model/score';
+import type { ContextCoverage, Fraction, ScoreDocument } from '@/core/model/score';
 
 /** Metadata returned by the score catalog. */
 export interface ScoreSummary {
@@ -26,6 +26,27 @@ export interface CollectionSummary {
   scoreCount: number;
 }
 
+export type ImportState = 'queued' | 'reading' | 'building' | 'comparing' | 'done' | 'failed';
+
+/** One difference between a file and a draft; `measureIndex` counts the draft's measures from 0. */
+export interface ComparisonIssue {
+  kind: 'skipped' | 'changed' | 'mismatch';
+  measureIndex: number | null;
+  /** where in the measure, in quarter notes from its start (the start of anything that lasts); null when it has no place on a beat */
+  onset: Fraction | null;
+  message: string;
+}
+
+/** An import (a file becomes a draft) or a comparison (how a draft differs from a file), in the
+ *  background. What the comparison found is not stored anywhere: a new comparison finds it again. */
+export interface ImportJob {
+  jobId: string;
+  state: ImportState;
+  draftId: string | null;
+  comparison: ComparisonIssue[];
+  error: string | null;
+}
+
 /** Only operations implemented by the running backend. */
 export interface LibraryGateway {
   listPublicScores(): Promise<ScoreSummary[]>;
@@ -38,6 +59,9 @@ export interface LibraryGateway {
   listAuthorScores(authorId: string): Promise<ScoreSummary[]>;
   listPublicBranches(scoreId: string): Promise<BranchSummary[]>;
   createDraft(fromScoreId?: string): Promise<{ draftId: string }>;
+  startImport(file: File): Promise<ImportJob>;
+  startComparison(draftId: string, file: File): Promise<ImportJob>;
+  getImportJob(jobId: string): Promise<ImportJob>;
   saveDraftAsScore(draftId: string, details: { title: string; composer: string | null; isPublic: boolean }): Promise<{ scoreId: string }>;
   promoteDraft(draftId: string): Promise<{ scoreId: string }>;
   setScoreVisibility(scoreId: string, isPublic: boolean): Promise<void>;
