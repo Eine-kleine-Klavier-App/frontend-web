@@ -6,7 +6,7 @@ import type { DraftSummary, ScoreSummary } from '@/core/gateway/LibraryGateway';
 import { PieceCard } from '@/features/browse/PieceCard';
 import { ScoreCover } from '@/features/browse/ScoreCover';
 import { Dropdown } from '@/ui/Dropdown';
-import { ArrowLeftIcon, PlusIcon } from '@/ui/icons';
+import { ArrowLeftIcon, FileUpIcon, PlusIcon } from '@/ui/icons';
 import { Button } from '@/ui/Button';
 import { FadeSwap } from '@/ui/FadeSwap';
 import { useAuthStore } from '@/core/auth/authStore';
@@ -14,6 +14,12 @@ import { requireAuth } from '@/core/auth/authPrompt';
 import { BROWSE_QUERY_KEYS, invalidateBrowseQueries, useBrowseQuery } from '@/core/gateway/browseQueryCache';
 import { DelayedLoading } from '@/ui/DelayedLoading';
 import { errorMessage } from '@/core/errorMessage';
+import { useFileJob } from '@/core/gateway/useFileJob';
+
+/** What a score file is called by the browser's picker: MusicXML, plain or zipped. */
+const IMPORT_ACCEPT = '.musicxml,.xml,.mxl';
+
+const IMPORT_STAGE: Record<string, string> = { building: 'building…', comparing: 'comparing with the file…' };
 
 type SortKey = 'recent' | 'title' | 'composer';
 const SORTS: { value: SortKey; label: string }[] = [
@@ -55,6 +61,9 @@ export default function LibraryScreen({ draftsOnly = false }: { draftsOnly?: boo
   const [deleteTarget, setDeleteTarget] = useState<DraftSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const importInput = useRef<HTMLInputElement>(null);
+  const importJob = useFileJob();
+  const importing = importJob.status.phase === 'running';
   const deleteLock = useRef(false);
   const deleted = useRef(false);
   const deleteOpener = useRef<HTMLButtonElement | null>(null);
@@ -126,6 +135,14 @@ export default function LibraryScreen({ draftsOnly = false }: { draftsOnly?: boo
     }
   });
 
+  const importFile = (file: File) => requireAuth(async () => {
+    setError(null);
+    const job = await importJob.run(file, (picked) => libraryGateway.startImport(picked));
+    if (!job?.draftId) return;
+    invalidateBrowseQueries('private', BROWSE_QUERY_KEYS.myDrafts);
+    navigate(`/edit/${encodeURIComponent(job.draftId)}`);
+  });
+
   const requestDelete = (draft: DraftSummary, trigger: HTMLButtonElement) => {
     deleteOpener.current = trigger;
     deleted.current = false;
@@ -156,8 +173,24 @@ export default function LibraryScreen({ draftsOnly = false }: { draftsOnly?: boo
           {draftsOnly && <Link className="back-link" to="/library"><ArrowLeftIcon />Back to Library</Link>}
           <h1 ref={heading} tabIndex={-1}>{draftsOnly ? 'Drafts' : 'Library'}</h1>
         </div>
-        <Button variant="primary" icon={<PlusIcon />} disabled={busy} onClick={() => void newScore()}>New score</Button>
+        <div className="library-actions">
+          <Button icon={<FileUpIcon />} disabled={busy || importing} onClick={() => importInput.current?.click()}>Import</Button>
+          <Button variant="primary" icon={<PlusIcon />} disabled={busy || importing} onClick={() => void newScore()}>New score</Button>
+          <input ref={importInput} type="file" hidden accept={IMPORT_ACCEPT} aria-label="Score file to import"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              event.target.value = '';
+              if (file) importFile(file);
+            }} />
+        </div>
       </header>
+      {importJob.status.phase === 'running' && (
+        <div className="import-status" role="status" aria-live="polite">
+          <span className="import-status-name" title={importJob.status.fileName}>{importJob.status.fileName}</span>
+          <span>{IMPORT_STAGE[importJob.status.state] ?? 'reading…'}</span>
+        </div>
+      )}
+      {importJob.status.phase === 'failed' && <div className="library-error" role="alert">{importJob.status.message}</div>}
       {error && <div className="library-error" role="alert">{error}</div>}
       {draftsStatus === 'error' && <div className="library-error" role="alert">{errorMessage(draftsError, 'Could not load drafts.')}</div>}
       {scoresStatus === 'error' && <div className="library-error" role="alert">{errorMessage(scoresError, 'Could not load scores.')}</div>}
