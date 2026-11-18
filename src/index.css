@@ -671,6 +671,7 @@ button.back-link {
   padding: var(--space-5) var(--space-7);
   border-bottom: 1px solid var(--color-border);
 }
+.shell-topbar[data-search-hidden='true'] .scoped-search { visibility: hidden; }
 .shell-topbar .scoped-search {
   max-width: 32.5rem;
 }
@@ -680,8 +681,7 @@ button.back-link {
   overflow: hidden; /* the screen inside owns its own scroll */
 }
 
-/* Page lift/settle stage. Both route trees exist immediately, so the incoming screen can start
-   data work without waiting; absolute layers make their visual lifecycle layout-neutral. */
+/* Absolute plates stay at their final size throughout preparation and reveal. */
 .page-transition-stage {
   position: relative;
   min-width: 0;
@@ -2995,12 +2995,34 @@ body[data-auth-scene] #root {
   line-height: 1.5;
   color: var(--color-ink-muted);
 }
+.auth-modal-head--compact {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: start;
+  padding-inline-end: var(--control-h);
+  margin-bottom: var(--space-4);
+  text-align: left;
+}
+.auth-modal-head--compact .auth-modal-mark {
+  margin: 0;
+}
+.auth-modal-head--compact .auth-modal-mark svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+.auth-modal-head--compact .auth-modal-title {
+  margin-bottom: var(--space-1);
+}
+.auth-modal-head--compact .auth-modal-sub {
+  font-size: var(--text-sm);
+}
 .auth-modal-actions {
   display: flex;
   justify-content: center;
 }
 .auth-modal-progress {
-  width: 17.5rem;
+  width: 100%;
   min-height: 2.75rem;
   display: inline-flex;
   align-items: center;
@@ -3023,37 +3045,8 @@ body[data-auth-scene] #root {
   font-weight: 600;
   color: var(--color-ink-muted);
 }
-.auth-benefits {
-  list-style: none;
-  margin: 0 0 var(--space-5);
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-}
-.auth-benefit {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  font-size: var(--text-sm);
-  color: var(--color-ink);
-}
-.auth-benefit-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 1.875rem;
-  height: 1.875rem;
-  flex: 0 0 1.875rem;
-  border-radius: var(--radius-full);
-  background: var(--color-accent-subtle);
-  color: var(--color-accent-deep);
-}
-.auth-benefit-icon svg {
-  width: 1.0625rem;
-  height: 1.0625rem;
-}
 .google-btn-mount {
+  width: 100%;
   min-height: 2.75rem;
   display: flex;
   justify-content: center;
@@ -3077,7 +3070,21 @@ body[data-auth-scene] #root {
   flex-direction: column;
   gap: var(--space-3);
 }
-/* the error sits in the form, above the submit button, in a line that is always reserved */
+.auth-form--password > .choice--tabs {
+  align-self: flex-start;
+}
+.auth-credential-field {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.auth-credential-field .auth-field {
+  width: 100%;
+  min-width: 0;
+}
+.auth-form--password > .choice--tabs .choice-option {
+  height: var(--control-h);
+}
 .auth-form .auth-modal-error {
   margin: 0;
 }
@@ -3088,7 +3095,7 @@ body[data-auth-scene] #root {
   display: flex;
   align-items: center;
   gap: var(--space-3);
-  margin: var(--space-4) 0;
+  margin: var(--space-3) 0;
   font-size: var(--text-sm);
   color: var(--color-ink-muted);
 }
@@ -5633,6 +5640,16 @@ html.theme-switching *::after {
   right: 0;
   width: 31rem;
 }
+.strip-menu-beam {
+  display: grid;
+  gap: var(--space-2);
+  justify-items: start;
+  padding: var(--space-1) var(--space-3) var(--space-2);
+}
+.strip-menu-beam small {
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
 .strip-menu--prompt .glass-content {
   padding: var(--space-4);
 }
@@ -5936,7 +5953,7 @@ html.theme-switching *::after {
   position: absolute;
   z-index: 1;
   border-radius: var(--radius-full);
-  background: var(--vc);
+  background: var(--voice-color);
   pointer-events: none;
   transition: background-color var(--motion-base) var(--ease-standard);
 }
@@ -5994,6 +6011,14 @@ html.theme-switching *::after {
 }
 .strip-voice-row .voice-swatch-row {
   padding: 0 var(--space-1);
+}
+
+.voice-color-sliders {
+  display: grid;
+  flex: 1 0 100%;
+  min-width: 0;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+  gap: var(--space-3);
 }
 
 /* a hairpin cell and a tempo cell: the engraved mark over its level or number, centred like every other cell */
@@ -6227,9 +6252,9 @@ html.theme-switching *::after {
     gap: var(--space-1);
   }
   .editor-bar .document-save,
-.editor-bar .document-open-editor {
-  padding-inline: var(--space-2);
-}
+  .editor-bar .document-open-editor {
+    padding-inline: var(--space-2);
+  }
   .editor-bar .transport {
     width: max-content;
   }
@@ -6674,3 +6699,54 @@ fieldset.score-privacy {
   color: var(--color-ink);
   outline: none;
 }
+
+/* ---- import and comparison with a score file ---- */
+.library-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.import-status {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin-bottom: var(--space-4);
+  font-size: var(--text-sm);
+  color: var(--color-ink-muted);
+  min-width: 0;
+}
+.import-status-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-ink);
+}
+
+/* the colour of a voice as a code (one field for the voice row and the Waterfall panel) */
+.voice-color-hex {
+  /* the code centred in its field: the widest code (seven letters of the face) fits inside, no tracking that would push it off centre */
+  box-sizing: content-box;
+  width: 8ch;
+  height: var(--control-h-sm);
+  padding-inline: var(--space-3);
+  border: none;
+  border-radius: var(--radius-md);
+  background: var(--well);
+  box-shadow: var(--elev-well);
+  color: var(--color-ink);
+  font: inherit;
+  font-size: var(--text-sm);
+  font-variant-numeric: tabular-nums;
+  line-height: normal;
+  text-align: center;
+}
+.voice-color-hex[aria-invalid='true'] {
+  background: var(--color-danger-subtle);
+  color: var(--color-danger);
+}
+.voice-color-hex:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 1px;
+}
+
