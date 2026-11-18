@@ -46,6 +46,7 @@ declare global {
 }
 
 const GIS_SRC = 'https://accounts.google.com/gsi/client';
+const GOOGLE_BUTTON_MAX_WIDTH = 400;
 
 /** The public OAuth client id (see .env / VITE_GOOGLE_CLIENT_ID). Empty when unconfigured → the
  *  sign-in button renders a "not configured" note instead of attempting the flow. */
@@ -122,22 +123,40 @@ export async function mountGoogleSignInButton(
 
   const owner = Symbol('google-sign-in-button');
   shared.activeReceiver = { owner, receive: onCredential };
-  parent.replaceChildren();
+  let width = 0;
+  const render = () => {
+    if (runtime().activeReceiver?.owner !== owner) return;
+    const nextWidth = Math.min(GOOGLE_BUTTON_MAX_WIDTH, parent.clientWidth);
+    if (nextWidth <= 0 || nextWidth === width) return;
+    const previous = [...parent.childNodes];
+    parent.replaceChildren();
+    try {
+      identity.renderButton(parent, {
+        theme: 'outline',
+        size: 'large',
+        text: 'continue_with',
+        shape: 'pill',
+        logo_alignment: 'center',
+        width: nextWidth,
+      });
+      width = nextWidth;
+    } catch (error) {
+      parent.replaceChildren(...previous);
+      if (width === 0) throw error;
+    }
+  };
+
   try {
-    identity.renderButton(parent, {
-      theme: 'outline',
-      size: 'large',
-      text: 'continue_with',
-      shape: 'pill',
-      logo_alignment: 'center',
-      width: 280,
-    });
+    render();
   } catch (error) {
     if (shared.activeReceiver?.owner === owner) shared.activeReceiver = null;
     throw error;
   }
+  const observer = new ResizeObserver(render);
+  observer.observe(parent);
 
   return () => {
+    observer.disconnect();
     const shared = runtime();
     // StrictMode may resolve the first (already cancelled) mount after a newer mount has claimed
     // the same React ref/container. That stale disposer must not erase the newer GIS button.
