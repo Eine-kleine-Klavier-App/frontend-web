@@ -12,19 +12,11 @@ import { useAuthPrompt } from '@/core/auth/authPrompt';
 import { GoogleSignInButton } from './GoogleSignInButton';
 import { Button } from '@/ui/Button';
 import { ChoiceGroup } from '@/ui/ChoiceGroup';
-import { BrandMark, CloseIcon, EditIcon, LibraryIcon, PracticeIcon } from '@/ui/icons';
+import { BrandMark, CloseIcon } from '@/ui/icons';
 import { lift, springSmooth, springSnappy } from '@/styles/motion';
 import { errorMessage } from '@/core/errorMessage';
 
 type Step = 'choose' | 'username';
-
-// What signing in unlocks — fills the modal with a real reason to sign in instead of empty space,
-// in the app's own icon family (no emoji, per DESIGN.md).
-const BENEFITS: { Icon: () => JSX.Element; text: string }[] = [
-  { Icon: EditIcon, text: 'Create and edit your own scores' },
-  { Icon: LibraryIcon, text: 'Save and organize your library' },
-  { Icon: PracticeIcon, text: 'Track your progress over time' },
-];
 
 const FOCUSABLE_SELECTOR = [
   'a[href]',
@@ -231,29 +223,17 @@ export function LoginModal() {
           >
             {step === 'choose' ? (
               <>
-                <div className="auth-modal-head">
+                <div className="auth-modal-head auth-modal-head--compact">
                   <div className="auth-modal-mark" aria-hidden="true">
                     <BrandMark />
                   </div>
-                  <h2 id="auth-modal-title" className="auth-modal-title">
-                    Sign in to keep your work
-                  </h2>
-                  <p className="auth-modal-sub">
-                    Browsing stays open to everyone — sign in only when you want to make something.
-                  </p>
+                  <div>
+                    <h2 id="auth-modal-title" className="auth-modal-title">Your account</h2>
+                    <p className="auth-modal-sub">Save and edit your scores.</p>
+                  </div>
                 </div>
-                <ul className="auth-benefits">
-                  {BENEFITS.map(({ Icon, text }) => (
-                    <li key={text} className="auth-benefit">
-                      <span className="auth-benefit-icon" aria-hidden="true">
-                        <Icon />
-                      </span>
-                      <span>{text}</span>
-                    </li>
-                  ))}
-                </ul>
                 <form
-                  className="auth-form"
+                  className="auth-form auth-form--password"
                   onSubmit={(e) => {
                     e.preventDefault();
                     void submitPassword();
@@ -272,36 +252,34 @@ export function LoginModal() {
                       { value: 'register', label: 'Create account' },
                     ]}
                   />
-                  <label className="auth-field-label" htmlFor="auth-login-name">
-                    Username
-                  </label>
-                  <input
-                    id="auth-login-name"
-                    className="auth-field"
-                    type="text"
-                    value={loginName}
-                    onChange={(e) => setLoginName(e.target.value)}
-                    maxLength={64}
-                    autoComplete="username"
-                    disabled={busy}
-                  />
-                  <label className="auth-field-label" htmlFor="auth-login-password">
-                    Password
-                  </label>
-                  <input
-                    id="auth-login-password"
-                    className="auth-field"
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder={mode === 'register' ? `At least ${PASSWORD_MIN_LENGTH} characters` : undefined}
-                    maxLength={128}
-                    autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
-                    disabled={busy}
-                  />
-                  <p className={'auth-modal-error' + (error ? '' : ' auth-modal-error--idle')} role="alert">
-                    {error ?? '\u00a0'}
-                  </p>
+                  <div className="auth-credential-field">
+                    <label className="auth-field-label" htmlFor="auth-login-name">Username</label>
+                    <input
+                      id="auth-login-name"
+                      className="auth-field"
+                      type="text"
+                      value={loginName}
+                      onChange={(e) => setLoginName(e.target.value)}
+                      maxLength={64}
+                      autoComplete="username"
+                      disabled={busy}
+                    />
+                  </div>
+                  <div className="auth-credential-field">
+                    <label className="auth-field-label" htmlFor="auth-login-password">Password</label>
+                    <input
+                      id="auth-login-password"
+                      className="auth-field"
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder={mode === 'register' ? `At least ${PASSWORD_MIN_LENGTH} characters` : undefined}
+                      maxLength={128}
+                      autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+                      disabled={busy}
+                    />
+                  </div>
+                  {error && <p className="auth-modal-error" role="alert">{error}</p>}
                   <Button variant="primary" type="submit" disabled={busy || !canSubmitPassword}>
                     {mode === 'register' ? 'Create account' : 'Sign in'}
                   </Button>
