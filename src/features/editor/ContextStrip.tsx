@@ -1,13 +1,15 @@
 import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { glassSettleMotion, lift, springSettle } from '@/styles/motion';
-import { useEditor } from '@/app/store';
+import { useEditor, type BeamShare } from '@/app/store';
 import { CheckIcon, ChevronDownIcon, MinusIcon, PlusIcon } from '@/ui/icons';
 import { ChoiceGroup, ChoiceThumb } from '@/ui/ChoiceGroup';
 import { useDismiss } from '@/ui/useDismiss';
 import { DEFAULT_VOICE_COLORS, resolveVoiceColor } from '@/core/model/voiceColors';
 import { voiceCarrierIds, orderedVoiceCarrierIds } from '@/core/model/query';
 import { PitchModePrompt } from './PitchModePrompt';
+import { VoiceColorField } from '@/ui/VoiceColorField';
+import { VoiceColorSliders } from '@/ui/VoiceColorSliders';
 
 function staffLabel(staffOrder: string[], id: string): string {
   const i = staffOrder.indexOf(id);
@@ -15,6 +17,14 @@ function staffLabel(staffOrder: string[], id: string): string {
   if (i === 1) return 'Lower';
   return `Staff ${i + 1}`;
 }
+
+const BEAM_OPTIONS = [
+  { value: 'off', label: 'Off', title: 'No automatic beams' },
+  { value: 'quarter', label: '¼', title: 'A beam holds a quarter of the measure' },
+  { value: 'half', label: '½', title: 'A beam holds half of the measure' },
+  { value: 'whole', label: 'Bar', title: 'A beam holds the whole measure' },
+];
+const BEAM_LABELS: Record<BeamShare, string> = { off: 'No beams', quarter: 'Beams of ¼ bar', half: 'Beams of ½ bar', whole: 'Beams of a bar' };
 
 const POLICIES = [
   { value: 'ask', label: 'Ask first', hint: 'Choose each time an edit changes how notes read.' },
@@ -55,6 +65,8 @@ export function ContextStrip({ readOnly = false }: { readOnly?: boolean }) {
   const zoom = useEditor((s) => s.zoom);
   const setZoom = useEditor((s) => s.setZoom);
   const setPolicy = useEditor((s) => s.setPitchPolicy);
+  const beamShare = useEditor((s) => s.beamShare);
+  const setBeamShare = useEditor((s) => s.setBeamShare);
   const policyMenuOpen = useEditor((s) => s.policyMenuOpen);
   const setPolicyMenuOpen = useEditor((s) => s.setPolicyMenuOpen);
   const asking = useEditor((s) => s.pitchModeRequest !== null);
@@ -65,7 +77,10 @@ export function ContextStrip({ readOnly = false }: { readOnly?: boolean }) {
   const policyRef = useRef<HTMLDivElement>(null);
   const policyMenuId = useId();
 
-  useDismiss(voiceMenuOpen, [voiceRef, voiceRowRef], () => setVoiceMenuOpen(false));
+  const closeVoiceMenu = () => {
+    setVoiceMenuOpen(false);
+  };
+  useDismiss(voiceMenuOpen, [voiceRef, voiceRowRef], closeVoiceMenu);
   useDismiss(policyMenuOpen, [policyRef], () => setPolicyMenuOpen(false));
 
   useEffect(() => {
@@ -94,6 +109,7 @@ export function ContextStrip({ readOnly = false }: { readOnly?: boolean }) {
   const voice = doc.voices[currentVoice];
   const voiceColor = voice ? resolveVoiceColor(voice.id, voice.index, voiceColors) : '';
   const policyLabel = POLICIES.find((p) => p.value === policy)?.label ?? '';
+  const beamLabel = BEAM_LABELS[beamShare];
 
   return (
     <div className="context-strip">
@@ -131,7 +147,11 @@ export function ContextStrip({ readOnly = false }: { readOnly?: boolean }) {
             aria-haspopup="dialog"
             aria-expanded={voiceMenuOpen}
             disabled={!voice}
-            onClick={() => { setPolicyMenuOpen(false); setVoiceMenuOpen((v) => !v); }}
+            onClick={() => {
+              setPolicyMenuOpen(false);
+              if (voiceMenuOpen) closeVoiceMenu();
+              else setVoiceMenuOpen(true);
+            }}
           >
             <ChevronDownIcon />
           </button>
@@ -141,18 +161,19 @@ export function ContextStrip({ readOnly = false }: { readOnly?: boolean }) {
           <button
             type="button"
             className="strip-chip"
-            title="How an edit that changes how notes read treats them: a clef, an octave line, a note moved to another staff"
+            title="How edits treat the notes: when a clef, an octave line or a staff changes how they read, and how new notes are beamed"
             aria-haspopup="menu"
             aria-expanded={policyMenuOpen || asking}
             aria-controls={policyMenuId}
-            onClick={() => { if (asking) return; setVoiceMenuOpen(false); setPolicyMenuOpen(!policyMenuOpen); }}
+            onClick={() => { if (asking) return; closeVoiceMenu(); setPolicyMenuOpen(!policyMenuOpen); }}
           >
-            <span className="strip-chip-label">Staff changes</span> <b>{policyLabel}</b>
+            <span className="strip-chip-label">Editing</span> <b>{policyLabel} · {beamLabel}</b>
             <ChevronDownIcon />
           </button>
           <AnimatePresence>
             {policyMenuOpen && !asking && (
-              <GlassMenu className="strip-menu--policy" label="When notes change">
+              <GlassMenu className="strip-menu--policy" label="Editing">
+                <span className="strip-menu-label">When notes change</span>
                 <div id={policyMenuId} role="menu">
                   {POLICIES.map((p) => (
                     <button
@@ -167,6 +188,11 @@ export function ContextStrip({ readOnly = false }: { readOnly?: boolean }) {
                       <CheckIcon />
                     </button>
                   ))}
+                </div>
+                <span className="strip-menu-label">Beam new notes</span>
+                <div className="strip-menu-beam">
+                  <ChoiceGroup value={beamShare} onChange={(v) => setBeamShare(v as BeamShare)} options={BEAM_OPTIONS} ariaLabel="Part of a measure under a beam" />
+                  <small>Eighths and shorter notes entered one after another join a beam until it holds this much of the measure.</small>
                 </div>
               </GlassMenu>
             )}
@@ -207,8 +233,8 @@ export function ContextStrip({ readOnly = false }: { readOnly?: boolean }) {
               onClick={() => {
                 // carrier granularity, not note granularity: every carrier of the voice is selected as a whole,
                 // like a double-click or the arrow keys do ([[note-vs-carrier-selection-granularity]])
-                selectMany(voiceCarrierIds(doc, voice.id), false, orderedVoiceCarrierIds(doc, voice.id));
-                setVoiceMenuOpen(false);
+                selectMany(voiceCarrierIds(doc, voice.id), false, orderedVoiceCarrierIds(doc, voice.id), [], { scroll: false });
+                closeVoiceMenu();
               }}
             >
               Select all notes
@@ -230,6 +256,12 @@ export function ContextStrip({ readOnly = false }: { readOnly?: boolean }) {
                 </button>
               ))}
             </div>
+            <VoiceColorField value={voiceColor} label={`Voice ${voice.index + 1}`} onChange={(c) => setVoiceColor(voice.id, c)} />
+            <VoiceColorSliders
+              key={voice.id}
+              value={voiceColor}
+              onChange={(hex) => setVoiceColor(voice.id, hex)}
+            />
           </motion.div>
         )}
       </AnimatePresence>
