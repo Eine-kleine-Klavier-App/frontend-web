@@ -23,6 +23,8 @@ export type Command =
       staffStep: number;
       accidental?: string | null;
       fingering?: number;
+      /** the part of a measure a beam holds before the next note begins another, as a fraction (0: no automatic beams); dispatch fills it from the editor's setting */
+      beamShare?: { numerator: number; denominator: number };
     }
   /** mixed multi-select delete — whole carriers AND individual notes-out-of-chords — all removed
    *  in ONE backend gesture (one transaction, one undo entry). This is what makes a single Delete
