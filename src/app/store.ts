@@ -8,6 +8,7 @@ import { toBeats } from '@/core/model/contexts';
 import { carrierIdOf, chordNoteIds, contentSelection, contextContentSelection, measureContentSelection, withGraces } from '@/core/model/query';
 import { parseMark } from '@/core/model/markTools';
 import { parseTool } from '@/core/model/insertItems';
+import { parseHexColor } from '@/core/model/voiceColors';
 import type { Command } from '@/core/commands/command';
 import type { EditorGateway } from '@/core/gateway/EditorGateway';
 import { HttpGateway } from '@/core/gateway/HttpGateway';
@@ -64,6 +65,25 @@ function saveList(key: string, value: unknown) {
   }
 }
 const PITCH_POLICY_KEY = 'editor.pitchPolicy';
+const BEAM_SHARE_KEY = 'editor.beamShare';
+const VOICE_COLORS_KEY = 'editor.voiceColors';
+
+function loadVoiceColors(): Record<string, string> {
+  const saved = loadList(VOICE_COLORS_KEY);
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) return {};
+  return Object.fromEntries(Object.entries(saved).flatMap(([voiceId, value]) => {
+    const color = typeof value === 'string' ? parseHexColor(value) : null;
+    return color === null ? [] : [[voiceId, color]];
+  }));
+}
+/** how much of a measure a beam holds, as a fraction of it: nothing, a quarter, a half, all of it */
+export const BEAM_SHARES = [
+  { key: 'off', numerator: 0, denominator: 1 },
+  { key: 'quarter', numerator: 1, denominator: 4 },
+  { key: 'half', numerator: 1, denominator: 2 },
+  { key: 'whole', numerator: 1, denominator: 1 },
+] as const;
+export type BeamShare = (typeof BEAM_SHARES)[number]['key'];
 function loadSlots(): (Tool | null)[] {
   const raw = loadList('editor.hotbarSlots');
   if (!Array.isArray(raw) || raw.length !== HOTBAR_SLOT_COUNT) return DEFAULT_SLOTS;
@@ -123,6 +143,9 @@ interface EditorState {
   /** How an edit that changes how notes read (a clef, an octave line, a note moved to another staff) is treated: asked each time, or always the same. Kept in the browser. */
   pitchPolicy: 'ask' | PitchMode;
   setPitchPolicy: (policy: 'ask' | PitchMode) => void;
+  /** how much of a measure a beam entered by hand holds before the next note begins another; off beams nothing. Kept in the browser. */
+  beamShare: BeamShare;
+  setBeamShare: (share: BeamShare) => void;
   /** an edit waiting for the user's choice of mode: the prompt under the strip's policy chip answers it */
   pitchModeRequest: { resolve: (mode: PitchMode | null) => void; command: Command } | null;
   resolvePitchMode: (mode: PitchMode | null) => void;
@@ -233,6 +256,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   pitchMode: 'preserve_pitch',
   pitchPolicy: (() => { const raw = loadList(PITCH_POLICY_KEY); return raw === 'preserve_pitch' || raw === 'preserve_step' ? raw : 'ask'; })(),
   setPitchPolicy: (policy) => { saveList(PITCH_POLICY_KEY, policy); set({ pitchPolicy: policy }); },
+  beamShare: (() => { const raw = loadList(BEAM_SHARE_KEY); return BEAM_SHARES.find((share) => share.key === raw)?.key ?? 'half'; })(),
+  setBeamShare: (share) => { saveList(BEAM_SHARE_KEY, share); set({ beamShare: share }); },
   pitchModeRequest: null,
   resolvePitchMode: (mode) => {
     const request = get().pitchModeRequest;
@@ -258,7 +283,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   playbackLocked: false,
   currentStaff: '',
   currentVoice: 0,
-  voiceColors: {},
+  voiceColors: loadVoiceColors(),
   stemOverrides: {},
   gateway,
 
@@ -312,6 +337,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (mode === null || get().source?.kind === 'saved' || get().locked || get().source !== source || get().scoreId !== scoreId || get().document !== before) return;
       command = { ...command, mode };
       noticeMode = asked || forcedMode ? null : mode;
+    }
+    if (command.type === 'insertNote' && command.beamShare === undefined) {
+      const share = BEAM_SHARES.find((entry) => entry.key === get().beamShare)!;
+      command = { ...command, beamShare: { numerator: share.numerator, denominator: share.denominator } };
     }
     const event = { draftId: scoreId, command, before };
     publishEdit({ ...event, phase: 'start' });
@@ -566,6 +595,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       const voiceColors = { ...s.voiceColors };
       if (color === null) delete voiceColors[voiceId];
       else voiceColors[voiceId] = color;
+      saveList(VOICE_COLORS_KEY, voiceColors);
       return { voiceColors };
     }),
 
