@@ -78,5 +78,5 @@ function StaffBar({ staffId, color, left, top, width, height }: { staffId: strin
     });
     return () => flight.stop();
   }, [staffId, left, top, width, height, reduce]);
-  return <div ref={ref} className="staff-marker" aria-hidden="true" style={{ left, top, width, height, '--vc': color } as CSSProperties} />;
+  return <div ref={ref} className="staff-marker" aria-hidden="true" style={{ left, top, width, height, '--voice-color': color } as CSSProperties} />;
 }
