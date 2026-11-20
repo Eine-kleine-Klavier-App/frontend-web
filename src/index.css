@@ -699,9 +699,65 @@ button.back-link {
   inset: 0;
   overflow: hidden;
   background: var(--color-backdrop);
-  transform-origin: 50% 0;
-  backface-visibility: hidden;
-  will-change: transform, opacity;
+  opacity: 0;
+}
+.page-transition-layer[data-layer='base'] { z-index: 1; opacity: 1; }
+.page-transition-layer[data-layer='reveal'],
+.page-transition-layer[data-layer='reverse'] { z-index: 2; pointer-events: none; }
+.page-transition-layer[data-layer='pending'] { pointer-events: none; }
+.workspace-transition, .workspace-route-content { position: relative; width: 100%; height: 100%; }
+.workspace-transition-cover {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--z-toast) + 1);
+  background: var(--color-backdrop);
+  opacity: 0;
+  pointer-events: none;
+}
+.workspace-transition-cover[data-covering='true'] { pointer-events: auto; }
+.workspace-transition > .screen-transition-status { z-index: calc(var(--z-toast) + 2); }
+.editor-view-transition {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--z-chrome) - 1);
+  pointer-events: none;
+}
+.screen-transition-status {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  opacity: 0;
+}
+.screen-transition-chip {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-radius: var(--radius-md);
+  color: var(--color-ink);
+  background: var(--color-surface-raised);
+  box-shadow: var(--elev-float);
+  font-size: var(--text-sm);
+}
+.screen-transition-dots { display: flex; gap: var(--space-2); }
+.screen-transition-dots i {
+  width: var(--space-2);
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: currentColor;
+  animation: screen-transition-pulse 900ms ease-in-out infinite;
+}
+.screen-transition-dots i:nth-child(2) { animation-delay: -600ms; }
+.screen-transition-dots i:nth-child(3) { animation-delay: -300ms; }
+@keyframes screen-transition-pulse {
+  0%, 100% { opacity: .32; }
+  50% { opacity: 1; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .screen-transition-dots i { animation: none; opacity: .8; }
 }
 .app-nav {
   flex-shrink: 0;
