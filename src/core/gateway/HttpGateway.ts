@@ -60,6 +60,7 @@ export class HttpGateway implements EditorGateway {
               staff_step: command.staffStep,
               accidental: command.accidental ?? null,
               fingering: command.fingering ?? 0,
+              ...(command.beamShare === undefined ? {} : { beam_share: command.beamShare }),
             }),
           }),
         );
