@@ -1,5 +1,5 @@
-import { useLayoutEffect } from 'react';
-import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams } from 'react-router-dom';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
+import { BrowserRouter, Navigate, Route, Routes, useLocation, useNavigate, useParams, type Location } from 'react-router-dom';
 import { AppShell } from '@/app/AppShell';
 import { LoginModalHost } from '@/features/auth/LoginModalHost';
 import ExploreScreen from '@/features/explore/ExploreScreen';
@@ -12,12 +12,15 @@ import YouScreen from '@/features/browse/YouScreen';
 import { useAuthStore } from '@/core/auth/authStore';
 import { useAuthPrompt } from '@/core/auth/authPrompt';
 import { withPreview } from '@/features/browse/previewRoute';
-import { PageTransition } from '@/ui/PageTransition';
+import { PageReadinessScope, PageTransition, TransitionLoading, usePageReady, usePageTransitionPhase, useScreenOpacity } from '@/ui/PageTransition';
 
 function RootRoute() {
   const status = useAuthStore((state) => state.status);
-  if (status === 'loading') return <div className="browse-loading">Restoring your session…</div>;
-  return <Navigate to={status === 'authed' ? '/library' : '/explore'} replace />;
+  usePageReady(true);
+  return <>
+    <div className="browse-loading">Restoring your session…</div>
+    {status !== 'loading' && <Navigate to={status === 'authed' ? '/library' : '/explore'} replace />}
+  </>;
 }
 
 /** Library is private navigation, not a public screen with a sign-in placeholder. A direct URL
@@ -29,15 +32,16 @@ function LibraryRoute({ draftsOnly = false }: { draftsOnly?: boolean }) {
   const openLogin = useAuthPrompt((state) => state.open);
   const location = useLocation();
   const navigate = useNavigate();
+  const phase = usePageTransitionPhase();
 
   useLayoutEffect(() => {
-    if (status !== 'anonymous' ||
+    if (phase === 'exiting' || status !== 'anonymous' ||
       (location.pathname !== '/library' && !location.pathname.startsWith('/library/'))) return;
     const requestedLibrary = `${location.pathname}${location.search}`;
     const previewId = new URLSearchParams(location.search).get('preview');
     openLogin(() => navigate(requestedLibrary, { replace: true }));
     navigate(withPreview('/explore', previewId), { replace: true });
-  }, [location.pathname, location.search, navigate, openLogin, status]);
+  }, [location.pathname, location.search, navigate, openLogin, phase, status]);
 
   const collectionId = new URLSearchParams(location.search).get(COLLECTION_PARAM);
   if (status === 'authed') {
@@ -57,13 +61,14 @@ function EditorRoute() {
   const openLogin = useAuthPrompt((state) => state.open);
   const location = useLocation();
   const navigate = useNavigate();
+  const phase = usePageTransitionPhase();
 
   useLayoutEffect(() => {
-    if (scoreId || status !== 'anonymous') return;
+    if (phase === 'exiting' || scoreId || status !== 'anonymous') return;
     const requestedEditor = `${location.pathname}${location.search}`;
     openLogin(() => navigate(requestedEditor, { replace: true }));
     navigate('/explore', { replace: true });
-  }, [location.pathname, location.search, navigate, openLogin, status, scoreId]);
+  }, [location.pathname, location.search, navigate, openLogin, phase, status, scoreId]);
 
   return scoreId || status === 'authed' ? <EditorScreen /> : null;
 }
@@ -94,33 +99,93 @@ function LiquidGlassDefs() {
   );
 }
 
-/** Top-level route tree. Explore/Library sit inside AppShell's nav chrome (a layout route —
- *  `<Outlet/>` renders whichever of the two is active). The editor is a SIBLING route, not
- *  nested under AppShell — it's a screen you're pushed into by draft id, not a persistent tab,
- *  and keeps its own existing chrome untouched (see AppShell.tsx). */
+function renderBrowseRoutes(location: Location) {
+  return (
+    <Routes location={location}>
+      <Route path="/" element={<RootRoute />} />
+      <Route path="/explore" element={<ExploreScreen />} />
+      <Route path="/library" element={<LibraryRoute />} />
+      <Route path="/library/drafts" element={<LibraryRoute draftsOnly />} />
+      <Route path="/authors/:authorId" element={<AuthorProfileScreen />} />
+      <Route path="/you" element={<YouScreen />} />
+      <Route path="*" element={<RootRoute />} />
+    </Routes>
+  );
+}
+
+/** The score store and playback binding belong to one editor. Cover its painted
+ * surface before changing the route it reads, then unveil the replacement. */
+function WorkspaceRoutes({ location }: { location: Location }) {
+  const phase = usePageTransitionPhase();
+  const [held, setHeld] = useState(location);
+  const [handoff, setHandoff] = useState(false);
+  const [coverOpaque, setCoverOpaque] = useState(false);
+  const [readyPath, setReadyPath] = useState<string | null>(null);
+  const cover = useRef<HTMLDivElement>(null);
+  const content = useRef<HTMLDivElement>(null);
+  const different = held.pathname !== location.pathname;
+  const routed = different && phase !== 'entering' ? held : location;
+  const ready = readyPath === routed.pathname;
+  const waiting = different || (handoff && !ready);
+  const covered = (phase === 'settled' && waiting) || (phase === 'exiting' && handoff);
+  const blocked = phase !== 'settled' || waiting || handoff;
+  const report = useCallback((painted: boolean) => {
+    setReadyPath(previous => painted ? routed.pathname : previous === routed.pathname ? null : previous);
+  }, [routed.pathname]);
+
+  usePageReady(ready && !different);
+  useLayoutEffect(() => {
+    if (phase === 'entering' && different) setHeld(location);
+  }, [phase, different, location]);
+  useLayoutEffect(() => { if (content.current) content.current.inert = blocked; }, [blocked]);
+  useLayoutEffect(() => {
+    if (!covered) setCoverOpaque(false);
+    else if (coverOpaque && different && phase === 'settled') {
+      setHandoff(true);
+      setHeld(location);
+    }
+  }, [coverOpaque, covered, different, location, phase]);
+  useScreenOpacity(cover, covered ? 1 : 0, () => {
+    if (covered) setCoverOpaque(true);
+    else if (handoff && ready) setHandoff(false);
+  });
+
+  return (
+    <div className="workspace-transition">
+      <PageReadinessScope phase={phase === 'settled' && (waiting || handoff) ? 'entering' : phase} onReady={report}>
+        <div className="workspace-route-content" ref={content}>
+          <Routes location={routed}>
+            <Route path="/scores/:scoreId" element={<EditorRoute />} />
+            <Route path="/edit/:draftId" element={<EditorRoute />} />
+          </Routes>
+        </div>
+      </PageReadinessScope>
+      <div ref={cover} className="workspace-transition-cover" data-covering={covered || handoff} aria-hidden="true" />
+      <TransitionLoading waiting={phase === 'settled' && waiting} label="Opening score…" />
+    </div>
+  );
+}
+
+/** The workspace keeps one route layer for both drafts and saved scores. Browse
+ * owns a second transition inside its persistent shell. */
 function RoutedApp() {
   const location = useLocation();
   // Browse views animate inside AppShell so its navigation remains persistent. Crossing the
   // browse/editor boundary replaces the whole application surface with the same default
   // lifecycle. Auth stays outside this layer and owns its separate welcome/reveal sequence.
-  const routeFamily = (location.pathname.startsWith('/edit/') || location.pathname.startsWith('/scores/')) ? 'editor' : 'browse';
+  const routeFamily = /^\/(?:edit|scores)\/[^/]+\/?$/i.test(location.pathname) ? 'editor' : 'browse';
+  const collection = location.pathname === '/library' ? new URLSearchParams(location.search).get(COLLECTION_PARAM) : null;
+  const requestKey = collection ? `${location.pathname}:${collection}` : location.pathname;
 
   return (
     <>
       <LiquidGlassDefs />
-      <PageTransition transitionKey={routeFamily} className="route-transition-root">
-        <Routes location={location}>
-          <Route element={<AppShell />}>
-            <Route path="/" element={<RootRoute />} />
-            <Route path="/explore" element={<ExploreScreen />} />
-            <Route path="/library" element={<LibraryRoute />} />
-            <Route path="/library/drafts" element={<LibraryRoute draftsOnly />} />
-            <Route path="/authors/:authorId" element={<AuthorProfileScreen />} />
-            <Route path="/you" element={<YouScreen />} />
-          </Route>
-          <Route path="/scores/:scoreId" element={<EditorRoute />} />
-          <Route path="/edit/:draftId" element={<EditorRoute />} />
-        </Routes>
+      <PageTransition transitionKey={routeFamily} requestKey={requestKey} className="route-transition-root">
+        {routeFamily === 'editor' ? <WorkspaceRoutes location={location} /> : (
+          <Routes location={location}>
+            <Route path="*" element={<AppShell renderOutlet={renderBrowseRoutes} />} />
+          </Routes>
+        )}
       </PageTransition>
       {/* Mounted outside <Routes> so the login modal survives across route trees (browse shell and
           the sibling editor) — any surface can prompt sign-in without owning the modal. */}

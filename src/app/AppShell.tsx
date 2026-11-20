@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { animate, useReducedMotion } from 'motion/react';
-import { useLocation, useOutlet, useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams, type Location } from 'react-router-dom';
 import { BrandMark } from '@/ui/icons';
 import { PreviewPanel } from '@/features/browse/PreviewPanel';
 import { NowPlayingBar } from '@/features/browse/NowPlayingBar';
@@ -8,7 +8,7 @@ import { createSavedScorePlayback } from '@/core/playback/SavedScorePlayback';
 import { useAuthStore } from '@/core/auth/authStore';
 import { ScopedSearch } from '@/features/browse/ScopedSearch';
 import { SEARCH_PROMPT_ERASE_MS, SEARCH_PROMPT_TYPE_MS } from '@/styles/motion';
-import { PageTransition } from '@/ui/PageTransition';
+import { PageTransition, usePageTransitionPhase } from '@/ui/PageTransition';
 import { RailNav } from '@/app/RailNav';
 import { COLLECTION_PARAM } from '@/features/library/collectionParam';
 import { useAuthSceneTransitionActive } from '@/features/auth/authSceneTransition';
@@ -89,9 +89,9 @@ function useTypedSearchPrompt(scope: string | null): { visiblePrompt: string; ty
 }
 
 /** Shared browse navigation, search and score preview. The editor remains a sibling route. */
-export function AppShell() {
+export function AppShell({ renderOutlet }: { renderOutlet: (location: Location) => ReactNode }) {
   const location = useLocation();
-  const outlet = useOutlet();
+  const phase = usePageTransitionPhase();
   const [searchParams, setSearchParams] = useSearchParams();
   const [previewPanelMoving, setPreviewPanelMoving] = useState(false);
   const [nowPlayingMoving, setNowPlayingMoving] = useState(false);
@@ -100,9 +100,11 @@ export function AppShell() {
     void transport.prepare().catch(() => {});
     return () => transport.dispose();
   }, [transport]);
+  useLayoutEffect(() => { if (phase === 'exiting') transport.stop(); }, [phase, transport]);
   const authSceneTransitionActive = useAuthSceneTransitionActive();
   const isLibrary = location.pathname.startsWith('/library');
   const isDrafts = location.pathname === '/library/drafts';
+  const collectionKey = location.pathname === '/library' ? searchParams.get(COLLECTION_PARAM) : null;
   const authStatus = useAuthStore((s) => s.status);
   const authed = authStatus === 'authed';
   const userId = useAuthStore((s) => s.userId);
@@ -181,23 +183,21 @@ export function AppShell() {
         <RailNav />
       </nav>
       <main className="app-shell-content">
-        {searchScope && (
-          <div className="shell-topbar">
-            <ScopedSearch
-              value={q}
-              onChange={setQ}
-              scope={searchScope}
-              visiblePrompt={typedSearchPrompt.visiblePrompt}
-              typing={typedSearchPrompt.typing}
-            />
-          </div>
-        )}
+        <div className="shell-topbar" data-search-hidden={!searchScope}>
+          <ScopedSearch
+            value={q}
+            onChange={setQ}
+            scope={searchScope ?? ''}
+            visiblePrompt={typedSearchPrompt.visiblePrompt}
+            typing={typedSearchPrompt.typing}
+          />
+        </div>
         <PageTransition
-          transitionKey={location.pathname}
+          transitionKey={collectionKey ? `${location.pathname}:${collectionKey}` : location.pathname}
           className="shell-outlet"
           disabled={authSceneTransitionActive}
         >
-          {outlet}
+          {renderOutlet(location)}
         </PageTransition>
         <NowPlayingBar transport={transport} hidden={panelOpen} onMotionChange={setNowPlayingMoving} />
       </main>
