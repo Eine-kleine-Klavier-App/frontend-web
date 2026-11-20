@@ -1,4 +1,5 @@
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { usePageReady } from '@/ui/PageTransition';
 import { plateTintClass } from './plateTint';
 import { useAuthStore } from '@/core/auth/authStore';
 import { AccountSecurity } from '@/features/auth/AccountSecurity';
@@ -20,6 +21,7 @@ export default function YouScreen() {
   const { data: scores } = useBrowseQuery(
     'private', BROWSE_QUERY_KEYS.myScores, () => libraryGateway.listMyScores(), authStatus === 'authed',
   );
+  usePageReady(authStatus !== 'loading');
   const previewId = searchParams.get('preview');
   const displayName = username ?? 'You';
   const handleSignOut = () => runAuthSceneTransition('sign-out', () => {

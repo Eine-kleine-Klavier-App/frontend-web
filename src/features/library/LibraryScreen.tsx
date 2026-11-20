@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { usePageReady } from '@/ui/PageTransition';
 import { createPortal } from 'react-dom';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { libraryGateway } from '@/core/gateway/defaultLibraryGateway';
@@ -95,6 +96,8 @@ export default function LibraryScreen({ draftsOnly = false }: { draftsOnly?: boo
   const { data: scores, status: scoresStatus, error: scoresError } = useBrowseQuery(
     'private', BROWSE_QUERY_KEYS.myScores, () => libraryGateway.listMyScores(), authed && !draftsOnly,
   );
+  usePageReady(authed && (drafts !== null || draftsStatus === 'error') &&
+    (draftsOnly || scores !== null || scoresStatus === 'error'));
   const previewId = searchParams.get('preview');
   const query = searchParams.get('q')?.trim().toLocaleLowerCase() ?? '';
   const recentDrafts = useMemo(() => [...(drafts ?? [])].sort((a, b) =>

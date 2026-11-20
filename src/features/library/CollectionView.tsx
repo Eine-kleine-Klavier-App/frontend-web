@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { usePageReady } from '@/ui/PageTransition';
 import { createPortal } from 'react-dom';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { libraryGateway } from '@/core/gateway/defaultLibraryGateway';
@@ -24,6 +25,8 @@ export default function CollectionView({ collectionId }: { collectionId: string 
   const { data: scores, status: scoresStatus, error: scoresError } = useBrowseQuery(
     'private', scoresKey, () => libraryGateway.listCollectionScores(collectionId), collection !== null,
   );
+  usePageReady(collectionsStatus === 'error' ||
+    (collections !== null && (!collection || scores !== null || scoresStatus === 'error')));
   const previewId = searchParams.get('preview');
   const query = searchParams.get('q')?.trim().toLocaleLowerCase() ?? '';
   const visibleScores = useMemo(() => (scores ?? []).filter((score) =>
