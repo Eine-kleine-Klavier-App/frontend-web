@@ -2964,10 +2964,17 @@ body[data-auth-scene] #root {
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-3);
 }
+.auth-modal:has(.auth-modal-head--compact) {
+  padding-top: var(--space-6);
+}
 .auth-modal-close {
   position: absolute;
   top: var(--space-3);
   right: var(--space-3);
+}
+.auth-modal:has(.auth-modal-head--compact) .auth-modal-close {
+  top: var(--space-4);
+  right: var(--space-4);
 }
 .auth-modal-head {
   margin-bottom: var(--space-5);
