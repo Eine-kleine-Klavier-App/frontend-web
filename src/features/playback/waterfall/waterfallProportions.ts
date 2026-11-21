@@ -9,5 +9,5 @@ export const KEY_RANGE = { min: 21, max: 108 } as const;
 export const NATURAL_PITCH_CLASSES: readonly number[] = [0, 2, 4, 5, 7, 9, 11];
 
 /** A black key's width relative to a white key's. */
-export const BLACK_KEY_WIDTH = 0.59;
+export const BLACK_KEY_WIDTH = 0.56;
 

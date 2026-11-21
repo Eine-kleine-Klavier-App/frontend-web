@@ -14,8 +14,8 @@
   /* The waterfall's canvas paint — the same in both themes (the roll is always lit at night). Read
      once by the scene (features/playback/waterfall/waterfallPalette.ts); alphas stay in the code. */
   --waterfall-bed: #100e19; /* the floor under the roll */
-  --waterfall-strip-default: #26183f; /* the keyboard strip light until one is picked */
-  --waterfall-strip-base: #07070a; /* the strip where its light does not reach */
+  --waterfall-strip-default: #ffffff; /* the keyboard strip light until one is picked */
+  --waterfall-strip-base: #080808; /* the strip where its light does not reach */
   --waterfall-rail-top: #292830; /* the rail under the keys, top to bottom */
   --waterfall-rail-upper: #211e28;
   --waterfall-rail-lower: #08070d;
@@ -33,9 +33,9 @@
   --waterfall-burn-hot: #fff9ff;
   --waterfall-burn-white: #fffbff;
   --waterfall-core-light: #faf4ff; /* the white of the hottest spots */
-  --waterfall-crest-idle: #aaa8cd; /* the crest over the keys where nothing sounds */
+  --waterfall-crest-idle: #ffffff; /* the crest over the keys where nothing sounds */
   --waterfall-crest-glow: #baa4da; /* the crest's soft outline */
-  --waterfall-crest-line: #f5edff; /* its bright edge */
+  --waterfall-crest-line: #ffffff; /* its bright edge */
   --waterfall-footprint: #f9f4ff; /* a struck key's footprint on the crest, rising to white */
   --waterfall-footprint-white: #fefbff;
   --waterfall-grain: #b2a2db; /* a dust grain, centre to edge */
