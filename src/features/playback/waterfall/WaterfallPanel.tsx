@@ -3,6 +3,7 @@ import { useEditor } from '@/app/store';
 import { DEFAULT_VOICE_COLORS, resolveVoiceColor } from '@/core/model/voiceColors';
 import { ChoiceGroup, ChoiceThumb } from '@/ui/ChoiceGroup';
 import { RangeField } from '@/ui/RangeField';
+import { VoiceColorField } from '@/ui/VoiceColorField';
 import { voiceRamp, rgba } from './waterfallPalette';
 import { ListeningControls } from '../ListeningControls';
 import { WATERFALL_SKIES, type WaterfallSky } from './WaterfallStage';
@@ -26,6 +27,8 @@ export function WaterfallPanel({
   onOctaveLines,
   measureLines,
   onMeasureLines,
+  backgroundDust,
+  onBackgroundDust,
 }: {
   listening?: boolean;
   sky: WaterfallSky;
@@ -38,6 +41,8 @@ export function WaterfallPanel({
   onOctaveLines: (visible: boolean) => void;
   measureLines: boolean;
   onMeasureLines: (visible: boolean) => void;
+  backgroundDust: boolean;
+  onBackgroundDust: (visible: boolean) => void;
 }) {
   const measures = useEditor((s) => s.document.measures);
   const voices = useEditor((s) => s.document.voices);
@@ -78,11 +83,11 @@ export function WaterfallPanel({
           onChange={(event) => onTilt(Number(event.target.value) / 100)}
         />
       </section>
-      <section className="waterfall-section" aria-label="Keyboard strip light">
-        <span className="rail-label">Keyboard light</span>
+      <section className="waterfall-section" aria-label="Pedal light">
+        <span className="rail-label">Pedal light</span>
         <label className="waterfall-strip-color">
-          <span>Strip colour</span>
-          <input type="color" value={stripColor} aria-label="Keyboard strip colour" onChange={(event) => onStripColor(event.target.value)} />
+          <span>Base colour</span>
+          <input type="color" value={stripColor} aria-label="Pedal light base colour" onChange={(event) => onStripColor(event.target.value)} />
         </label>
       </section>
       <section className="waterfall-section" aria-label="Voices">
@@ -114,6 +119,7 @@ export function WaterfallPanel({
                   </button>
                 ))}
               </div>
+              <VoiceColorField value={chosen} label={`Voice ${voice.index + 1}`} onChange={(color) => setVoiceColor(voice.id, color)} />
             </div>
           );
         })}
@@ -137,6 +143,7 @@ export function WaterfallPanel({
             </button>
           ))}
         </div>
+        <label className="waterfall-guide"><span>Background dust</span><input type="checkbox" checked={backgroundDust} onChange={(event) => onBackgroundDust(event.target.checked)} /></label>
       </section>
     </div>
   );
