@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { usePageReady } from '@/ui/PageTransition';
 import { useSearchParams } from 'react-router-dom';
 import { libraryGateway } from '@/core/gateway/defaultLibraryGateway';
 import type { ScoreSummary } from '@/core/gateway/LibraryGateway';
@@ -16,6 +17,7 @@ export default function ExploreScreen() {
   const { data: scores, status, error } = useBrowseQuery(
     'public', BROWSE_QUERY_KEYS.publicScores, () => libraryGateway.listPublicScores(),
   );
+  usePageReady(scores !== null || status === 'error');
   const visible = useMemo(() => {
     const q = query.toLocaleLowerCase();
     const matching = q

@@ -1,4 +1,5 @@
 import { useMemo } from 'react';
+import { usePageReady } from '@/ui/PageTransition';
 import { useParams, useSearchParams } from 'react-router-dom';
 import { libraryGateway } from '@/core/gateway/defaultLibraryGateway';
 import type { ScoreSummary } from '@/core/gateway/LibraryGateway';
@@ -22,6 +23,7 @@ export default function AuthorProfileScreen() {
     () => isMe ? libraryGateway.listMyScores() : libraryGateway.listAuthorScores(authorId),
     Boolean(authorId),
   );
+  usePageReady(scores !== null || status === 'error');
   const previewId = searchParams.get('preview');
   const q = searchParams.get('q')?.trim().toLocaleLowerCase() ?? '';
   const visible = useMemo(() => (scores ?? []).filter((score) =>
