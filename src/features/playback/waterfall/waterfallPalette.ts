@@ -1,3 +1,4 @@
+import { hexToHsv, hsvToHex } from '@/core/model/voiceColors';
 import { readCssToken } from '@/ui/cssToken';
 
 export type Rgb = [number, number, number];
@@ -11,10 +12,6 @@ export interface VoiceRamp {
 
 const RGB_MAX = 255;
 const FAR_HUE_SHIFT = 30;
-/** Saturation is full for every stop, so every voice colour glows the same way; only the lightness differs. */
-const NEAR_LIGHTNESS = 0.6;
-const FAR_LIGHTNESS = 0.68;
-const GLOW_LIGHTNESS = 0.695;
 
 export const clamp = (value: number, low: number, high: number): number => Math.min(high, Math.max(low, value));
 
@@ -74,31 +71,10 @@ export function readWaterfallPalette(el: Element): WaterfallPalette {
   };
 }
 
-function fromHsl(hue: number, lightness: number): Rgb {
-  const wrapped = ((hue % 360) + 360) % 360;
-  const chroma = 1 - Math.abs(2 * lightness - 1);
-  const channel = (offset: number) => {
-    const k = (offset + wrapped / 30) % 12;
-    return RGB_MAX * (lightness - (chroma / 2) * Math.max(-1, Math.min(k - 3, 9 - k, 1)));
-  };
-  return [channel(0), channel(8), channel(4)];
-}
-
-/** The ramp of a voice colour given as `#rrggbb`; the hue is the voice's own, so the editor colour and the waterfall colour never drift apart. */
+/** The note and its light use the chosen colour. The far edge turns its hue while retaining saturation and value. */
 export function voiceRamp(hex: string): VoiceRamp {
-  const [red, green, blue] = hexRgb(hex).map((channel) => channel / RGB_MAX);
-  const high = Math.max(red, green, blue);
-  const spread = high - Math.min(red, green, blue);
-  let hue = 0;
-  if (spread > 0) {
-    if (high === red) hue = ((green - blue) / spread) % 6;
-    else if (high === green) hue = (blue - red) / spread + 2;
-    else hue = (red - green) / spread + 4;
-  }
-  const degrees = hue * 60;
-  return {
-    near: fromHsl(degrees, NEAR_LIGHTNESS),
-    far: fromHsl(degrees + FAR_HUE_SHIFT, FAR_LIGHTNESS),
-    glow: fromHsl(degrees, GLOW_LIGHTNESS),
-  };
+  const color = hexRgb(hex);
+  const hsv = hexToHsv(hex);
+  const far = hsvToHex({ ...hsv, hue: (hsv.hue + FAR_HUE_SHIFT) % 360 });
+  return { near: color, far: hexRgb(far), glow: color };
 }
