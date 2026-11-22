@@ -359,7 +359,8 @@ export class ServerPlaybackController implements PlaybackController {
     const at = Math.max(0, Math.min(beats, this.state.totalBeats));
     this.seekRequest?.abort();
     this.seekRequest = null;
-    if (!this.state.playing || this.transportIntent?.running === false) {
+    const resuming = this.state.paused && this.transportIntent?.running === true;
+    if (!resuming && (!this.state.playing || this.transportIntent?.running === false)) {
       const restart = this.state.loading;
       if (restart && (this.state.seekBeats !== null || this.frameBuffer?.active())) {
         void this.startAt(at, true);
