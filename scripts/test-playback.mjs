@@ -164,7 +164,7 @@ let player;
 class Player {
   sampleRate=48000; calls=[]; clock=0;
   constructor(){player=this;}
-  async prepare(){} async unlock(){if(this.unlockGate)await this.unlockGate;} async pause(){} stop(){} dispose(){}
+  async prepare(){} async unlock(){if(this.unlockGate)await this.unlockGate;} async pause(){} async resume(){} stop(){} dispose(){}
   positionMs(){return this.clock;}
   async play(audio,signal,started,start,tick,live,ready){
     const call={signal,start,tick:(ms)=>{fakeNow+=100;tick(ms);},ready:()=>{ready();this.clock=start;started();}};this.calls.push(call);
@@ -195,9 +195,9 @@ firstCall.tick(400);assert.equal(controller.getState().seekBeats,1.5,'slider ret
 releaseSeek();await flush();const replacement=player.calls.at(-1);assert.equal(firstCall.signal.aborted,false,'old source waits for output priming');
 replacement.ready();replacement.tick(1000);await flush();assert.equal(firstCall.signal.aborted,true);assert.equal(controller.getState().playing,true);assert.equal(replacement.start,1000);
 firstCall.tick(50);assert.equal(controller.getState().timeBeats,1.5,'late old ticks cannot rewind new source');
-controller.pause();replacement.tick(1200);assert.equal(controller.getState().paused,true);
+controller.pause();await flush();replacement.tick(1200);assert.equal(controller.getState().paused,true);
 let resumeReady;player.unlockGate=new Promise(resolve=>resumeReady=resolve);
-const resuming=controller.play();assert.equal(controller.getState().playing,true);
+const resuming=controller.play();assert.equal(controller.getState().paused,true);
 controller.seek(1);await flush();assert.equal(replacement.signal.aborted,false,'resume+seek must keep the old source until context readiness');
 resumeReady();await resuming;await flush();const rapidResumeSeek=player.calls.at(-1);rapidResumeSeek.ready();assert.equal(replacement.signal.aborted,true);
 controller.stop();await started;assert.equal(replacement.signal.aborted,true);
@@ -316,7 +316,7 @@ const reader=new ServerPlaybackController({map:async()=>{draftMaps++;return map;
 reader.bindScore('same');reader.setTotalBeats(2);await reader.prepareMap();
 assert.equal(savedMaps,1);assert.equal(draftMaps,0);
 const savedRun=reader.play();await flush();const savedOutput=player.calls.at(-1);savedOutput.ready();savedOutput.tick(500);
-assert.equal(reader.getState().timeBeats,1);reader.pause();assert.equal(reader.getState().paused,true);
+assert.equal(reader.getState().timeBeats,1);reader.pause();await flush();assert.equal(reader.getState().paused,true);
 await reader.play();assert.equal(reader.getState().playing,true);
 assert.equal(savedPreview.source.kind,'saved');
 reader.pause();await reader.previewCarrier('a','same');assert.equal(typeof savedPreview.finish,'function','saved selection uses the same short preview');
@@ -347,7 +347,7 @@ const runListening=listening.play();await flush();let output=player.calls.at(-1)
 listening.setListeningSettings({speed:2,transpose:2},piano);assert.equal(output.signal.aborted,true);await flush();
 output=player.calls.at(-1);assert.equal(output.start,250,'speed replacement preserves musical place');output.ready();
 assert.equal(listening.getState().map.notes[0].pitch,62);assert.equal(listening.getState().timeBeats,1);
-player.clock=500;output.tick(500);listening.pause();
+player.clock=500;output.tick(500);listening.pause();await flush();
 listening.setListeningSettings({speed:.5,transpose:-2},piano);assert.equal(listening.getState().paused,true);
 assert.equal(listening.getState().timeBeats,1.5);const resumedListening=listening.play();await flush();
 output=player.calls.at(-1);assert.equal(output.start,2000,'resume after paused configuration starts from the retained beat');output.ready();
