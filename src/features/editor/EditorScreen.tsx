@@ -1,8 +1,8 @@
 import { selectionInsertTool } from './selectionInsertTool';
 import { UndoIcon, RedoIcon, AlertIcon, CloseIcon, LockIcon, CollapsePanelIcon } from '@/ui/icons';
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { AnimatePresence, animate, motion, useMotionValue, useReducedMotion, useTransform, type AnimationPlaybackControls, type MotionStyle } from 'motion/react';
-import { lift, reducedFade, settleMotion, springGentle, springSmooth, springSnappy, useSidePanelMotion } from '@/styles/motion';
+import { AnimatePresence, motion, useMotionValue, useReducedMotion, useTransform, type MotionStyle } from 'motion/react';
+import { reducedFade, settleMotion, springSnappy, useSidePanelMotion } from '@/styles/motion';
 import { ChoiceGroup } from '@/ui/ChoiceGroup';
 import { useParams } from 'react-router-dom';
 import { useAuthStore } from '@/core/auth/authStore';
@@ -15,7 +15,7 @@ import { SelectionInfo } from './SelectionInfo';
 import { PropertiesPanel } from '@/features/editor/PropertiesPanel';
 import { ListeningControls } from '@/features/playback/ListeningControls';
 import { PlaybackBar } from '@/features/playback/PlaybackBar';
-import { WaterfallStage, warmWaterfallStage, type WaterfallSky } from '@/features/playback/waterfall/WaterfallStage';
+import { WaterfallStage, type WaterfallSky } from '@/features/playback/waterfall/WaterfallStage';
 import { readCssToken } from '@/ui/cssToken';
 import { WaterfallPanel } from '@/features/playback/waterfall/WaterfallPanel';
 import { playback, usePlaybackValue } from '@/core/playback/PlaybackController';
@@ -29,6 +29,8 @@ import { parseTool } from '@/core/model/insertItems';
 import { parseMark } from '@/core/model/markTools';
 import { LightSwitch } from '@/ui/LightSwitch';
 import { useMediaQuery } from '@/ui/useMediaQuery';
+import { fadeScreenOpacity, TransitionLoading, usePageReady, usePageTransitionPhase } from '@/ui/PageTransition';
+import type { ScoreDocument } from '@/core/model/score';
 import {
   locate,
   carrierIdOf,
@@ -77,6 +79,9 @@ export default function EditorScreen() {
   const activeId = draftId ?? savedScoreId;
   const userId = useAuthStore(state => state.userId);
   const reading = !!savedScoreId;
+  const phase = usePageTransitionPhase();
+  const ownsInput = phase === 'settled';
+  const source = useEditor(state => state.source);
   const loadSource = useEditor(state => state.loadSource);
   const clearSource = useEditor(state => state.clearSource);
   const [documentTitle, setDocumentTitle] = useState<{ draftId: string; title: string } | null>(null);
@@ -109,7 +114,6 @@ export default function EditorScreen() {
   const setPlaybackLocked = useEditor((s) => s.setPlaybackLocked);
   const documentLoading = useEditor((s) => s.loading);
   const navRangeRef = useRef<NavRange | null>(null);
-  const [waterfallOpen, setWaterfallOpen] = useState(false);
   const reduce = useReducedMotion();
   // a pick that no longer exists in the document (an undo removed it) is not a selection: the rail
   // keeps the tool panel rather than opening an inspector on nothing
@@ -125,10 +129,28 @@ export default function EditorScreen() {
   // editor, what the waterfall lets you set in the waterfall — and either view can hide it; the
   // bar is the same in both, so nothing in it moves when the view changes.
   const [view, setView] = useState<EditorView>('editor');
+  const [requestedView, requestView] = useState<EditorView>('editor');
+  const [paintedScore, setPaintedScore] = useState<ScoreDocument | null>(null);
+  const [paintedWaterfall, setPaintedWaterfall] = useState(false);
+  const onScorePaint = useCallback((ready: boolean) => {
+    setPaintedScore(current => ready ? document : current === document ? null : current);
+  }, [document]);
+  const preparingView = requestedView !== view;
+  const scorePainted = paintedScore === document;
+  const documentReady = !documentLoading && document.id === activeId;
+  const matchingSource = source?.id === activeId && source?.kind === (reading ? 'saved' : 'draft');
+  usePageReady(matchingSource && !documentLoading && (!documentReady || scorePainted || !!editError));
+
+  useLayoutEffect(() => {
+    if (preparingView && (requestedView === 'waterfall' ? paintedWaterfall : scorePainted || !!editError)) {
+      setView(requestedView);
+    }
+  }, [preparingView, requestedView, paintedWaterfall, scorePainted, editError]);
   const [panelOpen, setPanelOpen] = useState<Record<EditorView, boolean>>({ editor: wide, waterfall: false });
   const previousSavedScore = useRef(savedScoreId);
   useLayoutEffect(() => {
     if (previousSavedScore.current && draftId) {
+      requestView('editor');
       setView('editor');
       setPanelOpen(open => ({ ...open, editor: wide }));
     }
@@ -139,6 +161,7 @@ export default function EditorScreen() {
   const [tilt, setTilt] = useState(1);
   const [octaveLines, setOctaveLines] = useState(true);
   const [measureLines, setMeasureLines] = useState(true);
+  const [backgroundDust, setBackgroundDust] = useState(true);
   const [barAwake, setBarAwake] = useState(true);
   const waterfall = view === 'waterfall';
   const scorePanelOpen = panelOpen.editor;
@@ -152,9 +175,8 @@ export default function EditorScreen() {
   const toggleWidth = useMotionValue(0);
   const toggleInset = useMotionValue(0);
   const toggleX = useTransform(() => Math.max(0, visual.get() * railWidth.get() - toggleWidth.get() - 2 * toggleInset.get()));
-  const deskOpacity = useMotionValue(1);
-  const stageOpacity = useMotionValue(0);
   const [stageOnTop, setStageOnTop] = useState(false);
+  const [deskCovered, setDeskCovered] = useState(false);
   const stageOnTopRef = useRef(false);
   const headerLeft = useTransform(() => {
     const progress = wide ? Math.max(0, Math.min(1, layout.get())) : 0;
@@ -166,31 +188,35 @@ export default function EditorScreen() {
   const layoutWidth = useTransform(() => `${wide ? Math.max(0, Math.min(1, layout.get())) * railWidth.get() : 0}px`);
   // Wide waterfall panels leave room for the stage without resizing its canvas.
   const pushed = waterfall && panelOpen.waterfall && wide;
-  // The two views are layers: the one on top fades over the other, which stays whole beneath it until it is covered. One spring drives every
-  // fade (the panel's and the transport's own), so the whole screen moves as one gesture; a switch back mid-flight reverses the same fade.
-  const shownLayer = useRef<EditorView>(view);
-  const layerFlight = useRef<AnimationPlaybackControls | null>(null);
-  useEffect(() => {
-    if (shownLayer.current === view) return;
-    shownLayer.current = view;
-    layerFlight.current?.stop();
-    const spring = reduce ? reducedFade : springSmooth;
-    const incoming = view === 'waterfall' ? stageOpacity : deskOpacity;
-    const outgoing = view === 'waterfall' ? deskOpacity : stageOpacity;
+  // Reveal an already painted layer over the current one. If the request
+  // reverses mid-flight, fade from the opacity that is on screen.
+  const deskRef = useRef<HTMLElement>(null);
+  const stageRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    const incoming = view === 'waterfall' ? stageRef.current : deskRef.current;
+    const outgoing = view === 'waterfall' ? deskRef.current : stageRef.current;
+    if (!incoming || !outgoing) return;
+    setDeskCovered(false);
     const incomingOnTop = (view === 'waterfall') === stageOnTopRef.current;
-    const putOnTop = (stage: boolean) => { stageOnTopRef.current = stage; setStageOnTop(stage); };
-    if (incomingOnTop) {
-      // it is the layer that was arriving: it carries on
-      layerFlight.current = animate(incoming, 1, { ...spring, onComplete: () => outgoing.set(0) });
-    } else if (incoming.get() > 0.001) {
-      // it is held whole beneath the layer that was arriving: that one fades out again
-      layerFlight.current = animate(outgoing, 0, { ...spring, onComplete: () => putOnTop(view === 'waterfall') });
-    } else {
-      putOnTop(view === 'waterfall');
-      outgoing.set(1);
-      layerFlight.current = animate(incoming, 1, { ...spring, onComplete: () => outgoing.set(0) });
+    const putOnTop = () => {
+      stageOnTopRef.current = view === 'waterfall';
+      setStageOnTop(stageOnTopRef.current);
+    };
+    if (!incomingOnTop && Number(getComputedStyle(incoming).opacity) > 0.001) {
+      return fadeScreenOpacity(outgoing, 0, reduce, () => {
+        putOnTop();
+        if (view === 'waterfall') setDeskCovered(true);
+      });
     }
-  }, [view, reduce, deskOpacity, stageOpacity]);
+    if (!incomingOnTop) {
+      putOnTop();
+      outgoing.style.opacity = '1';
+    }
+    return fadeScreenOpacity(incoming, 1, reduce, () => {
+      outgoing.style.opacity = '0';
+      if (view === 'waterfall') setDeskCovered(true);
+    });
+  }, [view, reduce]);
   // the panel shows the contents of the view whose panel is open, so one that is sliding out keeps its own contents instead of turning into the other view's
   const railView = useRef<EditorView>(view);
   if (railOpen) railView.current = view;
@@ -202,9 +228,7 @@ export default function EditorScreen() {
   });
   // Commit the engraving's new box once; carry its centre on the non-bouncing layout spring.
   const deskShift = useTransform(() => wide ? (Math.max(0, Math.min(1, editorLayout.get())) - (scorePanelOpen ? 1 : 0)) * railWidth.get() / 2 : 0);
-  const deskRef = useRef<HTMLElement>(null);
   const barRef = useRef<HTMLElement>(null);
-  const stageRef = useRef<HTMLDivElement>(null);
   const togglePanel = () => setPanelOpen((open) => ({ ...open, [view]: !open[view] }));
   const openLibrary = () => setPanelOpen((open) => ({ ...open, editor: true }));
   const closeLibrary = () => setPanelOpen((open) => ({ ...open, editor: false }));
@@ -221,9 +245,9 @@ export default function EditorScreen() {
       if (drawer && bar.contains(window.document.activeElement)) panelToggleRef.current?.focus();
       bar.inert = drawer;
     }
-    if (deskRef.current) deskRef.current.inert = waterfall || drawer;
-    if (stageRef.current) stageRef.current.inert = !waterfall || drawer;
-  }, [railOpen, waterfall, wide]);
+    if (deskRef.current) deskRef.current.inert = !ownsInput || waterfall || drawer;
+    if (stageRef.current) stageRef.current.inert = !ownsInput || !waterfall || drawer;
+  }, [ownsInput, railOpen, waterfall, wide]);
 
   useLayoutEffect(() => {
     const measure = () => {
@@ -274,6 +298,7 @@ export default function EditorScreen() {
   }, [waterfall, playing]);
 
   useEffect(() => {
+    if (!ownsInput) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== '\\' || e.metaKey || e.ctrlKey || e.altKey) return;
       const target = e.target as HTMLElement | null;
@@ -283,7 +308,7 @@ export default function EditorScreen() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [view]);
+  }, [ownsInput, view]);
 
   useLayoutEffect(() => {
     if (!activeId) return;
@@ -294,9 +319,9 @@ export default function EditorScreen() {
   }, [activeId, draftId, savedScoreId, userId, loadSource, clearSource]);
 
   useEffect(() => {
-    if (!activeId) return;
+    if (!activeId || !ownsInput) return;
     return bindEditorAudition();
-  }, [activeId, draftId, savedScoreId]);
+  }, [activeId, ownsInput]);
 
   useEffect(() => {
     const sync = () => {
@@ -314,7 +339,12 @@ export default function EditorScreen() {
     }
   }, [document, documentLoading, activeId]);
 
+  useLayoutEffect(() => {
+    if (phase === 'exiting') playback.stop();
+  }, [phase]);
+
   useEffect(() => {
+    if (!ownsInput) return;
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)) return;
@@ -478,7 +508,7 @@ export default function EditorScreen() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [ownsInput]);
 
   // Layout = the app shell's skeleton (variant E). Wide: the left rail (same surface and width as
   // browse's) holds identity, then the hotbar and the staff · voice row, then ONE area that is the
@@ -533,7 +563,7 @@ export default function EditorScreen() {
           {/* where the panel's own foot is not on screen, the light switch is in the bar */}
           {!wide && <LightSwitch />}
           {/* the view switch is the bar's last item: it stays where it is whichever view is shown */}
-          <ChoiceGroup value={view} onChange={(next) => { if (next === 'waterfall') warmWaterfallStage(); setView(next); }} options={VIEW_OPTIONS} ariaLabel="View" variant="tabs" />
+          <ChoiceGroup value={requestedView} onChange={requestView} options={VIEW_OPTIONS} ariaLabel="View" variant="tabs" />
         </div>
       </motion.header>
       <motion.aside
@@ -545,7 +575,7 @@ export default function EditorScreen() {
       >
         <PanelToolbar label={railView.current === 'waterfall' ? 'Waterfall' : reading ? 'Playback' : 'Tools'} className="editor-panel-toolbar" />
         {railView.current === 'waterfall' ? <>
-          <WaterfallPanel listening={reading} sky={sky} onSky={setSky} stripColor={stripColor} onStripColor={setStripColor} tilt={tilt} onTilt={setTilt} octaveLines={octaveLines} onOctaveLines={setOctaveLines} measureLines={measureLines} onMeasureLines={setMeasureLines} />
+          <WaterfallPanel listening={reading} sky={sky} onSky={setSky} stripColor={stripColor} onStripColor={setStripColor} tilt={tilt} onTilt={setTilt} octaveLines={octaveLines} onOctaveLines={setOctaveLines} measureLines={measureLines} onMeasureLines={setMeasureLines} backgroundDust={backgroundDust} onBackgroundDust={setBackgroundDust} />
           <div className="rail-foot">
             <HelpPopover topic="waterfall" />
             {wide && <LightSwitch />}
@@ -593,23 +623,43 @@ export default function EditorScreen() {
       <motion.main
         ref={deskRef}
         className="desk"
-        style={{ x: deskShift, opacity: deskOpacity, zIndex: stageOnTop ? 1 : 2 }}
+        style={{ x: deskShift, opacity: 1, zIndex: stageOnTop ? 1 : 2,
+          visibility: waterfall && requestedView === 'waterfall' && deskCovered ? 'hidden' : 'visible' }}
       >
         {!documentLoading && document.id === activeId && <ContextStrip readOnly={reading} />}
         <div className="desk-content">
-          {!documentLoading && document.id === activeId && <EditorView title={documentTitle?.draftId === draftId ? documentTitle?.title : undefined} />}
+          {documentReady && <EditorView
+            key={activeId}
+            scoreActive={!waterfall || requestedView === 'editor'}
+            onFirstPaint={onScorePaint}
+            title={documentTitle?.draftId === draftId ? documentTitle?.title : undefined}
+          />}
         </div>
       </motion.main>
       <motion.div
         ref={stageRef}
         className="waterfall-stage"
-        style={{ '--sky-now': `var(--waterfall-sky-${sky})`, opacity: stageOpacity, zIndex: stageOnTop ? 2 : 1 } as MotionStyle}
+        style={{ '--sky-now': `var(--waterfall-sky-${sky})`, opacity: 0, zIndex: stageOnTop ? 2 : 1 } as MotionStyle}
       >
         {/* Uniform scaling preserves the keys; the preallocated upper roll fills the space it reveals. */}
         <motion.div className="waterfall-fit" style={{ height: stageCanvasHeight, scale: stageScale, originX: 1, originY: 1 }}>
-          <WaterfallStage sky={sky} active={waterfall} stripColor={stripColor} tilt={tilt} viewportRef={stageRef} octaveLines={octaveLines} measureLines={measureLines} />
+          <WaterfallStage
+            sky={sky}
+            active={waterfall && phase !== 'exiting'}
+            preparingView={phase !== 'exiting' && preparingView && requestedView === 'waterfall'}
+            onFirstFrame={setPaintedWaterfall}
+            stripColor={stripColor}
+            tilt={tilt}
+            viewportRef={stageRef}
+            octaveLines={octaveLines}
+            measureLines={measureLines}
+            backgroundDust={backgroundDust}
+          />
         </motion.div>
       </motion.div>
+      <div className="editor-view-transition">
+        <TransitionLoading waiting={preparingView} label={requestedView === 'waterfall' ? 'Preparing frames…' : 'Opening score…'} />
+      </div>
       {!wide && !waterfall && !reading && <PropertiesPanel placement="sheet" />}
       {!wide && !waterfall && !reading && <Toolbar layout="tray" />}
       {/* the anchor positions; the toast inside settles up onto it and lifts away when dismissed */}
