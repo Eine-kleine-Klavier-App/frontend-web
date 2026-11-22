@@ -1,4 +1,5 @@
-import { KeyStage, type KeyLight, type StageKey } from './keyStage';
+import { CONTACT_LIGHT_ROWS, CONTACT_LIGHT_STOPS, CONTACT_LIGHT_TEXELS_HIGH, KeyStage, type KeyLight, type StageKey } from './keyStage';
+import { waterfallSurfaceRatios, type WaterfallWindow, type WaterfallWindowSource } from './waterfallFrameCache';
 import type { WaterfallNote } from './waterfallNotes';
 import { clamp, hexRgb, readWaterfallPalette, rgba, type Rgb, type VoiceRamp, type WaterfallPalette } from './waterfallPalette';
 import { BLACK_KEY_WIDTH, KEY_RANGE, NATURAL_PITCH_CLASSES, PLANE_HEIGHT, PLANE_WIDTH } from './waterfallProportions';
@@ -12,7 +13,6 @@ const BED_DEPTH_OF_HEIGHT = 0.215;
 const BED_DEPTH_OF_PITCH = 5;
 /** The pitch the 2D optics (footprints, ridge, grain sizes) were tuned at. */
 const REFERENCE_PITCH = 10.8;
-const FAR_SCALE = 0.92;
 /** Relative widening of the far edge for the moderate From sides preset. */
 const SIDE_SPREAD = 0.2;
 const LOOKAHEAD_RANGE = { min: 2.2, max: 4.35 } as const;
@@ -22,33 +22,92 @@ const REFERENCE_FRAMING = 51;
 /** A ribbon's tail and head are clipped just outside the visible slab. */
 const RIBBON_HEAD_CLIP = 0.035;
 const RIBBON_TAIL_CLIP = 0.16;
-/** A note leaves a visible release before the next strike of the same key; the strike and its travel keep their score durations. */
-const RELEASE_GAP = 0.045;
-const RELEASE_GAP_SHARE = 0.3;
-const KEY_PRESS_SECONDS = 0.055;
+const RIBBON_RIM_WIDTH = 1.25;
+/** A cell of the halo's grid is a source of light when the silhouette covers at least this much of it (enough for its voice to read back). */
+const RIBBON_HALO_SOURCE_COVERAGE = 0.25;
+/** A ribbon is this fraction of its key's width. */
+const RIBBON_WIDTH_OF_KEY = 0.84;
+/**
+ * The halo is a function of the distance to the nearest ribbon, measured in widths of a white-key ribbon: two exponentials
+ * fitted to the reference picture, taken to zero (with no slope) at the reach, so it has no edge and does not depend on the
+ * size of a ribbon or on what lies next to it.
+ */
+const RIBBON_HALO_NEAR = { gain: 0.6, decay: 0.19 };
+const RIBBON_HALO_FAR = { gain: 0.18, decay: 0.4 };
+const RIBBON_HALO_REACH = 1;
+/** Over this difference between the distances to two voices' ribbons (in halo decays) the halo's colour goes from one voice to the other. */
+const RIBBON_HALO_BLEND = 0.5;
+const RIBBON_HALO_WINDOW_START = 0.55;
+/** The distance field is sampled this many times per decay length of the near glow, and in at most this many cells. */
+const RIBBON_HALO_CELLS_PER_DECAY = 4;
+const RIBBON_HALO_CELL_BUDGET = 250_000;
+/** The bright strip along a ribbon: its place and spread across the ribbon, in ribbon widths, and how it is sampled. */
+const RIBBON_CORE_CENTER = -0.10;
+const RIBBON_CORE_SPREAD = 0.18;
+const RIBBON_CORE_STOPS = 9;
+/** The face of a ribbon lets this much of what lies under it show. */
+const RIBBON_FACE_ALPHA = 0.86;
+const RIBBON_GAP_OF_WIDTH = 1 / 6;
+const RIBBON_MAX_TRIM = 0.25;
+const KEY_ATTACK_SLOW_SECONDS = 0.054;
+const KEY_ATTACK_FAST_SECONDS = 0.026;
+const LIGHT_REACH = 7;
 const KEY_RELEASE_SECONDS = 0.09;
 const TAIL_SECONDS = 4.5;
 const HIT_SECONDS = 1.35;
-const INCOMING_SECONDS = 0.2;
 const FRONT_SECONDS = 0.4;
 const UNDER_STOPS = 25;
+const CONTACT_SIDE_SAMPLES = CONTACT_LIGHT_STOPS * CONTACT_LIGHT_ROWS;
+// The aerial halo is soft horizontally. Its mask needs fewer samples than the thin crest.
+const AIR_COLUMNS = 2 * CONTACT_LIGHT_STOPS - 1;
+const AIR_IDLE_DECAY = 4.8;
+const AIR_IDLE_STEP = Math.exp(1 / AIR_IDLE_DECAY);
+const AIR_CORE_STEP = Math.exp(1 / 2.3);
+const PEDAL_ATTACK_SECONDS = 0.08;
+const PEDAL_RELEASE_SECONDS = 0.18;
 const GRAIN_COUNT = 430;
 const GRAIN_CYCLE = 8;
 
-/** The keys and the glow are drawn at the display's density up to this; the 2D roll behind them is a soft picture and is drawn at one pixel per CSS pixel, because it is uploaded to the GPU every frame. */
-const GL_RATIO_MAX = 1.5;
-const SHEET_RATIO = 1;
+/** Keep the Canvas 2D backing density within the same work budget for every browser. */
+const MAX_RASTER_RATIO = 1.5;
+
+type DrawingSurface = HTMLCanvasElement | OffscreenCanvas;
+type DrawingContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+
+function drawingContext(surface: DrawingSurface, options?: CanvasRenderingContext2DSettings): DrawingContext | null {
+  if ('ownerDocument' in surface) return surface.getContext('2d', options);
+  return surface.getContext('2d', options);
+}
+
+export interface WaterfallLayout {
+  width: number;
+  height: number;
+  viewportHeight: number;
+  pixelRatio: number;
+}
 
 const noise = (n: number): number => {
   const x = Math.sin(n * 78.233 + 17.41) * 43758.5453;
   return x - Math.floor(x);
 };
 
-const gradient = (g: CanvasRenderingContext2D, from: number, to: number, stops: readonly (readonly [number, string])[]): CanvasGradient => {
+const gradient = (g: DrawingContext, from: number, to: number, stops: readonly (readonly [number, string])[]): CanvasGradient => {
   const result = g.createLinearGradient(0, from, 0, to);
   for (const [at, color] of stops) result.addColorStop(at, color);
   return result;
 };
+
+/** First index for which the sorted range is no longer before the boundary. */
+function lowerBound(length: number, before: (index: number) => boolean, from = 0): number {
+  let left = from;
+  let right = length;
+  while (left < right) {
+    const middle = left + Math.floor((right - left) / 2);
+    if (before(middle)) left = middle + 1;
+    else right = middle;
+  }
+  return left;
+}
 
 interface SceneKey extends StageKey {
   unit: number;
@@ -57,8 +116,43 @@ interface SceneKey extends StageKey {
 
 interface SceneNote extends WaterfallNote {
   seed: number;
-  /** how long the ribbon is: the note's length, cut short by the next strike of the same key */
-  ribbon: number;
+  expiresAt: number;
+  startPress: number;
+}
+
+/** Evaluate the pose at score time, including when the frame is reached by a seek. */
+function keyPressAt(note: SceneNote, age: number): number {
+  if (age < 0 || note.duration <= 0) return 0;
+  const attackTime = Math.min(
+    note.duration * 0.8,
+    KEY_ATTACK_SLOW_SECONDS + (KEY_ATTACK_FAST_SECONDS - KEY_ATTACK_SLOW_SECONDS) * note.velocity,
+  );
+  const attack = clamp(age / attackTime, 0, 1);
+  // The key finishes returning exactly when the note ends, so a repeat is struck on a raised key.
+  const returnTime = Math.min(KEY_RELEASE_SECONDS, note.duration * 0.5);
+  const release = clamp((age - (note.duration - returnTime)) / returnTime, 0, 1);
+  const press = 1 - (1 - note.startPress) * (1 - attack) ** 3;
+  return press * (1 - release * release * (3 - 2 * release));
+}
+
+export interface PedalInterval {
+  down: number;
+  up: number;
+}
+
+interface ScenePedal extends PedalInterval {
+  startLevel: number;
+}
+
+function pedalEase(progress: number): number {
+  const phase = clamp(progress, 0, 1);
+  return phase * phase * (3 - 2 * phase);
+}
+
+function pedalLevelAt(pedal: ScenePedal, time: number): number {
+  const attack = pedalEase((Math.min(time, pedal.up) - pedal.down) / PEDAL_ATTACK_SECONDS);
+  const release = pedalEase((time - pedal.up) / PEDAL_RELEASE_SECONDS);
+  return (pedal.startLevel + (1 - pedal.startLevel) * attack) * (1 - release);
 }
 
 interface Hit {
@@ -73,16 +167,8 @@ interface Hit {
 interface Tail {
   note: SceneNote;
   age: number;
-  release: number;
-  energy: number;
   x: number;
   rgb: Rgb;
-}
-
-interface Incoming {
-  x: number;
-  age: number;
-  width: number;
 }
 
 interface Emitter extends Hit {
@@ -95,34 +181,118 @@ interface Projected {
   scale: number;
 }
 
+/** 0 below `from`, 1 above `to`, a smooth step between with no slope at either end. */
+function smoothStep(from: number, to: number, value: number): number {
+  const t = clamp((value - from) / (to - from), 0, 1);
+  return t * t * (3 - 2 * t);
+}
+
+/** The strength of the halo, 0..1, at a distance in white-key ribbon widths. */
+function haloStrength(distance: number): number {
+  const glow = RIBBON_HALO_NEAR.gain * Math.exp(-distance / RIBBON_HALO_NEAR.decay) +
+    RIBBON_HALO_FAR.gain * Math.exp(-distance / RIBBON_HALO_FAR.decay);
+  return glow * (1 - smoothStep(RIBBON_HALO_WINDOW_START, 1, distance / RIBBON_HALO_REACH));
+}
+
+/** The grid the halo's distance field lives on, and its buffers. */
+interface HaloField {
+  columns: number;
+  rows: number;
+  mask: DrawingSurface;
+  glow: DrawingSurface;
+  maskContext: DrawingContext;
+  glowContext: DrawingContext;
+  distance: Float32Array;
+  voice: Uint8Array;
+  /** The nearest silhouette of a different voice: where it is about as near as the first, the two colours blend. */
+  otherDistance: Float32Array;
+  otherVoice: Uint8Array;
+}
+
+/** One ribbon of the frame: its outline and what painting it needs. */
+interface RibbonShape {
+  note: SceneNote;
+  age: number;
+  ramp: VoiceRamp;
+  outline: Path2D;
+  head: Projected;
+  tail: Projected;
+  width: number;
+  half: number;
+  height: number;
+  skew: number;
+}
+
+function ribbonPaint(ramp: VoiceRamp) {
+  const lit = (rgb: Rgb, white: number, exposure = 1) => {
+    const value = Math.max(...rgb) / 255;
+    const lift = 1 + .78 * (1 - value);
+    const mix = white * value;
+    return rgb.map(channel => Math.min(255, channel * lift + (255 - channel) * mix) * exposure);
+  };
+  const cool = clamp((ramp.near[2] - ramp.near[0]) / 128, 0, 1);
+  const mix = (from: Rgb, to: Rgb, portion: number) =>
+    from.map((channel, index) => channel + (to[index] - channel) * portion) as Rgb;
+  const distant = mix(ramp.near, ramp.far, .64 * cool);
+  const close = mix(ramp.near, ramp.far, .72 * (1 - cool));
+  const ink = lit(ramp.near, .20 + .19 * cool);
+  const core = lit(ramp.near, .72);
+  return {
+    stops: [
+      [0, rgba(lit(distant, .12, .78), RIBBON_FACE_ALPHA)],
+      [.34, rgba(lit(distant, .22 + .07 * cool, .88), RIBBON_FACE_ALPHA)],
+      [.68, rgba(lit(mix(ramp.near, close, .3), .32 + .14 * cool, .96), RIBBON_FACE_ALPHA)],
+      [.9, rgba(lit(close, .65 + .14 * cool), RIBBON_FACE_ALPHA)],
+      [1, rgba(lit(close, .83 + .10 * cool), RIBBON_FACE_ALPHA)],
+    ] as const,
+    ink,
+    core,
+  };
+}
+
 /** The roll: notes falling in perspective towards the keys, and everything the strike throws up. The clock comes from outside; the scene owns no time. */
 export class WaterfallScene {
-  private readonly sheet = document.createElement('canvas');
-  private readonly ctx: CanvasRenderingContext2D;
+  private readonly makeCanvas: () => DrawingSurface;
+  private readonly sheet: DrawingSurface;
+  private readonly ctx: DrawingContext;
+  private readonly keyboard: DrawingContext;
   private readonly stage: KeyStage;
-  private readonly underField = new Float32Array(UNDER_STOPS * 3);
-  private readonly sprites = new Map<string, HTMLCanvasElement>();
-  private readonly densityMasks = new Map<string, HTMLCanvasElement>();
+  private readonly stripVoiceField = new Float32Array(UNDER_STOPS * 3);
+  private readonly stripVoiceWeights = new Float32Array(UNDER_STOPS);
+  private readonly ridgeField = new Float32Array(CONTACT_LIGHT_STOPS * 3);
+  private readonly ridgeFlashField = new Float32Array(CONTACT_LIGHT_STOPS * 3);
+  private readonly ridgeRippleField = new Float32Array(CONTACT_LIGHT_STOPS);
+  private readonly contactField = new Float32Array(2 * CONTACT_SIDE_SAMPLES * 3);
+  private readonly contactPixels = new Float32Array(CONTACT_LIGHT_STOPS * CONTACT_LIGHT_TEXELS_HIGH * 4);
+  private readonly contactMoment = new Float32Array(2 * CONTACT_SIDE_SAMPLES);
+  private readonly contactWeight = new Float32Array(2 * CONTACT_SIDE_SAMPLES);
+  private readonly sprites = new Map<string, DrawingSurface>();
+  private readonly densityMasks = new Map<string, DrawingSurface>();
   private readonly grains = Array.from({ length: GRAIN_COUNT }, (_, index) => ({ u: noise(index + 211), when: noise(index + 733) * GRAIN_CYCLE, v: noise(index * 2 + 31) }));
-  private readonly grainAtlas = document.createElement('canvas');
+  private readonly grainAtlas: DrawingSurface;
   private notes: SceneNote[] = [];
+  private latestExpiry = new Float64Array(0);
   private bars: number[] = [];
+  private pedals: ScenePedal[] = [];
   private ramps: VoiceRamp[] = [];
+  private ribbonColors: ReturnType<typeof ribbonPaint>[] = [];
+  private ribbonFaces: CanvasGradient[] = [];
+  private readonly coreGradients = new Map<string, CanvasGradient>();
+  private haloField: HaloField | undefined;
   private readonly palette: WaterfallPalette;
   private background: string;
   private stripColor: Rgb;
-  private sky: HTMLCanvasElement | null = null;
+  private sky: DrawingSurface | null = null;
   private keys: SceneKey[] = [];
   private byMidi = new Map<number, SceneKey>();
   private octaveEdges: { midi: number; x: number }[] = [];
   private fronts: [number, number, number][] = [];
-  private airSurface: HTMLCanvasElement | null = null;
-  private airContext: CanvasRenderingContext2D | null = null;
+  private airSurface: DrawingSurface | null = null;
+  private airContext: DrawingContext | null = null;
   private airPixels: ImageData | null = null;
   private time = 0;
   private width = PLANE_WIDTH;
   private height = PLANE_HEIGHT;
-  private viewportHeight = 0;
   private rollTop = 0;
   private unit = 1;
   private pitch = 1;
@@ -134,21 +304,39 @@ export class WaterfallScene {
   private tilt = 1;
   private octaveLines = true;
   private measureLines = true;
+  private backgroundDust = true;
   private lookAhead = 1;
   private visibleAhead = 1;
-  private eyeTime = 1;
   private nearSpeed = 1;
+  private rasterLayout = '';
+  private rollEnd = 1;
+  private keyboardTop = 0;
 
-  constructor(private readonly canvas: HTMLCanvasElement) {
-    const context = this.sheet.getContext('2d', { alpha: false });
+  constructor(canvas: HTMLCanvasElement, palette?: WaterfallPalette, keyboardCanvas?: HTMLCanvasElement);
+  constructor(canvas: OffscreenCanvas, palette: WaterfallPalette, keyboardCanvas?: OffscreenCanvas);
+  constructor(private readonly canvas: DrawingSurface, palette?: WaterfallPalette,
+    private readonly keyboardCanvas?: DrawingSurface) {
+    const inDocument = 'ownerDocument' in canvas;
+    this.makeCanvas = inDocument ? () => canvas.ownerDocument.createElement('canvas') : () => new OffscreenCanvas(1, 1);
+    if (!palette && !inDocument) throw new Error('The offscreen waterfall needs CSS colours from the page');
+    this.palette = palette ?? readWaterfallPalette(canvas as HTMLCanvasElement);
+    this.sheet = canvas;
+    const context = drawingContext(this.sheet, { alpha: false });
     if (!context) throw new Error('A 2D canvas is unavailable');
     this.ctx = context;
-    this.palette = readWaterfallPalette(canvas);
+    const keyboard = keyboardCanvas ? drawingContext(keyboardCanvas) : context;
+    if (!keyboard) throw new Error('The keyboard canvas is unavailable');
+    this.keyboard = keyboard;
     this.background = this.palette.skyBlack;
     this.stripColor = this.palette.stripDefault;
-    this.stage = new KeyStage(canvas);
+    this.stage = new KeyStage(canvas, this.palette.crestIdle);
+    this.grainAtlas = this.makeCanvas();
+    this.prepareGrain();
+  }
+
+  private prepareGrain(): void {
     this.grainAtlas.width = this.grainAtlas.height = 20;
-    const atlas = this.grainAtlas.getContext('2d');
+    const atlas = drawingContext(this.grainAtlas);
     if (atlas) {
       const grain = atlas.createRadialGradient(10, 10, 0, 10, 10, 10);
       const [core, mid, edge] = this.palette.grain;
@@ -160,31 +348,62 @@ export class WaterfallScene {
     }
   }
 
-  /** The notes to play, in any order, and the start of each measure; the roll shows them as the clock passes. */
-  private pedals: { down: number; up: number }[] = [];
-
-  setPiece(notes: WaterfallNote[], bars: number[], pedals: { down: number; up: number }[] = []): void {
-    this.pedals = pedals;
+  /** Playback times for the notes, bar lines and pedal indicator. */
+  setPiece(notes: WaterfallNote[], bars: number[], pedals: readonly PedalInterval[] = []): void {
     const sorted = notes.slice().sort((a, b) => a.start - b.start);
-    const nextStrike = new Map<number, number>();
-    this.notes = new Array<SceneNote>(sorted.length);
-    for (let index = sorted.length - 1; index >= 0; index--) {
-      const note = sorted[index];
-      const next = nextStrike.get(note.pitch);
-      const interval = next === undefined ? Infinity : next - note.start;
-      const gap = Math.min(RELEASE_GAP, interval * RELEASE_GAP_SHARE);
-      this.notes[index] = { ...note, seed: index * 13 + 1, ribbon: Math.min(note.duration, interval - gap) };
-      nextStrike.set(note.pitch, note.start);
+    this.notes = sorted.map((note, index) => ({
+      ...note,
+      seed: index * 13 + 1,
+      expiresAt: note.start + Math.max(note.sustainDuration + TAIL_SECONDS, note.duration + HIT_SECONDS),
+      startPress: 0,
+    }));
+    this.latestExpiry = new Float64Array(sorted.length);
+    let latestExpiry = -Infinity;
+    const previousStrike = new Map<number, SceneNote>();
+    for (const [index, note] of this.notes.entries()) {
+      const previous = previousStrike.get(note.pitch);
+      if (previous) note.startPress = keyPressAt(previous, note.start - previous.start);
+      if (note.duration > 0) previousStrike.set(note.pitch, note);
+      latestExpiry = Math.max(latestExpiry, note.expiresAt);
+      this.latestExpiry[index] = latestExpiry;
     }
-    this.bars = bars;
+    this.bars = bars.slice().sort((a, b) => a - b);
+    this.pedals = [];
+    for (const pedal of pedals.slice().sort((a, b) => a.down - b.down)) {
+      const previous = this.pedals.at(-1);
+      const startLevel = previous ? pedalLevelAt(previous, pedal.down) : 0;
+      this.pedals.push({ ...pedal, startLevel });
+    }
   }
 
   /** The ramp of each voice, by the voice's index in the score. */
   setRamps(ramps: VoiceRamp[]): void {
+    for (let voice = 0; voice < Math.max(this.ramps.length, ramps.length); voice++) {
+      const old = (this.ramps[voice] ?? this.ramps[0])?.glow;
+      const next = (ramps[voice] ?? ramps[0])?.glow;
+      if (old && next && old.every((channel, index) => channel === next[index])) continue;
+      this.sprites.delete(String(voice));
+      for (let variant = 0; variant < 5; variant++) this.densityMasks.delete(`${variant}:${voice}`);
+    }
+    const paints = ramps.map((ramp, voice) => {
+      const previous = this.ramps[voice];
+      const paint = this.ribbonColors[voice];
+      if (paint && previous?.near.every((channel, index) => channel === ramp.near[index]) &&
+          previous.far.every((channel, index) => channel === ramp.far[index])) return paint;
+      return ribbonPaint(ramp);
+    });
+    this.coreGradients.clear();
+    this.ribbonColors = paints;
+    this.prepareRibbonFaces();
     this.ramps = ramps;
+    this.stage.setPalette(ramps.filter(Boolean).map(ramp => ramp.glow));
   }
 
-  /** The colour of the sky; the rest of the scene is lit against it. */
+  private prepareRibbonFaces(): void {
+    this.ribbonFaces = this.ribbonColors.map(paint => gradient(this.ctx, this.rollTop, this.rail, paint.stops));
+  }
+
+  /** The base colour of the pedal light in the absence of sounding voices. */
   setStripLight(color: string): void {
     this.stripColor = hexRgb(color);
   }
@@ -200,6 +419,11 @@ export class WaterfallScene {
     this.measureLines = measureLines;
   }
 
+  /** The faint dust drifting down the sky with the notes; a view flag like the guides. */
+  setBackgroundDust(visible: boolean): void {
+    this.backgroundDust = visible;
+  }
+
   setBackground(color: string): void {
     this.background = color;
     if (this.sky) this.sky = this.makeSky();
@@ -207,28 +431,39 @@ export class WaterfallScene {
 
   dispose(): void {
     this.stage.dispose();
+    this.haloField = undefined;
+    this.ribbonColors = [];
+    this.ribbonFaces = [];
+  }
+
+  invalidateRasters(): void {
+    this.rasterLayout = '';
+    this.stage.invalidateRasters();
+    this.sprites.clear();
+    this.densityMasks.clear();
+    this.prepareGrain();
   }
 
   /** Fits the drawing surface while keeping key geometry and near-note timing tied to the viewport. */
-  resize(viewportHeight = this.canvas.clientHeight): void {
-    // the layout size, not the drawn one: a transform on the stage (the panel's slide) must not change what the canvas is sized to
-    const bounds = { width: this.canvas.clientWidth, height: this.canvas.clientHeight };
-    if (!(bounds.width > 0 && bounds.height > 0)) return;
-    const ratio = Math.min(window.devicePixelRatio || 1, GL_RATIO_MAX);
-    const pixelsX = Math.max(1, Math.round(bounds.width * ratio));
-    const pixelsY = Math.max(1, Math.round(bounds.height * ratio));
-    const visibleHeight = Math.min(bounds.height, viewportHeight);
-    if (this.sky && this.canvas.width === pixelsX && this.canvas.height === pixelsY && this.viewportHeight === visibleHeight) return;
-    this.viewportHeight = visibleHeight;
-    this.unit = Math.min(bounds.width / PLANE_WIDTH, visibleHeight / PLANE_HEIGHT);
-    this.width = bounds.width / this.unit;
-    this.height = bounds.height / this.unit;
+  resize(viewportHeight?: number): void {
+    if (!('clientWidth' in this.canvas)) return;
+    const fullSurface = this.keyboardCanvas ? this.canvas.parentElement ?? this.canvas : this.canvas;
+    const { clientWidth: width, clientHeight: height } = fullSurface;
+    this.resizeTo({ width, height, viewportHeight: viewportHeight || height, pixelRatio: window.devicePixelRatio || 1 });
+  }
+
+  resizeTo(layout: WaterfallLayout): void {
+    const { width, height, viewportHeight, pixelRatio } = layout;
+    if (!(width > 0 && height > 0 && viewportHeight > 0)) return;
+    const visibleHeight = Math.min(height, viewportHeight);
+    const rasterLayout = [width, height, visibleHeight, pixelRatio].join('/');
+    if (this.sky && this.rasterLayout === rasterLayout) return;
+    this.rasterLayout = rasterLayout;
+    this.unit = Math.min(width / PLANE_WIDTH, visibleHeight / PLANE_HEIGHT);
+    this.width = width / this.unit;
+    this.height = height / this.unit;
     const baseHeight = visibleHeight / this.unit;
     this.rollTop = this.height - baseHeight;
-    this.canvas.width = pixelsX;
-    this.canvas.height = pixelsY;
-    this.sheet.width = Math.max(1, Math.round(bounds.width * SHEET_RATIO));
-    this.sheet.height = Math.max(1, Math.round(bounds.height * SHEET_RATIO));
     let whites = 0;
     const placed: { midi: number; black: boolean; unit: number }[] = [];
     for (let midi = KEY_RANGE.min; midi <= KEY_RANGE.max; midi++) {
@@ -247,6 +482,7 @@ export class WaterfallScene {
     this.depth = Math.min(baseHeight * BED_DEPTH_OF_HEIGHT, this.pitch * BED_DEPTH_OF_PITCH);
     const pitchScale = clamp(this.pitch / REFERENCE_PITCH, 0.78, 1.75);
     this.rail = this.height - this.depth - Math.max(15, this.depth * 0.147 + Math.max(13, 7 * pitchScale + 6));
+    this.resizeRasters(width, height, pixelRatio);
     // The octave lines are rays to a vanishing point; their lean is measured in screen coordinates so a wide canvas does not fan them out.
     const octaveWidth = 7 * this.pitch - 0;
     const middleC = this.octaveEdges.find((edge) => edge.midi === MIDDLE_C);
@@ -256,93 +492,174 @@ export class WaterfallScene {
     const baseRail = this.rail - this.rollTop;
     const framing = clamp(baseRail / this.pitch / REFERENCE_FRAMING, 0.2, 1.15);
     this.lookAhead = clamp(LOOKAHEAD_AT_FRAMING * Math.sqrt(framing), LOOKAHEAD_RANGE.min, LOOKAHEAD_RANGE.max);
-    // A shallow perspective keeps the spacing of repeated notes legible at the far edge.
-    this.eyeTime = (this.lookAhead * FAR_SCALE) / (1 - FAR_SCALE);
-    this.nearSpeed = baseRail / (this.lookAhead * FAR_SCALE);
-    // Invert projectRoll at the top of the reserved surface, rather than clipping at the old viewport.
-    this.visibleAhead = this.rail / (baseRail / this.lookAhead - this.rollTop / this.eyeTime);
-    this.stripY = this.rail + this.depth + Math.max(7.5, this.depth * 0.147);
+    this.nearSpeed = baseRail / this.lookAhead;
+    // Invert the projection at the actual top, including the reserve behind a wide panel.
+    this.visibleAhead = this.rail / this.nearSpeed;
+    this.stripY = this.rail + this.depth + Math.max(7.5, this.depth * 0.175);
     this.sky = this.makeSky();
+    this.prepareRibbonFaces();
   }
 
-  /** Draws the scene at `timeSeconds` of the piece. */
-  render(timeSeconds: number): void {
+  private resizeRasters(width: number, height: number, deviceRatio: number): void {
+    const keyboard = this.keyboardCanvas;
+    this.rollEnd = keyboard ? Math.min(this.height, this.rail + this.pitch * .12) : this.height;
+    this.keyboardTop = keyboard ? Math.max(0, this.rail - this.pitch * .76) : 0;
+    const rollHeight = height * this.rollEnd / this.height;
+    const keyboardHeight = height * (this.height - this.keyboardTop) / this.height;
+    const ratios = keyboard ? waterfallSurfaceRatios(width, rollHeight, keyboardHeight, deviceRatio)
+      : { roll: Math.min(deviceRatio, MAX_RASTER_RATIO), keyboard: 1 };
+    this.canvas.width = Math.max(1, Math.round(width * ratios.roll));
+    this.canvas.height = Math.max(1, Math.round(rollHeight * ratios.roll));
+    this.ctx.imageSmoothingQuality = 'medium';
+    if (!keyboard) return;
+    // A white key spans a whole number of keyboard pixels, so every key edge falls on the same pixel phase and every groove is drawn alike.
+    const keys = this.width / this.pitch;
+    const keyPixels = width * ratios.keyboard / keys;
+    const keyboardRatio = keyPixels >= 1 ? Math.floor(keyPixels) * keys / width : ratios.keyboard;
+    keyboard.width = Math.max(1, Math.round(width * keyboardRatio));
+    keyboard.height = Math.max(1, Math.round(keyboardHeight * keyboardRatio));
+    this.keyboard.imageSmoothingQuality = 'high';
+    if ('style' in keyboard && 'style' in this.canvas) {
+      this.canvas.style.height = `${100 * this.rollEnd / this.height}%`;
+      keyboard.style.height = `${100 * (this.height - this.keyboardTop) / this.height}%`;
+    }
+  }
+
+  get lookAheadSeconds(): number {
+    return this.visibleAhead;
+  }
+
+  windowSource(extent: number): WaterfallWindowSource {
+    return {
+      bars: [0, ...new Set(this.bars.filter(bar => bar > 0 && bar < extent))],
+      extent,
+      starts: Float64Array.from(this.notes, note => note.start),
+      latestExpiry: this.latestExpiry,
+      pedalStarts: Float64Array.from(this.pedals, pedal => pedal.down),
+    };
+  }
+
+  /** A long-held note can start well before the current window and still affect the picture. */
+  private noteWindow(time: number, prepared?: WaterfallWindow): [number, number] {
+    const first = prepared?.noteFrom ?? 0;
+    const end = lowerBound(prepared?.noteTo ?? this.notes.length,
+      index => this.notes[index].start <= time + this.visibleAhead, first);
+    const start = lowerBound(end, index => this.latestExpiry[index] < time, first);
+    return [start, end];
+  }
+
+  /** Draws the scene at timeSeconds of the piece. */
+  render(timeSeconds: number, prepared?: WaterfallWindow): void {
     const g = this.ctx;
     if (!this.sky || !this.ramps.length) return;
     this.time = timeSeconds;
-    g.setTransform(this.sheet.width / this.width, 0, 0, this.sheet.height / this.height, 0, 0);
-    g.fillStyle = this.background;
-    g.fillRect(0, 0, this.width, this.height);
+    g.setTransform(this.sheet.width / this.width, 0, 0, this.sheet.height / this.rollEnd, 0, 0);
     g.drawImage(this.sky, 0, 0, this.width, this.rail);
-    this.rollTexture();
+    if (this.keyboardCanvas) {
+      g.fillStyle = this.background;
+      g.fillRect(0, this.rail, this.width, this.rollEnd - this.rail);
+    }
+    g.save();
+    g.beginPath();
+    g.rect(0, 0, this.width, this.rail);
+    g.clip();
+    if (this.backgroundDust) this.rollTexture();
     this.guides();
-    this.pedalLane();
     this.fronts = [];
     const hits: Hit[] = [];
-    const incoming: Incoming[] = [];
     const tails: Tail[] = [];
-    for (const note of this.notes) {
-      const age = timeSeconds - note.start;
-      if (age < -this.visibleAhead) break;
+    const shapes: RibbonShape[] = [];
+    const [start, end] = this.noteWindow(timeSeconds, prepared);
+    for (let index = start; index < end; index++) {
+      const note = this.notes[index];
+      if (note.expiresAt < timeSeconds) continue;
       const key = this.byMidi.get(note.pitch);
-      if (!key || age > note.sustainDuration + TAIL_SECONDS) continue;
+      if (!key) continue;
+      const age = timeSeconds - note.start;
       const rgb = (this.ramps[note.voice] ?? this.ramps[0]).glow;
       const release = Math.max(0, age - note.duration);
       const soundRelease = Math.max(0, age - note.sustainDuration);
-      if (age >= 0) {
-        const energy = note.velocity * (1 - Math.exp(-age / 0.052)) * Math.exp(-soundRelease / 1.16) * Math.min(1, (TAIL_SECONDS - soundRelease) / 0.29);
-        tails.push({ note, age, release, energy, x: key.x, rgb });
-      }
-      if (note.sustainDuration > note.duration && age < note.sustainDuration) {
-        this.ribbon({ ...note, ribbon: note.sustainDuration - note.duration }, age - note.duration, key, 0.2, false);
+      if (age >= 0 && soundRelease <= TAIL_SECONDS) {
+        tails.push({ note, age, x: key.x, rgb });
       }
       if (age > note.duration + HIT_SECONDS) continue;
       if (age < note.duration) {
-        this.ribbon(note, age, key);
+        const shape = this.ribbonShape(note, age, key);
+        if (shape) shapes.push(shape);
         if (age < 0 && age > -FRONT_SECONDS) {
           const front = this.projectRoll(key.x, -age);
-          this.fronts.push([front.x, front.y, key.width * front.scale]);
+          this.fronts.push([front.x, front.y, key.width]);
         }
       }
-      if (age < 0) {
-        if (age > -INCOMING_SECONDS) incoming.push({ x: key.x, age, width: key.width });
-        continue;
-      }
-      const press = clamp(Math.min(age, note.duration) / KEY_PRESS_SECONDS, 0, 1) * Math.max(0, 1 - release / KEY_RELEASE_SECONDS);
+      if (age < 0) continue;
+      const press = keyPressAt(note, age);
       const light = note.velocity * (0.95 + 0.48 * Math.exp(-age / 0.16)) * (1 - Math.exp(-age / 0.013)) * Math.exp(-release / 0.205);
       hits.push({ note, age, press, light, x: key.x, rgb });
     }
+    this.drawHalo(shapes);
+    for (const shape of shapes) this.paintRibbon(shape);
+    g.restore();
     // Repeated attacks light one physical key; dust from the earlier attacks stays in flight.
     const emitters = new Map<number, Emitter>();
     for (const hit of hits) {
       const old = emitters.get(hit.note.pitch);
       const impulse = hit.note.velocity * Math.min(1, hit.age / 0.013) * Math.exp(-0.5 * (hit.age / 0.068) ** 2) * Math.exp(-Math.max(0, hit.age - hit.note.duration) / 0.036);
-      const brightest = old && old.light > hit.light ? old : hit;
-      emitters.set(hit.note.pitch, { ...brightest, press: Math.max(hit.press, old?.press ?? 0), onset: Math.max(impulse, old?.onset ?? 0) });
+      const held = hit.age < hit.note.duration;
+      const oldHeld = old !== undefined && old.age < old.note.duration;
+      // A new attack owns its voice and flash. Preserve the continuous pose if
+      // the previous voice was still returning when the key was struck again.
+      const keepOld = old !== undefined && (
+        (!held && oldHeld) ||
+        (!held && old.light * keyPressAt(old.note, old.age) > hit.light * hit.press) ||
+        (held && oldHeld && old.note.start === hit.note.start && old.light > hit.light)
+      );
+      const source = keepOld ? old : hit;
+      emitters.set(hit.note.pitch, {
+        ...source,
+        press: Math.max(hit.press, old?.press ?? 0),
+        onset: keepOld ? old.onset : impulse,
+      });
     }
     const lit = Array.from(emitters.values());
-    g.fillStyle = this.palette.bed;
-    g.fillRect(0, this.rail, this.width, this.height - this.rail);
-    this.underRail();
-    this.contact(hits, lit, incoming, tails);
-    const lights: KeyLight[] = lit.map((emitter) => ({ midi: emitter.note.pitch, x: emitter.x, light: emitter.light, press: emitter.press, onset: emitter.onset, rgb: emitter.rgb }));
-    this.stage.draw({ sheet: this.sheet, width: this.width, height: this.height, rail: this.rail, depth: this.depth, pitch: this.pitch, keys: this.keys, underField: this.underField }, lights);
+    const bed = this.keyboard;
+    const backing = this.keyboardCanvas ?? this.sheet;
+    const rasterScaleY = backing.height / (this.height - this.keyboardTop);
+    if (this.keyboardCanvas) {
+      bed.setTransform(backing.width / this.width, 0, 0, rasterScaleY, 0, -this.keyboardTop * rasterScaleY);
+    }
+    // Complete the boundary pixel before painting the moving contact light.
+    const bedTop = this.keyboardTop + Math.floor((this.rail - this.keyboardTop) * rasterScaleY) / rasterScaleY;
+    if (this.keyboardCanvas) bed.clearRect(0, this.keyboardTop, this.width, bedTop - this.keyboardTop);
+    bed.fillStyle = this.palette.bed;
+    bed.fillRect(0, bedTop, this.width, this.height - bedTop);
+    this.underRail(tails, prepared);
+    this.buildRidgeField(lit);
+    this.buildContactField(lit);
+    const contactLight = this.contact(hits, lit);
+    const lights: KeyLight[] = lit.map((emitter) => ({ midi: emitter.note.pitch, light: emitter.light, press: emitter.press, onset: emitter.onset, rgb: emitter.rgb }));
+    this.stage.draw(bed, { width: this.width, rail: this.rail, depth: this.depth, pitch: this.pitch, keys: this.keys, contactPixels: this.contactPixels }, lights);
+    // Carry the light across the join of the roll and the keycaps.
+    const overlap = 0.043 * this.pitch;
+    bed.save();
+    bed.globalCompositeOperation = 'screen';
+    bed.fillStyle = contactLight;
+    bed.fillRect(0, this.rail - overlap, this.width, 2 * overlap);
+    bed.restore();
   }
 
-  /** A point of the roll at a lane of the plane, `seconds` before it strikes: the roll is one plane seen through one fixed perspective. */
-  private projectRoll(lane: number, seconds: number): Projected {
-    const timeScale = 1 / (1 + seconds / this.eyeTime);
-    const y = this.rollTop + (this.rail - this.rollTop) * (1 - seconds / this.lookAhead) * timeScale;
+  /** Time controls distance down the roll. Tilt moves the lane but does not scale a note's own width. */
+  private projectRoll(lane: number, seconds: number, noteOffset = 0): Projected {
+    const y = this.rail - seconds * this.nearSpeed;
     const lean = this.tilt < 0 ? this.tilt * SIDE_SPREAD / this.rail : this.tilt / this.convergenceDistance;
     const scale = 1 + (y - this.rail) * lean;
-    return { x: this.convergenceX + (lane - this.convergenceX) * scale, y, scale };
+    return { x: this.convergenceX + (lane - this.convergenceX) * scale + noteOffset, y, scale };
   }
 
-  private makeSky(): HTMLCanvasElement {
-    const surface = document.createElement('canvas');
+  private makeSky(): DrawingSurface {
+    const surface = this.makeCanvas();
     surface.width = this.width;
     surface.height = this.rail;
-    const g = surface.getContext('2d');
+    const g = drawingContext(surface);
     if (!g) return surface;
     g.fillStyle = this.background;
     g.fillRect(0, 0, this.width, this.rail);
@@ -360,9 +677,9 @@ export class WaterfallScene {
     const key = String(voice);
     let sprite = this.sprites.get(key);
     if (!sprite) {
-      sprite = document.createElement('canvas');
+      sprite = this.makeCanvas();
       sprite.width = sprite.height = 64;
-      const g = sprite.getContext('2d');
+      const g = drawingContext(sprite);
       if (g) {
         const color = voice === 'core' ? this.palette.coreLight : (this.ramps[voice] ?? this.ramps[0]).glow;
         const radial = g.createRadialGradient(32, 32, 0, 32, 32, 32);
@@ -380,10 +697,6 @@ export class WaterfallScene {
   /** A field of faint grains anchored in score time, so they stream towards the keys with the notes. */
   private rollTexture(): void {
     const g = this.ctx;
-    g.save();
-    g.beginPath();
-    g.rect(0, 0, this.width, this.rail);
-    g.clip();
     for (const grain of this.grains) {
       let seconds = (grain.when - this.time) % GRAIN_CYCLE;
       if (seconds < 0) seconds += GRAIN_CYCLE;
@@ -393,7 +706,7 @@ export class WaterfallScene {
       g.globalAlpha = 0.1 + 0.29 * grain.v ** 2;
       g.drawImage(this.grainAtlas, at.x - radius, at.y - radius, 2 * radius, 2 * radius);
     }
-    g.restore();
+    g.globalAlpha = 1;
   }
 
   /** The octave lines running up from the keys, and a line across the roll at every measure start. */
@@ -413,13 +726,13 @@ export class WaterfallScene {
       g.stroke();
     }
     if (!this.measureLines) return;
-    for (const start of this.bars) {
-      const seconds = start - this.time;
-      if (seconds < 0) continue;
+    const start = lowerBound(this.bars.length, (index) => this.bars[index] < this.time);
+    for (let index = start; index < this.bars.length; index++) {
+      const seconds = this.bars[index] - this.time;
       if (seconds >= this.visibleAhead) break;
       const left = this.projectRoll(0, seconds);
       const right = this.projectRoll(this.width, seconds);
-      const pixel = this.height / this.sheet.height;
+      const pixel = this.rollEnd / this.sheet.height;
       const thick = Math.max(pixel, (0.92 / this.unit) * left.scale);
       g.fillStyle = rgba(this.palette.barLine, 0.3 + (0.12 * left.y) / this.rail);
       g.fillRect(left.x, left.y, right.x - left.x, thick);
@@ -429,155 +742,495 @@ export class WaterfallScene {
     }
   }
 
-  /** One note as a slab of its voice's gradient, hot where it meets the keys. */
-  private ribbon(note: SceneNote, age: number, key: SceneKey, opacity = 1, emission = true): void {
-    const g = this.ctx;
+  /** One note on its own: its halo and its slab. The frame paints all halos first, from one field (see `drawHalo`). */
+  private ribbon(note: SceneNote, age: number, key: SceneKey): void {
+    const shape = this.ribbonShape(note, age, key);
+    if (!shape) return;
+    this.drawHalo([shape]);
+    this.paintRibbon(shape);
+  }
+
+  /** The outline of a note's slab at this moment, or nothing when it is not on the screen. */
+  private ribbonShape(note: SceneNote, age: number, key: SceneKey): RibbonShape | undefined {
     const ramp = this.ramps[note.voice] ?? this.ramps[0];
-    const start = -age;
-    const end = note.ribbon - age;
-    if (note.ribbon <= 0 || start > this.visibleAhead || end <= 0) return;
     const center = key.x;
-    const half = key.width * 0.42;
-    // The duration fixes the rectangle in the plane. Projecting both edges maps its length, and the gap to the next rectangle, through the same function.
+    const half = key.width * RIBBON_WIDTH_OF_KEY / 2;
+    const width = 2 * half;
+    const trim = Math.min((width * RIBBON_GAP_OF_WIDTH + RIBBON_RIM_WIDTH) / this.nearSpeed,
+      note.duration * RIBBON_MAX_TRIM);
+    // Shorten the painted tail while the leading edge reaches the key at the note's onset.
+    const duration = note.duration - trim;
+    const start = -age;
+    const end = duration - age;
+    if (duration <= 0 || start > this.visibleAhead || end <= 0) return undefined;
     const front = Math.max(start, -RIBBON_HEAD_CLIP);
     const back = Math.min(end, this.visibleAhead + RIBBON_TAIL_CLIP);
     const head = this.projectRoll(center, front);
     const tail = this.projectRoll(center, back);
+    const height = head.y - tail.y;
+    const skew = (head.x - tail.x) / height;
+    const extent = half + Math.max(RIBBON_RIM_WIDTH / 2, RIBBON_HALO_REACH * this.ribbonUnit);
+    if (Math.max(head.x, tail.x) + extent < 0 || Math.min(head.x, tail.x) - extent > this.width) return undefined;
     const roundRadius = Math.min(half * 0.31, 1.6);
-    const roundTime = Math.min(roundRadius / this.nearSpeed, note.ribbon * 0.49);
+    const roundTime = Math.min(roundRadius / this.nearSpeed, duration * 0.49);
     const radius = roundTime * this.nearSpeed;
-    const ratio = head.scale;
-    const width = 2 * half * ratio;
     const corners: [number, number, number, number][] = [[1, front, 1, Math.PI / 2], [-1, front, 1, Math.PI], [-1, back, -1, (3 * Math.PI) / 2], [1, back, -1, 2 * Math.PI]];
-    const outline: Projected[] = [];
+    const outline = new Path2D();
+    let first = true;
     for (const [side, time, direction, last] of corners) {
       const cut = direction > 0 ? front !== start : back !== end;
+      const begin = (point: Projected) => {
+        if (first) outline.moveTo(point.x, point.y);
+        else outline.lineTo(point.x, point.y);
+        first = false;
+      };
+      const corner = this.projectRoll(center, time, side * half);
       if (cut) {
-        outline.push(this.projectRoll(center + side * half, time));
+        begin(corner);
         continue;
       }
-      for (let step = 0; step <= 3; step++) {
-        const theta = last - Math.PI / 2 + (step * Math.PI) / 6;
-        outline.push(this.projectRoll(center + side * (half - radius) + radius * Math.cos(theta), time + direction * roundTime - roundTime * Math.sin(theta)));
+      const point = (theta: number) => this.projectRoll(center,
+        time + direction * roundTime - roundTime * Math.sin(theta),
+        side * (half - radius) + radius * Math.cos(theta));
+      begin(point(last - Math.PI / 2));
+      const finish = point(last);
+      outline.quadraticCurveTo(corner.x, corner.y, finish.x, finish.y);
+    }
+    outline.closePath();
+    return { note, age, ramp, outline, head, tail, width, half, height, skew };
+  }
+
+  /** The width of a white-key ribbon: the length the halo is measured in. */
+  private get ribbonUnit(): number {
+    return this.pitch * RIBBON_WIDTH_OF_KEY;
+  }
+
+  /**
+   * The halo of every ribbon of the frame, in one layer under them: at each point the strength follows the distance to the
+   * nearest ribbon (`haloStrength`), in the colour of that ribbon. So it is the same beside every ribbon, whatever its size,
+   * glows never add up and never hide each other where ribbons are close, and nothing in it has an edge. The distance is
+   * found on a coarse grid (a chamfer transform of the ribbons' silhouettes) and the layer is drawn smoothed.
+   */
+  private drawHalo(shapes: RibbonShape[]): void {
+    if (!shapes.length || !this.ramps.length) return;
+    const unit = this.ribbonUnit;
+    const cell = Math.max(RIBBON_HALO_NEAR.decay * unit / RIBBON_HALO_CELLS_PER_DECAY, Math.sqrt(this.width * this.rail / RIBBON_HALO_CELL_BUDGET));
+    const columns = Math.max(1, Math.ceil(this.width / cell));
+    const rows = Math.max(1, Math.ceil(this.rail / cell));
+    let field = this.haloField;
+    if (!field || field.columns !== columns || field.rows !== rows) {
+      const mask = this.makeCanvas();
+      const glow = this.makeCanvas();
+      mask.width = glow.width = columns;
+      mask.height = glow.height = rows;
+      const maskContext = drawingContext(mask);
+      const glowContext = drawingContext(glow);
+      if (!maskContext || !glowContext) return;
+      field = { columns, rows, mask, glow, maskContext, glowContext,
+        distance: new Float32Array(columns * rows), voice: new Uint8Array(columns * rows),
+        otherDistance: new Float32Array(columns * rows), otherVoice: new Uint8Array(columns * rows) };
+      this.haloField = field;
+    }
+    const { maskContext, glowContext, distance, voice, otherDistance, otherVoice } = field;
+    // Only the part of the roll the ribbons and their halos reach is worked on.
+    const reach = RIBBON_HALO_REACH * unit;
+    let left = Infinity;
+    let right = -Infinity;
+    let top = Infinity;
+    let bottom = -Infinity;
+    for (const { head, tail, half } of shapes) {
+      left = Math.min(left, head.x - half, tail.x - half);
+      right = Math.max(right, head.x + half, tail.x + half);
+      top = Math.min(top, tail.y);
+      bottom = Math.max(bottom, head.y);
+    }
+    const firstColumn = clamp(Math.floor((left - reach) / this.width * columns), 0, columns - 1);
+    const lastColumn = clamp(Math.ceil((right + reach) / this.width * columns), 0, columns - 1);
+    const firstRow = clamp(Math.floor((top - reach) / this.rail * rows), 0, rows - 1);
+    const lastRow = clamp(Math.ceil((bottom + reach) / this.rail * rows), 0, rows - 1);
+    const boxColumns = lastColumn - firstColumn + 1;
+    const boxRows = lastRow - firstRow + 1;
+    // The silhouettes, each in a flat colour that names its voice (spaced so that anti-aliased edges still read back).
+    const voices = this.ramps.length;
+    const step = Math.max(1, Math.floor(255 / (voices + 1)));
+    maskContext.setTransform(1, 0, 0, 1, 0, 0);
+    maskContext.clearRect(firstColumn, firstRow, boxColumns, boxRows);
+    maskContext.setTransform(columns / this.width, 0, 0, rows / this.rail, 0, 0);
+    for (const shape of shapes) {
+      maskContext.fillStyle = `rgb(${step * (Math.min(shape.note.voice, voices - 1) + 1)},0,0)`;
+      maskContext.fill(shape.outline);
+    }
+    const pixels = maskContext.getImageData(firstColumn, firstRow, boxColumns, boxRows).data;
+    // Distance to the nearest silhouette, in white-key ribbon widths, with the voice of that silhouette.
+    const across = (this.width / columns) / unit;
+    const along = (this.rail / rows) / unit;
+    const diagonal = Math.hypot(across, along);
+    const cellLength = Math.min(across, along);
+    const at = (row: number, column: number) => (row - firstRow) * boxColumns + (column - firstColumn);
+    const coverage = (box: number) => pixels[box * 4 + 3] / 255;
+    // A cell the silhouette touches is a source. Its distance is the signed distance from its centre to the edge, read from how much
+    // of it is covered, so that the halo does not depend on where an edge falls in the grid; a faintly covered cell takes the voice
+    // of the best covered cell next to it (its own colour no longer reads back).
+    for (let box = 0; box < boxColumns * boxRows; box++) {
+      const covered = coverage(box);
+      const solid = covered >= RIBBON_HALO_SOURCE_COVERAGE;
+      const index = (firstRow + Math.floor(box / boxColumns)) * columns + firstColumn + box % boxColumns;
+      distance[index] = solid ? (0.5 - covered) * cellLength : Infinity;
+      voice[index] = solid ? Math.round(pixels[box * 4] / step) : 0;
+      otherDistance[index] = Infinity;
+      otherVoice[index] = 0;
+    }
+    for (let row = firstRow; row <= lastRow; row++) {
+      for (let column = firstColumn; column <= lastColumn; column++) {
+        const box = at(row, column);
+        const covered = coverage(box);
+        if (covered <= 0 || covered >= RIBBON_HALO_SOURCE_COVERAGE) continue;
+        let best = 0;
+        let bestVoice = 0;
+        for (let nextRow = Math.max(firstRow, row - 1); nextRow <= Math.min(lastRow, row + 1); nextRow++) {
+          for (let nextColumn = Math.max(firstColumn, column - 1); nextColumn <= Math.min(lastColumn, column + 1); nextColumn++) {
+            const next = at(nextRow, nextColumn);
+            if (coverage(next) >= RIBBON_HALO_SOURCE_COVERAGE && coverage(next) > best) {
+              best = coverage(next);
+              bestVoice = Math.round(pixels[next * 4] / step);
+            }
+          }
+        }
+        if (best > 0) {
+          distance[row * columns + column] = (0.5 - covered) * cellLength;
+          voice[row * columns + column] = bestVoice;
+        }
       }
     }
-    const shape = () => {
-      g.beginPath();
-      g.moveTo(outline[0].x, outline[0].y);
-      for (let index = 1; index < outline.length; index++) g.lineTo(outline[index].x, outline[index].y);
-      g.closePath();
+    // Each cell keeps its nearest voice and the nearest voice that differs from it.
+    const offer = (index: number, candidate: number, candidateVoice: number) => {
+      if (!candidateVoice) return;
+      if (candidateVoice === voice[index]) {
+        if (candidate < distance[index]) distance[index] = candidate;
+      } else if (candidate < distance[index]) {
+        otherDistance[index] = distance[index];
+        otherVoice[index] = voice[index];
+        distance[index] = candidate;
+        voice[index] = candidateVoice;
+      } else if (candidateVoice === otherVoice[index]) {
+        if (candidate < otherDistance[index]) otherDistance[index] = candidate;
+      } else if (candidate < otherDistance[index]) {
+        otherDistance[index] = candidate;
+        otherVoice[index] = candidateVoice;
+      }
     };
+    const relax = (index: number, from: number, cost: number) => {
+      offer(index, distance[from] + cost, voice[from]);
+      offer(index, otherDistance[from] + cost, otherVoice[from]);
+    };
+    for (let row = firstRow; row <= lastRow; row++) {
+      for (let column = firstColumn; column <= lastColumn; column++) {
+        const index = row * columns + column;
+        if (column > firstColumn) relax(index, index - 1, across);
+        if (row > firstRow) {
+          relax(index, index - columns, along);
+          if (column > firstColumn) relax(index, index - columns - 1, diagonal);
+          if (column < lastColumn) relax(index, index - columns + 1, diagonal);
+        }
+      }
+    }
+    for (let row = lastRow; row >= firstRow; row--) {
+      for (let column = lastColumn; column >= firstColumn; column--) {
+        const index = row * columns + column;
+        if (column < lastColumn) relax(index, index + 1, across);
+        if (row < lastRow) {
+          relax(index, index + columns, along);
+          if (column < lastColumn) relax(index, index + columns + 1, diagonal);
+          if (column > firstColumn) relax(index, index + columns - 1, diagonal);
+        }
+      }
+    }
+    const strengths = this.haloStrengths;
+    const levels = strengths.length - 1;
+    const image = glowContext.createImageData(boxColumns, boxRows);
+    const data = image.data;
+    for (let row = firstRow; row <= lastRow; row++) {
+      for (let column = firstColumn; column <= lastColumn; column++) {
+        const index = row * columns + column;
+        const away = distance[index] / RIBBON_HALO_REACH;
+        if (away >= 1 || !voice[index]) continue;
+        // Under the ribbon the light is full, as the backing the face lets show through.
+        const strength = away <= 0 ? 1 : strengths[Math.round(away * levels)];
+        if (strength <= 0) continue;
+        const ink = (this.ribbonColors[voice[index] - 1] ?? this.ribbonColors[0]).ink;
+        // Where another voice's ribbon is about as near, its colour comes in: half and half at equal distance, none a blend width on.
+        const other = otherVoice[index];
+        const share = other ? 0.5 * (1 - smoothStep(0, 1, (otherDistance[index] - distance[index]) / (RIBBON_HALO_BLEND * RIBBON_HALO_NEAR.decay * unit))) : 0;
+        const otherInk = (this.ribbonColors[other - 1] ?? this.ribbonColors[0]).ink;
+        const offset = at(row, column) * 4;
+        data[offset] = ink[0] + (otherInk[0] - ink[0]) * share;
+        data[offset + 1] = ink[1] + (otherInk[1] - ink[1]) * share;
+        data[offset + 2] = ink[2] + (otherInk[2] - ink[2]) * share;
+        data[offset + 3] = Math.round(255 * strength);
+      }
+    }
+    glowContext.putImageData(image, firstColumn, firstRow);
+    const g = this.ctx;
     g.save();
-    g.beginPath();
-    g.rect(0, 0, this.width, this.rail);
-    g.clip();
-    g.globalAlpha = opacity;
-    shape();
-    g.strokeStyle = rgba(ramp.near, 0.085);
-    g.lineWidth = Math.max(1.6, width * 0.29);
-    g.stroke();
-    const face = gradient(g, head.y, tail.y, [[0, rgba(ramp.near.map((value) => value * 0.9))], [1, rgba(ramp.far.map((value) => value * 0.86))]]);
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(field.glow, firstColumn, firstRow, boxColumns, boxRows,
+      firstColumn * this.width / columns, firstRow * this.rail / rows, boxColumns * this.width / columns, boxRows * this.rail / rows);
+    g.restore();
+  }
+
+  /** `haloStrength` over the reach, tabulated once. */
+  private readonly haloStrengths = Float32Array.from({ length: 257 }, (_, level) => haloStrength(level / 256 * RIBBON_HALO_REACH));
+
+  /** The slab of a note in its voice's gradient, with the bright strip along it, hot where it meets the keys. */
+  private paintRibbon(shape: RibbonShape): void {
+    const { note, age, ramp, outline, head, tail, width, half, height, skew } = shape;
+    const g = this.ctx;
+    const paint = this.ribbonColors[note.voice] ?? this.ribbonColors[0];
+    // A bright strip along the slab, under the face, which lets as much of it show as its alpha leaves.
+    const key = `${note.voice}:${half}`;
+    let strip = this.coreGradients.get(key);
+    if (!strip) {
+      strip = g.createLinearGradient(-half, 0, half, 0);
+      for (let stop = 0; stop < RIBBON_CORE_STOPS; stop++) {
+        const along = stop / (RIBBON_CORE_STOPS - 1);
+        const glint = Math.exp(-0.5 * ((along - 0.5 - RIBBON_CORE_CENTER) / RIBBON_CORE_SPREAD) ** 2);
+        strip.addColorStop(along, rgba(paint.core, glint));
+      }
+      this.coreGradients.set(key, strip);
+    }
+    g.save();
+    g.clip(outline);
+    g.transform(1, 0, skew, 1, tail.x, tail.y);
+    g.fillStyle = strip;
+    g.fillRect(-half - RIBBON_RIM_WIDTH, -RIBBON_RIM_WIDTH, width + 2 * RIBBON_RIM_WIDTH, height + 2 * RIBBON_RIM_WIDTH);
+    g.restore();
+    // Every note in a voice takes its colour from the same depth gradient.
+    const face = this.ribbonFaces[note.voice] ?? this.ribbonFaces[0];
     g.fillStyle = face;
-    g.fill();
-    const shade = g.createLinearGradient(head.x - half * ratio, 0, head.x + half * ratio, 0);
-    shade.addColorStop(0, rgba(this.palette.sheen, 0.16));
-    shade.addColorStop(0.24, rgba(this.palette.sheen, 0));
-    shade.addColorStop(1, rgba(this.palette.shadow, 0.14));
-    g.fillStyle = shade;
-    g.fill();
-    g.strokeStyle = rgba(ramp.near.map((value) => 0.28 * value + 182), 0.98);
-    g.lineWidth = Math.max(0.7, 1.25 * ratio);
-    g.stroke();
+    g.fill(outline);
+    g.strokeStyle = face;
+    g.lineWidth = RIBBON_RIM_WIDTH;
+    g.stroke(outline);
     // Where the slab reaches the keys it burns white; the same emission runs through the outline, so there is no second frame at the cut.
     const gap = Math.max(0, this.rail - head.y);
-    const power = !emission ? 0 : age >= 0 ? 1 : Math.max(0, 1 - gap / (width * 0.65)) ** 1.5;
+    const power = 0.58 * (age >= 0 ? 1 : Math.max(0, 1 - gap / (width * 0.65)) ** 1.5);
     if (power > 0.003) {
       const anchor = Math.min(head.y, this.rail);
       const band = Math.max(width * 2.05, this.pitch * 1.42);
+      const contactColor = this.palette.burn[2].map((channel, index) => (channel + ramp.near[index]) / 2);
       const hot = gradient(g, anchor - band, anchor, [
-        [0, rgba(ramp.near, 0)], [0.17, rgba(ramp.near, power * 0.13)], [0.37, rgba(this.palette.burn[0], power * 0.92)], [0.48, rgba(this.palette.burn[1], power)], [1, rgba(this.palette.burn[2], power)],
+        [0, rgba(ramp.near, 0)], [0.17, rgba(ramp.near, power * 0.13)], [0.37, rgba(this.palette.burn[0], power * 0.92)], [0.48, rgba(this.palette.burn[1], power)], [1, rgba(contactColor, power)],
       ]);
       g.save();
-      g.clip();
+      g.clip(outline);
       g.fillStyle = hot;
       g.fillRect(Math.min(head.x, tail.x) - width, anchor - band, Math.abs(head.x - tail.x) + 2 * width, band + 1);
       g.restore();
-      shape();
       g.strokeStyle = hot;
-      g.lineWidth = Math.max(0.76, 1.4 * ratio);
-      g.stroke();
+      g.lineWidth = 1.4;
+      g.stroke(outline);
     }
-    g.restore();
   }
 
-  /** Sustain uses the same time projection, in a narrow lane before the first key. */
-  private pedalLane(): void {
-    if (!this.pedals.length) return;
-    const g = this.ctx;
-    const center = this.pitch * 0.24;
-    const half = this.pitch * 0.12;
-    const shape = (start: number, end: number) => {
-      const points = [this.projectRoll(center - half, start), this.projectRoll(center + half, start), this.projectRoll(center + half, end), this.projectRoll(center - half, end)];
-      g.beginPath();
-      g.moveTo(points[0].x, points[0].y);
-      for (const point of points.slice(1)) g.lineTo(point.x, point.y);
-      g.closePath();
-    };
-    g.save();
-    g.beginPath();
-    g.rect(0, 0, this.width, this.rail);
-    g.clip();
-    shape(0, this.visibleAhead);
-    g.strokeStyle = rgba(this.palette.mark, 0.25);
-    g.lineWidth = this.pitch * 0.055;
-    g.stroke();
-    for (const pedal of this.pedals) {
-      const start = Math.max(0, pedal.down - this.time);
-      const end = Math.min(this.visibleAhead, pedal.up - this.time);
-      if (end <= start) continue;
-      shape(start, end);
-      g.fillStyle = rgba(this.palette.mark, pedal.down <= this.time ? 0.85 : 0.5);
-      g.fill();
+  /** Mix pressed voices and the voices held by the pedal at each location on the lower strip. */
+  private buildStripVoiceField(tails: Tail[], pedal: ScenePedal | undefined, pedalLevel: number): void {
+    this.stripVoiceField.fill(0);
+    this.stripVoiceWeights.fill(0);
+    const step = this.width / (UNDER_STOPS - 1);
+    const spread = 3.6 * this.pitch;
+    const release = pedal !== undefined && this.time >= pedal.up;
+    const sampleTime = release ? pedal.up : this.time;
+    for (const tail of tails) {
+      const age = sampleTime - tail.note.start;
+      // On release keep the last sounding colours while the light fades out.
+      const remaining = tail.note.sustainDuration - age;
+      const sustained = release ? age > 0 && remaining >= -1e-9 : age >= 0 && remaining > 0;
+      const strength = Math.max(keyPressAt(tail.note, tail.age), sustained ? pedalLevel : 0);
+      if (strength <= 0) continue;
+      const first = Math.max(0, Math.ceil((tail.x - 3 * spread) / step));
+      const last = Math.min(UNDER_STOPS - 1, Math.floor((tail.x + 3 * spread) / step));
+      for (let stop = first; stop <= last; stop++) {
+        const distance = (stop * step - tail.x) / spread;
+        const weight = strength * tail.note.velocity * Math.exp(-0.5 * distance * distance);
+        this.stripVoiceWeights[stop] += weight;
+        for (let channel = 0; channel < 3; channel++) {
+          this.stripVoiceField[stop * 3 + channel] += weight * tail.rgb[channel];
+        }
+      }
     }
-    g.font = `${this.pitch * 0.65}px sans-serif`;
-    g.fillStyle = rgba(this.palette.mark, 0.85);
-    g.fillText('Pedal', this.pitch * 0.65, this.rail - this.pitch * 0.3);
-    g.restore();
   }
 
-  /** Independent strip light: one selected colour at constant brightness. */
-  private underRail(): void {
-    const g = this.ctx;
+  /** The pedal changes the indicator width and brightness. Sounding voices colour their regions. */
+  private underRail(tails: Tail[], prepared?: WaterfallWindow): void {
+    const g = this.keyboard;
     const y = this.stripY;
+    const at = lowerBound(prepared?.pedalTo ?? this.pedals.length,
+      index => this.pedals[index].down <= this.time, prepared?.pedalFrom ?? 0);
+    const pedal = this.pedals[at - 1];
+    const level = pedal ? pedalLevelAt(pedal, this.time) : 0;
+    this.buildStripVoiceField(tails, pedal, level);
     const profile = g.createLinearGradient(0, 0, this.width, 0);
-    const lit = this.stripColor;
-    const base = this.palette.stripBase;
-    const center = 0.52;
-    const spread = 0.35;
     for (let stop = 0; stop < UNDER_STOPS; stop++) {
       const u = stop / (UNDER_STOPS - 1);
-      const dx = (u - center) / spread;
-      const beam = Math.exp(-0.5 * dx * dx) * Math.min(1, 0.012 + u * 7.5, 0.012 + (1 - u) * 7.5);
-      const color = lit.map((value, channel) => Math.min(255, base[channel] + value * beam));
+      const edge = Math.min(1, 0.12 + u * 9, 0.12 + (1 - u) * 9);
+      const weight = this.stripVoiceWeights[stop];
+      const tint = 1 - Math.exp(-2.9 * weight);
+      const brightness = edge * (0.57 + 0.21 * level);
+      const voiceBrightness = edge * (0.82 + 0.15 * level);
+      const color = this.stripColor.map((base, channel) => {
+        const voice = weight ? this.stripVoiceField[stop * 3 + channel] / weight : base;
+        const idle = base * brightness;
+        const mixed = idle + (voice * voiceBrightness - idle) * tint;
+        return Math.min(255, this.palette.stripBase[channel] + mixed);
+      });
       profile.addColorStop(u, rgba(color));
-      this.underField.set(color.map((value) => value / 255), stop * 3);
     }
     g.save();
     const scale = clamp(this.pitch / REFERENCE_PITCH, 0.72, 1.75);
     const [railTop, railUpper, railLower, railBottom] = this.palette.rail;
     g.fillStyle = gradient(g, y - 5 * scale, y + 5 * scale, [[0, railTop], [0.3, railUpper], [0.53, railLower], [0.95, railBottom], [1, railBottom]]);
     g.fillRect(0, y - 5 * scale, this.width, this.height - y + 5 * scale);
-    g.globalCompositeOperation = 'screen';
     g.fillStyle = profile;
-    for (let row = -5; row <= 6; row++) {
-      g.globalAlpha = row < 0 ? Math.exp(-(row * row) / 7.5) : Math.exp(-(row * row) / 10);
-      g.fillRect(0, y + row * scale, this.width, scale + 0.03);
-    }
+    const core = scale * (0.94 + 1.15 * level);
+    g.fillRect(0, y - core / 2, this.width, core);
     g.restore();
   }
 
+  /** Paint a horizontal slice of light, bounded to the region reached by the source. */
+  private addLightRow(field: Float32Array, row: number, x: number, spread: number, energy: number, rgb: Rgb): void {
+    const step = this.width / (CONTACT_LIGHT_STOPS - 1);
+    const radius = Math.min(LIGHT_REACH * this.pitch, 3.4 * spread);
+    const first = Math.max(0, Math.ceil((x - radius) / step));
+    const last = Math.min(CONTACT_LIGHT_STOPS - 1, Math.floor((x + radius) / step));
+    for (let stop = first; stop <= last; stop++) {
+      const distance = (stop * step - x) / spread;
+      const strength = energy * Math.exp(-0.5 * distance * distance) / 255;
+      const sample = row * CONTACT_LIGHT_STOPS + stop;
+      const offset = sample * 3;
+      if (field !== this.contactField) {
+        for (let channel = 0; channel < 3; channel++) field[offset + channel] += strength * rgb[channel];
+        continue;
+      }
+
+      // Blend across the source's centre so interpolation between texels has no hard seam.
+      const fromLeft = clamp(0.5 + (stop * step - x) / (0.5 * this.pitch), 0, 1);
+      this.accumulateContact(sample, strength * fromLeft, x, rgb);
+      this.accumulateContact(sample + CONTACT_SIDE_SAMPLES, strength * (1 - fromLeft), x, rgb);
+    }
+  }
+
+  private accumulateContact(sample: number, strength: number, x: number, rgb: Rgb): void {
+    this.contactMoment[sample] += strength * x;
+    this.contactWeight[sample] += strength;
+    for (let channel = 0; channel < 3; channel++) {
+      this.contactField[sample * 3 + channel] += strength * rgb[channel];
+    }
+  }
+
+  /** The strike lights the ridge until the key returns to its resting pose. */
+  private buildRidgeField(keys: Emitter[]): void {
+    this.ridgeField.fill(0);
+    this.ridgeFlashField.fill(0);
+    this.ridgeRippleField.fill(0);
+    const step = this.width / (CONTACT_LIGHT_STOPS - 1);
+    for (const { age, light, onset, press, x, rgb, note } of keys) {
+      if (press <= 0) continue;
+      const power = press * (0.53 * light + 0.78 * onset);
+      const spread = this.pitch * (1.12 + 0.72 * (1 - Math.exp(-age / 0.17)));
+      this.addLightRow(this.ridgeField, 0, x, spread, power, rgb);
+      if (onset > 0.015) {
+        const core = this.pitch * (0.56 + 0.20 * press);
+        this.addLightRow(this.ridgeFlashField, 0, x, core, 2.2 * press * onset, rgb);
+      }
+      const life = clamp(1 - age / .34, 0, 1);
+      if (life > 0) {
+        const travel = 8 * age;
+        const reach = this.pitch * (travel + 1.25);
+        const first = Math.max(0, Math.ceil((x - reach) / step));
+        const last = Math.min(CONTACT_LIGHT_STOPS - 1, Math.floor((x + reach) / step));
+        const energy = note.velocity * press * life * life * (1 - Math.exp(-age / .014));
+        for (let stop = first; stop <= last; stop++) {
+          const front = Math.abs(stop * step - x) / this.pitch - travel;
+          const crest = Math.exp(-.5 * (front / .36) ** 2);
+          const trough = Math.exp(-.5 * ((front + .48) / .54) ** 2);
+          this.ridgeRippleField[stop] += energy * (crest - .52 * trough);
+        }
+      }
+    }
+
+    // One texture row carries strip reflections. Only the continuous neutral
+    // strip contributes after a key has returned to rest.
+    for (let stop = 0; stop < CONTACT_LIGHT_STOPS; stop++) {
+      const index = stop * 3;
+      const target = (2 * CONTACT_SIDE_SAMPLES + stop) * 4;
+      const peak = Math.max(this.ridgeField[index], this.ridgeField[index + 1], this.ridgeField[index + 2]);
+      const strike = Math.max(this.ridgeFlashField[index], this.ridgeFlashField[index + 1], this.ridgeFlashField[index + 2]);
+      for (let channel = 0; channel < 3; channel++) {
+        const idle = 0.12 * this.palette.crestIdle[channel];
+        const colored = 106 * this.ridgeField[index + channel] / (1 + peak);
+        this.contactPixels[target + channel] = Math.round(idle + colored);
+      }
+      this.contactPixels[target + 3] = Math.round(255 * (1 - Math.exp(-2.4 * strike)));
+    }
+  }
+
+  /** Direct light from physically pressed keys, including the soft falloff past a black key's nose. */
+  private buildContactField(keys: Emitter[]): void {
+    this.contactField.fill(0);
+    this.contactMoment.fill(0);
+    this.contactWeight.fill(0);
+    for (const key of keys) {
+      if (key.press <= 0) continue;
+      const power = key.press * (.96 * key.light + 1.03 * key.onset);
+      const ageSpread = 0.72 * (1 - Math.exp(-key.age / 0.17));
+      const footprint = 0.76 + 0.24 * Math.sqrt(key.press);
+      const black = this.byMidi.get(key.note.pitch)?.black;
+      for (let row = 0; row < CONTACT_LIGHT_ROWS; row++) {
+        const depth = row / (CONTACT_LIGHT_ROWS - 1);
+        const fade = black ? clamp((depth - 0.72) / 0.28, 0, 1) : 0;
+        const reach = 1 - fade * fade * (3 - 2 * fade);
+        if (reach === 0) continue;
+        const spread = this.pitch * (1.30 + ageSpread + 0.92 * depth) * footprint;
+        // The broad reflection softens towards the front more slowly than the rail's specular flash.
+        const absorption = black ? 0.25 : 0.36;
+        const diffuse = (0.86 + 0.38 * depth) * Math.exp(-absorption * depth);
+        this.addLightRow(this.contactField, row, key.x, spread, power * reach * diffuse, key.rgb);
+      }
+    }
+    for (let left = 0; left < CONTACT_SIDE_SAMPLES; left++) {
+      const right = left + CONTACT_SIDE_SAMPLES;
+      let peak = 0;
+      for (let channel = 0; channel < 3; channel++) {
+        peak = Math.max(peak, this.contactField[left * 3 + channel] + this.contactField[right * 3 + channel]);
+      }
+      const exposure = 255 / (1 + peak);
+      this.packContact(left, exposure);
+      this.packContact(right, exposure);
+    }
+  }
+
+  /** A slow wave with a shorter ripple travelling back along it. Both use score time. */
+  private railWave(x: number): number {
+    return 0.57 * Math.sin(x / (5.8 * this.pitch) - 2.6 * this.time)
+      + 0.25 * Math.sin(x / (1.25 * this.pitch) + 4.1 * this.time)
+      + 0.19 * Math.sin(x / (0.42 * this.pitch) - 6.3 * this.time);
+  }
+
+  private packContact(sample: number, exposure: number): void {
+    const target = sample * 4;
+    for (let channel = 0; channel < 3; channel++) {
+      this.contactPixels[target + channel] = Math.round(this.contactField[sample * 3 + channel] * exposure);
+    }
+    const weight = this.contactWeight[sample];
+    const local = (sample % CONTACT_LIGHT_STOPS) / (CONTACT_LIGHT_STOPS - 1);
+    const lightX = weight > 0 ? this.contactMoment[sample] / weight / this.width : local;
+    // Directed rows carry the light's horizontal position in the fourth component.
+    this.contactPixels[target + 3] = 255 * clamp(lightX, 0, 1);
+  }
+
   /** What a strike leaves: the ridge along the keys, the footprints of the hot spots, the dust in the air. */
-  private contact(hits: Hit[], lit: Emitter[], incoming: Incoming[], tails: Tail[]): void {
+  private contact(hits: Hit[], lit: Emitter[]): CanvasGradient {
     const g = this.ctx;
     const scale = clamp(this.pitch / REFERENCE_PITCH, 0.78, 2.75);
     const rail = this.rail;
@@ -587,78 +1240,89 @@ export class WaterfallScene {
     g.rect(0, 0, width, rail);
     g.clip();
     g.globalCompositeOperation = 'screen';
-    // Each attack leaves a low ridge in its own colour after the airborne particles have died out.
-    const residues = tails.filter((tail) => tail.energy > 0.009);
     const samples = Math.ceil(width / (1.4 * scale));
     const crest: { x: number; y: number; heat: number; color: Rgb; attack: number }[] = [];
+    const surface = this.keyboard;
     const stops = g.createLinearGradient(0, 0, width, 0);
+    const seamFill = g.createLinearGradient(0, 0, width, 0);
+    const coreStroke = surface.createLinearGradient(0, 0, width, 0);
     for (let sample = 0; sample <= samples; sample++) {
       const x = (sample / samples) * width;
-      let mound = 0;
-      let heat = 0;
-      let fresh = 0;
-      let ripple = 0;
-      const sum: Rgb = [0, 0, 0];
-      for (const tail of residues) {
-        const dx = (x - tail.x) / scale;
-        const distance = Math.abs(dx);
-        if (distance > 99) continue;
-        const weight = Math.min(1, tail.energy * 1.4);
-        const seed = tail.note.seed;
-        const keyWidth = this.byMidi.get(tail.note.pitch)?.width ?? this.pitch;
-        const reach = (keyWidth / scale) * 0.47;
-        const ledge = Math.exp(-Math.pow(distance / (reach + 1.4), 3));
-        const ring = Math.exp(-Math.pow((distance - 50 * tail.age) / 8.5, 2) - 3 * tail.age);
-        const envelope = weight * (0.63 * Math.exp(-distance / 26) + 0.38 * ledge);
-        heat += envelope;
-        fresh += envelope * Math.exp(-tail.release / 0.28);
-        for (let channel = 0; channel < 3; channel++) sum[channel] += envelope * tail.rgb[channel];
-        mound += weight * ledge * (1.6 + 0.85 * Math.sin((x / scale) * 0.52 + seed + 0.7 * tail.age) + 0.75 * Math.exp(-tail.age / 0.14));
-        ripple += 2.9 * weight * ring * (1 + 0.3 * Math.sin(0.7 * dx + seed));
+      const at = (sample / samples) * (CONTACT_LIGHT_STOPS - 1);
+      const left = Math.floor(at);
+      const right = Math.min(CONTACT_LIGHT_STOPS - 1, left + 1);
+      const mix = at - left;
+      const light: Rgb = [0, 0, 0];
+      let flash = 0;
+      for (let channel = 0; channel < 3; channel++) {
+        const from = left * 3 + channel;
+        const to = right * 3 + channel;
+        light[channel] = this.ridgeField[from] * (1 - mix) + this.ridgeField[to] * mix;
+        flash = Math.max(flash, this.ridgeFlashField[from] * (1 - mix) + this.ridgeFlashField[to] * mix);
       }
-      for (const arriving of incoming) {
-        const dx = (x - arriving.x) / arriving.width;
-        mound += 1.55 * Math.exp(arriving.age / 0.047 - 2.6 * dx * dx);
+      const peak = Math.max(...light);
+      const heat = 1 - Math.exp(-peak * 1.65);
+      const attack = 1 - Math.exp(-2.4 * flash);
+      const ripple = this.ridgeRippleField[left] * (1 - mix) + this.ridgeRippleField[right] * mix;
+      const rise = clamp(.56 * heat + 1.24 * attack + .98 * ripple, -.25, 2.15);
+      const color = peak > 0.001 ? light.map(value => value * 255 / peak) as Rgb : this.palette.crestIdle;
+      crest.push({ x, y: rail - scale * (0.78 + this.railWave(x) + rise), heat, color, attack });
+      if (sample % 3 === 0 || sample === samples) {
+        const u = sample / samples;
+        stops.addColorStop(u, rgba(color, 0.30 + 0.69 * heat));
+        const tint = 1 - Math.exp(-4.5 * peak);
+        const core = this.palette.crestLine.map((base, channel) => base + (color[channel] - base) * tint);
+        coreStroke.addColorStop(u, rgba(core, .69 + .23 * heat));
+        const edge = this.palette.crestIdle.map((base, channel) => base + (color[channel] - base) * heat);
+        seamFill.addColorStop(u, rgba(edge, 0.50 + 0.22 * heat + 0.23 * attack));
       }
-      const rise = 2.15 * (1 - Math.exp(-Math.max(0, mound + 0.32 * ripple) / 3.9));
-      const wave = 0.24 * Math.sin((x / scale) * 0.28) * Math.cos((x / scale) * 0.086) + 0.1 * Math.sin((x / scale) * 0.91);
-      const color: Rgb = heat ? [sum[0] / heat, sum[1] / heat, sum[2] / heat] : this.palette.crestIdle;
-      crest.push({ x, y: rail - scale * (0.61 + rise + wave), heat: 1 - Math.exp(-heat), color, attack: heat ? fresh / heat : 0 });
-      if (sample % 3 === 0 || sample === samples) stops.addColorStop(sample / samples, rgba(color, 0.1 + 0.86 * (1 - Math.exp(-heat))));
     }
-    const path = () => {
-      g.beginPath();
-      crest.forEach((point, index) => (index ? g.lineTo(point.x, point.y) : g.moveTo(point.x, point.y)));
+    const path = (context = g) => {
+      context.beginPath();
+      for (const [index, point] of crest.entries()) {
+        if (index === 0) context.moveTo(point.x, point.y);
+        else context.lineTo(point.x, point.y);
+      }
     };
     // The haze above the ridge follows the ridge itself; it does not paint a white spot onto the keys.
     const rows = 48;
-    if (!this.airSurface) this.airSurface = document.createElement('canvas');
-    if (this.airSurface.width !== samples + 1 || this.airSurface.height !== rows || !this.airPixels) {
-      this.airSurface.width = samples + 1;
+    if (!this.airSurface) this.airSurface = this.makeCanvas();
+    if (this.airSurface.width !== AIR_COLUMNS || this.airSurface.height !== rows || !this.airPixels) {
+      this.airSurface.width = AIR_COLUMNS;
       this.airSurface.height = rows;
-      this.airContext = this.airSurface.getContext('2d');
-      this.airPixels = this.airContext ? this.airContext.createImageData(samples + 1, rows) : null;
+      this.airContext = drawingContext(this.airSurface);
+      this.airPixels = this.airContext ? this.airContext.createImageData(AIR_COLUMNS, rows) : null;
     }
     if (this.airContext && this.airPixels) {
       const out = this.airPixels.data;
-      for (let column = 0; column <= samples; column++) {
-        const point = crest[column];
-        const above = (rail - point.y) / scale;
+      const hazeHeight = rows * scale * 1.25;
+      for (let column = 0; column < AIR_COLUMNS; column++) {
+        const point = crest[Math.round((column / (AIR_COLUMNS - 1)) * samples)];
+        const above = (rail - point.y) * rows / hazeHeight;
+        const distance = Math.max(0, rows - 1 - above);
+        const heatDecay = 1 / (8.5 + 7.5 * point.heat);
+        const heatStep = Math.exp(heatDecay);
+        let idle = Math.exp(-distance / AIR_IDLE_DECAY);
+        let wide = Math.exp(-distance * heatDecay);
+        let core = Math.exp(-distance / 2.3);
+        const brightness = 0.86 + 0.14 * point.attack;
+        const [red, green, blue] = point.color;
         for (let row = 0; row < rows; row++) {
-          const distance = Math.max(0, rows - 1 - row - above);
-          const index = (row * (samples + 1) + column) * 4;
-          const haze = 0.16 * Math.exp(-distance / 3.15) + point.heat * (0.65 * Math.exp(-distance / (7 + 6 * point.heat)) + 0.13 * Math.exp(-distance / 2.3));
-          out[index] = Math.min(255, point.color[0] * (0.66 + 0.4 * point.attack));
-          out[index + 1] = point.color[1] * (0.5 + 0.12 * point.attack);
-          out[index + 2] = Math.min(255, point.color[2] * (0.88 + 0.3 * point.attack));
+          const index = (row * AIR_COLUMNS + column) * 4;
+          const haze = 0.32 * idle + point.heat * (0.59 * wide + 0.16 * core);
+          out[index] = red * brightness;
+          out[index + 1] = green * brightness;
+          out[index + 2] = blue * brightness;
           out[index + 3] = 255 * haze * Math.min(1, row / 4);
+          idle = Math.min(1, idle * AIR_IDLE_STEP);
+          wide = Math.min(1, wide * heatStep);
+          core = Math.min(1, core * AIR_CORE_STEP);
         }
       }
       this.airContext.putImageData(this.airPixels, 0, 0);
-      g.drawImage(this.airSurface, 0, rail - rows * scale, width, rows * scale);
+      g.drawImage(this.airSurface, 0, rail - hazeHeight, width, hazeHeight);
     }
     g.lineJoin = 'round';
-    g.globalAlpha = 1;
     path();
     g.lineTo(width, rail);
     g.lineTo(0, rail);
@@ -667,37 +1331,19 @@ export class WaterfallScene {
     g.fill();
     path();
     g.lineWidth = 2.25 * Math.sqrt(scale);
-    g.strokeStyle = rgba(this.palette.crestGlow, 0.39);
+    g.strokeStyle = stops;
     g.stroke();
-    path();
-    g.lineWidth = Math.max(0.91, Math.sqrt(scale) * 1.2);
-    g.strokeStyle = rgba(this.palette.crestLine, 0.93);
-    g.stroke();
-    // A thin, filled contact footprint: a single note and a repeat have different widths.
+    surface.save();
+    surface.globalCompositeOperation = 'source-over';
+    path(surface);
+    surface.lineJoin = 'round';
+    surface.lineWidth = Math.max(0.91, Math.sqrt(scale) * 1.2);
+    surface.strokeStyle = coreStroke;
+    surface.stroke();
+    surface.restore();
+    // Each strike raises dust above the rail; its light spot lies on the pressed key's own surface (`KeyStage`).
     const root = Math.sqrt(scale);
-    for (const light of lit) {
-      this.airDust(light, root);
-      const note = light.note;
-      const release = Math.max(0, light.age - note.duration);
-      const repeat = tails.reduce((value, tail) => (tail.note.pitch === note.pitch && tail.age > light.age + 0.025 ? Math.max(value, Math.exp(-(tail.age - light.age) / 0.42)) : value), 0);
-      const envelope = note.velocity * (1 - Math.exp(-light.age / 0.012)) * Math.exp(-release / 0.12);
-      if (envelope < 0.014) continue;
-      const halfWidth = (0.68 + 0.59 * repeat) * this.pitch;
-      const reach = Math.ceil(halfWidth * 3.25);
-      const base = rail - 0.28 * root;
-      for (let dx = -reach; dx <= reach; dx += root) {
-        const patch = Math.exp(-0.7 * (Math.abs(dx) / halfWidth) ** 1.75);
-        const strength = patch * envelope;
-        if (strength < 0.012) continue;
-        const tint = light.rgb.map((value) => value + (252 - value) * (0.53 + 0.22 * patch));
-        const swell = 1 + 0.14 * Math.sin((dx / root) * 0.78 + note.seed) * Math.exp(-light.age / 0.22);
-        const height = (3.2 + 6.8 * patch) * root * swell;
-        g.fillStyle = gradient(g, base - height, base, [
-          [0, rgba(light.rgb, 0)], [0.35, rgba(light.rgb, strength * 0.34)], [0.62, rgba(tint, Math.min(1, strength * 0.92))], [0.84, rgba(this.palette.footprint[0], strength * 0.96)], [1, rgba(this.palette.footprint[1], strength)],
-        ]);
-        g.fillRect(light.x + dx, base - height, root + 0.03, height + 0.32 * root);
-      }
-    }
+    for (const light of lit) this.airDust(light, root);
     for (const hit of hits) {
       const half = (this.byMidi.get(hit.note.pitch)?.width ?? this.pitch) * 0.46;
       g.save();
@@ -708,25 +1354,37 @@ export class WaterfallScene {
       g.restore();
     }
     g.restore();
+
+    // The key mesh covers this strip wherever a cap reaches the back of the keyboard.
+    // Its colour is visible only through the small reliefs between the caps.
+    surface.save();
+    const cover = 0.10 * this.pitch;
+    surface.fillStyle = seamFill;
+    surface.fillRect(0, rail, width, 0.58 * cover);
+    surface.globalAlpha = 0.48;
+    surface.fillRect(0, rail + 0.58 * cover, width, 0.42 * cover);
+    surface.restore();
+    return seamFill;
   }
 
   /** The cloud that hangs over a held key: a cached density mask per voice and variant, grown from the strike. */
   private airDust(light: Emitter, scale: number): void {
     const note = light.note;
     const release = Math.max(0, light.age - note.duration);
-    if (light.age < 0.018 || release > 0.72) return;
+    if (light.age < 0.018 || release >= 0.28) return;
     const phase = 1 - Math.exp(-light.age / 0.088);
-    const power = note.velocity * (1 - Math.exp(-light.age / 0.045)) * Math.exp(-release / 0.19);
+    const tail = 1 - clamp((release - 0.10) / 0.18, 0, 1);
+    const power = note.velocity * (1 - Math.exp(-light.age / 0.045)) * Math.exp(-release / 0.16) * tail;
     const variant = (note.seed >>> 0) % 5;
     const key = `${variant}:${note.voice}`;
     let mask = this.densityMasks.get(key);
     if (!mask) {
       const maskWidth = 42;
       const maskHeight = 58;
-      mask = document.createElement('canvas');
+      mask = this.makeCanvas();
       mask.width = maskWidth;
       mask.height = maskHeight;
-      const g = mask.getContext('2d');
+      const g = drawingContext(mask);
       if (g) {
         const image = g.createImageData(maskWidth, maskHeight);
         const color = (this.ramps[note.voice] ?? this.ramps[0]).glow;
@@ -764,7 +1422,7 @@ export class WaterfallScene {
     const sway = Math.sin(note.seed + light.age * 6) * 2.1 * scale;
     const lift = Math.min(3.4, release * 12) * scale;
     const g = this.ctx;
-    g.globalAlpha = Math.min(1, 1.21 * power);
+    g.globalAlpha = Math.max(light.press, 0.22 * tail) * Math.min(1, 1.21 * power);
     g.drawImage(mask, light.x + sway - drawWidth / 2, this.rail - (1.5 * scale + lift + drawHeight), drawWidth, drawHeight);
     g.globalAlpha = 1;
   }
