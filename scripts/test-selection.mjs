@@ -21,6 +21,8 @@ const stubs = {
   '@/core/gateway/apiBase': { API_BASE: '/api' },
   '@/core/gateway/HttpGateway': { HttpGateway: Gateway },
   '@/core/gateway/QueuedGateway': { QueuedGateway },
+  './measureSync': { DraftSync: class { apply(sync) { return sync.view; } } },
+  '@/core/playback/draftSounds': { draftSounds: { apply() {} } },
   '@/core/auth/authorizedFetch': { AuthRequiredError: class extends Error {} },
   '@/core/auth/authPrompt': { useAuthPrompt: { getState: () => ({ open() {} }) } },
 };
@@ -206,7 +208,7 @@ await test('HTTP gateway sends exactly one flat beam-split request', async () =>
   stubs['./apiBase'] = { API_BASE: '/api' };
   stubs['@/core/auth/authorizedFetch'] = { authorizedFetch: async (url, options) => {
     requests.push({ url, ...options, body: JSON.parse(options.body) });
-    return { ok: true, json: async () => ({ document: { id: 'next' } }) };
+    return { ok: true, json: async () => ({ sync: { view: { id: 'next' } } }) };
   } };
   const { HttpGateway } = load('src/core/gateway/HttpGateway.ts');
   const result = await new HttpGateway().apply('d', { type: 'splitBeam', beamId: 'beam', beforeCarrierId: 'b' });
@@ -220,7 +222,7 @@ await test('HTTP gateway adds and removes a voice of a context through the two u
   stubs['./apiBase'] = { API_BASE: '/api' };
   stubs['@/core/auth/authorizedFetch'] = { authorizedFetch: async (url, options) => {
     requests.push({ url, ...options, body: JSON.parse(options.body) });
-    return { ok: true, json: async () => ({ document: { id: 'next' } }) };
+    return { ok: true, json: async () => ({ sync: { view: { id: 'next' } } }) };
   } };
   cache.delete('src/core/gateway/HttpGateway.ts');
   const { HttpGateway } = load('src/core/gateway/HttpGateway.ts');
@@ -262,7 +264,7 @@ await test('HTTP gateway sends group staff-step changes as one relative request'
   const requests = [];
   stubs['@/core/auth/authorizedFetch'] = { authorizedFetch: async (url, options) => {
     requests.push({ url, ...options, body: JSON.parse(options.body) });
-    return { ok: true, json: async () => ({ document: { id: 'next' } }) };
+    return { ok: true, json: async () => ({ sync: { view: { id: 'next' } } }) };
   } };
   cache.delete('src/core/gateway/HttpGateway.ts');
   const { HttpGateway } = load('src/core/gateway/HttpGateway.ts');
@@ -277,7 +279,7 @@ await test('HTTP beam override persists two offsets and null resets automatic pl
   const requests = [];
   stubs['@/core/auth/authorizedFetch'].authorizedFetch = async (url, init) => {
     requests.push({ url, method: init.method, body: JSON.parse(init.body) });
-    return { ok: true, async json() { return { document: {} }; } };
+    return { ok: true, async json() { return { sync: { view: {} } }; } };
   };
   const { HttpGateway } = load('src/core/gateway/HttpGateway.ts');
   await new HttpGateway().apply('d', { type: 'setBeamOverride', beamId: 'beam', override: { leftFactor: 0.5, rightFactor: 2 } });
@@ -359,7 +361,7 @@ await test('the HTTP gateway creates a glissando with its type', async () => {
   const requests = [];
   stubs['@/core/auth/authorizedFetch'].authorizedFetch = async (url, init) => {
     requests.push({ url, method: init.method, body: JSON.parse(init.body) });
-    return { ok: true, async json() { return { document: {} }; } };
+    return { ok: true, async json() { return { sync: { view: {} } }; } };
   };
   const { HttpGateway } = load('src/core/gateway/HttpGateway.ts');
   await new HttpGateway().apply('d', { type: 'glissandoNotes', startNoteId: 'a1', endNoteId: 'b1', glissandoType: 'wavy' });
