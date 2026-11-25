@@ -10,11 +10,12 @@ import type { ContextIndex } from '@/core/model/contexts';
 import { toBeats, keyOfAlterations, markKey } from '@/core/model/contexts';
 import type { DurationValue, Fraction, RefrainContext, ScoreContext, ScoreDocument, KeyAlteration, ClefName, VoltaContext } from '@/core/model/score';
 import { staffOnsetX, type ContextShape, type SlurShape, type SpanPreview, type StaffZone } from '@/rendering/ScoreRenderer';
-import { derivedEnding, passesLabel, refrainLabel, voltaParts, type Place } from '@/core/model/repeats';
+import { derivedEnding, passesLabel, refrainLabel, repeatBarlines, voltaParts, type Place } from '@/core/model/repeats';
 import { automaticArch, fitted, framed, slurOffsets, type SlurFrame, type SlurOffsets } from '@/core/model/slurHandles';
 import { slurHeight } from '@/core/model/presentation';
 import { getGhostGlyphMarkup } from './noteGlyph';
-import { REPEAT_SIGN_ROOM, STAFF_SPACE } from './engravingScale';
+import { REPEAT_BAR_HALF, REPEAT_SIGN_BEFORE_NOTES, REPEAT_SIGN_GAP, REPEAT_SIGN_REACH, STAFF_SPACE } from './engravingScale';
+import { drawBarline } from './barlines';
 
 /** the highest a slur's arch may be pushed to clear engraving, in staff spaces */
 const MAX_SLUR_LIFT = 10;
@@ -112,6 +113,17 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
   const nodes: SVGGElement[] = [];
   const slurShapes: SlurShape[] = [];
   const staffOrder = doc.staffOrder;
+  // how far a repeat sign's ink reaches left of the barline that ends a measure: a `:|` by its dots, the `|:` of the next measure in the
+  // same system by its thick bar (one that begins the next system stands after that system's header, not on this line)
+  const signReachBefore = new Map<string, number>();
+  {
+    const { beginMeasureIds, endMeasureIds } = repeatBarlines(doc);
+    doc.measures.forEach((m, i) => {
+      const next = doc.measures[i + 1];
+      if (endMeasureIds.has(m.id)) signReachBefore.set(m.id, REPEAT_SIGN_REACH);
+      else if (next && beginMeasureIds.has(next.id) && systemOf.get(next.id) === systemOf.get(m.id)) signReachBefore.set(m.id, REPEAT_BAR_HALF);
+    });
+  }
   let activeContext: ScoreContext;
   const zoneOf = new Map<string, StaffZone>();
   for (const z of zones) zoneOf.set(`${z.measureId}:${z.staffId}`, z);
@@ -131,12 +143,12 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
   /** a span cut into one piece per system it touches: where it starts and ends on each. A span whose end is the
    *  start of a later measure covers the last note of the one before and is drawn to that measure's end, not into the next
    *  (`toBarline` on its last piece). */
-  const pieces = (start: Point, end: Point, atRest = false): { measureId: string; x0: number; x1: number; first: boolean; last: boolean; toBarline: boolean }[] => {
+  const pieces = (start: Point, end: Point, atRest = false): { measureId: string; lastMeasureId: string; x0: number; x1: number; first: boolean; last: boolean; toBarline: boolean }[] => {
     const from = index.measureIndex.get(start.measureId) ?? 0;
     const toScoreEnd: boolean = end.beats === Infinity;
     const endsAtBarline: boolean = toScoreEnd || (end.beats === 0 && (index.measureIndex.get(end.measureId) ?? 0) > from);
     const to = (index.measureIndex.get(end.measureId) ?? 0) - (endsAtBarline && !toScoreEnd ? 1 : 0);
-    const out: { measureId: string; x0: number; x1: number; first: boolean; last: boolean; toBarline: boolean }[] = [];
+    const out: { measureId: string; lastMeasureId: string; x0: number; x1: number; first: boolean; last: boolean; toBarline: boolean }[] = [];
     let current: { system: number; firstM: string; lastM: string } | null = null;
     const runs: { system: number; firstM: string; lastM: string }[] = [];
     for (let i = from; i <= to; i += 1) {
@@ -161,7 +173,7 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
         if (first && dragged.edge === 'start') x0 = Math.min(dragged.x, x1 - STAFF_SPACE);
         if (last && dragged.edge === 'end') x1 = Math.max(dragged.x, x0 + STAFF_SPACE);
       }
-      if (x0 !== null && x1 !== null) out.push({ measureId: run.firstM, x0, x1, first, last, toBarline: last && endsAtBarline });
+      if (x0 !== null && x1 !== null) out.push({ measureId: run.firstM, lastMeasureId: run.lastM, x0, x1, first, last, toBarline: last && endsAtBarline });
     });
     return out;
   };
@@ -190,22 +202,13 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
     parent.appendChild(g);
     return g;
   };
-  /** a repeat sign on every staff: a thick and a thin bar with a pair of dots between the lines */
+  /** a repeat sign: the barline of its kind, drawn by the same function as every other barline */
   const barSign = (g: SVGGElement, measureId: string, x: number, side: 'start' | 'end') => {
-    const thin = side === 'start' ? x + 0.8 * STAFF_SPACE : x - 0.8 * STAFF_SPACE;
-    const dots = side === 'start' ? x + 1.4 * STAFF_SPACE : x - 1.4 * STAFF_SPACE;
-    // the thick and the thin bar run through every staff and the gap between them; the dots stand on each staff
     const top = topOf(measureId, staffOrder[0]);
-    const bottomEdge = bottomOf(measureId, staffOrder[staffOrder.length - 1]);
-    if (top !== null && bottomEdge !== null) {
-      g.appendChild(make('rect', { x: x - 0.25 * STAFF_SPACE, y: top, width: 0.5 * STAFF_SPACE, height: bottomEdge - top, fill: env.ink }));
-      g.appendChild(make('line', { x1: thin, x2: thin, y1: top, y2: bottomEdge, stroke: env.ink, 'stroke-width': 1 }));
-    }
-    for (const staffId of staffOrder) {
-      const bottom = bottomOf(measureId, staffId);
-      if (bottom === null) continue;
-      for (const lift of [1.5, 2.5]) g.appendChild(make('circle', { cx: dots, cy: bottom - lift * STAFF_SPACE, r: 0.22 * STAFF_SPACE, fill: env.ink }));
-    }
+    const bottom = bottomOf(measureId, staffOrder[staffOrder.length - 1]);
+    if (top === null || bottom === null) return;
+    const staffBottoms: number[] = staffOrder.flatMap((staffId) => bottomOf(measureId, staffId) ?? []);
+    drawBarline({ parent: g, kind: side === 'start' ? 'repeatBegin' : 'repeatEnd', x, top, bottom, staffBottoms, ink: env.ink });
   };
   /** the `|:` of a repeat that begins this measure, with its click zone: on the measure's left barline, and at the start of a system after
    *  the clef, key and time signature, in the room kept before the first note */
@@ -214,7 +217,7 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
     if (startBeats !== 0 || !zone) return;
     const measureAt = index.measureIndex.get(measureId) ?? 0;
     const beginsSystem = measureAt === 0 || systemOf.get(doc.measures[measureAt - 1].id) !== systemOf.get(measureId);
-    const x = beginsSystem ? zone.x0 - REPEAT_SIGN_ROOM + 0.9 * STAFF_SPACE : zone.left;
+    const x = beginsSystem ? zone.x0 - REPEAT_SIGN_BEFORE_NOTES : zone.left;
     barSign(g, measureId, x, 'start');
     signHit(g, measureId, x, 'start');
   };
@@ -223,8 +226,7 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
     barSign(g, measureId, x, 'end');
     signHit(g, measureId, x, 'end');
   };
-  /** the click zone of a repeat sign: the bars and the dots, across every staff. The sign itself is drawn by the staves, so without
-   *  this the repeat would have nothing to click on there. `x` is the barline, `side` which way the sign faces */
+  /** the click zone of a repeat sign: the bars and the dots, across every staff. `x` is the barline, `side` which way the sign faces */
   const signHit = (g: SVGGElement, measureId: string, x: number, side: 'start' | 'end') => {
     const top = topOf(measureId, staffOrder[0]);
     const bottom = bottomOf(measureId, staffOrder[staffOrder.length - 1]);
@@ -473,7 +475,9 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
               const half = 0.55 * STAFF_SPACE;
               // an end that lies on a barline (the span's own, or the system's) stops short of it, so the point does not touch the line
               const x0 = piece.first ? piece.x0 : piece.x0 + HAIRPIN_BARLINE_GAP;
-              const x1 = piece.last && !piece.toBarline ? piece.x1 : piece.x1 - HAIRPIN_BARLINE_GAP;
+              // the point of a hairpin that ends on a barline with a repeat sign stands clear of the sign's ink, not only of the line
+              const signReach = signReachBefore.get(piece.lastMeasureId);
+              const x1 = piece.last && !piece.toBarline ? piece.x1 : piece.x1 - (signReach === undefined ? HAIRPIN_BARLINE_GAP : signReach + REPEAT_SIGN_GAP);
               if (piece.first) handle(g, 'start', x0, y);
               if (piece.last) handle(g, 'end', x1, y);
               // two arms meeting at a point: a crescendo meets at its start and opens to the right, a diminuendo opens at its start and meets at its end
@@ -704,6 +708,8 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
             const bodyGroup = pieceGroup(parent, body);
             startSign(bodyGroup, body.measureId, point(parts[0].start).beats);
           }
+          // the brackets of a volta in one system stand at one height, the highest any of them needs
+          const levels = new Map<number, { element: SVGGraphicsElement; placement: Placement }[]>();
           for (const ending of endings) {
             for (const piece of pieces(point(ending.start), point(ending.end))) {
               const g = pieceGroup(parent, piece);
@@ -716,9 +722,11 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
               above.appendChild(make('path', { d: `M${piece.x0} ${row + (piece.first ? 1.2 * STAFF_SPACE : 0)} V${row} H${piece.x1}${closedRight ? ` V${row + 1.2 * STAFF_SPACE}` : ''}`, fill: 'none', stroke: env.ink, 'stroke-width': 1 }));
               if (piece.first) above.appendChild(text(ending.label, piece.x0 + 0.4 * STAFF_SPACE, row + 1.1 * STAFF_SPACE, { 'font-family': NUMBER_FONT, 'font-size': 1.2 * STAFF_SPACE }));
               g.appendChild(above);
-              env.collisions.placeOutside(above, { measureId: piece.measureId, staffId: staffOrder[0], kind: 'context' }, -1);
+              const system = systemOf.get(piece.measureId) ?? 0;
+              levels.set(system, [...(levels.get(system) ?? []), { element: above, placement: { measureId: piece.measureId, staffId: staffOrder[0], kind: 'context' } }]);
             }
           }
+          for (const marks of levels.values()) env.collisions.placeOutsideLevel(marks, -1);
         });
         break;
       }

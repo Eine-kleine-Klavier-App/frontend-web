@@ -196,9 +196,21 @@ export interface GraceSlot {
   afterId: string | null;
 }
 
+/** One sheet of paper, in layout units: the systems are cut into sheets of a fixed proportion, a system never across two of them. */
+export interface PageBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** none of the sheet's systems is drawn yet: the sheet is empty paper that is waiting for its drawing */
+  waiting: boolean;
+}
+
 export interface ScoreLayout {
   width: number;
   height: number;
+  /** the sheets, top to bottom, when the layout is cut into pages (a page ratio was asked for); none for one continuous drawing */
+  pages: PageBox[];
   /** the page content width this layout was engraved for (the page's width at the time), so a layout that arrives late can be told from the current one */
   engravedFor?: number;
   /** musical time (in quarter beats) -> position, sorted ascending. */
@@ -232,7 +244,7 @@ export interface ScoreLayout {
 }
 
 /** the lists of a layout that one system publishes: all but the page's size, the piece's length and the cut by system */
-export type SystemLayout = Omit<ScoreLayout, 'width' | 'height' | 'engravedFor' | 'totalBeats' | 'systems'>;
+export type SystemLayout = Omit<ScoreLayout, 'width' | 'height' | 'pages' | 'engravedFor' | 'totalBeats' | 'systems'>;
 
 
 /** The x a beat is drawn at on a staff: piecewise between the measure's real onsets. */
