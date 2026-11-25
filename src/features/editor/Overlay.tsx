@@ -3,15 +3,22 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type Mutab
 import { createPortal } from 'react-dom';
 import { useReducedMotion } from 'motion/react';
 import { springScrollTo } from '@/styles/motion';
+import { fadeScreenOpacity } from '@/ui/PageTransition';
 import { visibleBottom } from './visibleBottom';
 import { useEditor } from '@/app/store';
 import { playback, usePlaybackValue } from '@/core/playback/PlaybackController';
+import { navigation, useNavigationValue } from '@/core/navigation/ScoreNavigation';
 import { onAnimationFrame } from '@/core/playback/MediaClock';
+import { createPlaybackLayers, type PlaybackLayers } from './PlaybackLayers';
+import { formatClock, indexAtMs, msAtPosition, positionAtBeat } from '@/core/navigation/route';
+import { useRoute } from '@/features/playback/useRoute';
+import type { TransportScrub } from '@/features/playback/Transport';
 import { locate, withGraces, voiceNoteIds, staffNoteIds, measureNoteIds, chordNoteIds, barAtBeat, entityKinds, carrierIdOf, contentSelection, measureContentSelection, relationContentSelection, staffContainsPoint } from '@/core/model/query';
 import { resolveVoiceColor } from '@/core/model/voiceColors';
 import { getGhostGlyphMarkup, getGraceGhostMarkup } from '@/rendering/vexflow/noteGlyph';
 import { insertionPosition } from './insertionPosition';
 import { inkBox } from '@/rendering/vexflow/collisionLayout';
+import { distanceToBox, distanceToUprightLine, nearest, type Candidate } from './pick';
 import { INSERT_DRAG_TYPE } from './Toolbar';
 import { parseTool, VALUE_DENOMINATOR, backendAccidental } from '@/core/model/insertItems';
 import { MIN_STEM_LENGTH, VEXFLOW_STEM_HEIGHT } from '@/rendering/vexflow/VexflowRenderer';
@@ -65,46 +72,34 @@ function cursorAt(layout: ScoreLayout, beat: number): {
   return { x: last.x, y0: last.y0, y1: last.y1 };
 }
 
-/** The notes that sound are marked on the engraving. Only the notes that start or stop sounding are touched, from an index of the drawn nodes made once
- *  per engraving: this component renders on every change of the sounding notes, so the score's hit areas, which take longer than a frame to render, do not. */
-function SoundingMarks({ layout, anchor }: { layout: ScoreLayout; anchor: React.RefObject<SVGSVGElement | null> }) {
-  const activeCarrierIds = usePlaybackValue((state) => state.activeCarrierIds);
-  const activeKey = activeCarrierIds.join(',');
-  const indexRef = useRef<{ layout: ScoreLayout; byId: Map<string, SVGElement[]> } | null>(null);
-  const soundingRef = useRef<Set<string>>(new Set());
-  useEffect(() => {
-    const root = anchor.current?.closest('.score-scale');
-    if (!root) return;
-    let index = indexRef.current;
-    if (!index || index.layout !== layout) {
-      const byId = new Map<string, SVGElement[]>();
-      root.querySelectorAll<SVGElement>('[data-note-id]').forEach((node) => {
-        const id = node.getAttribute('data-note-id') ?? '';
-        const group = byId.get(id);
-        if (group) group.push(node);
-        else byId.set(id, [node]);
-      });
-      index = { layout, byId };
-      indexRef.current = index;
-      soundingRef.current = new Set();
+/** The place of the score under a point of the sheet, the inverse of `cursorAt`: the system whose band is nearest the point
+ *  (the one that holds it, or the closest between two), then the place along that system's time map. */
+function beatAtPoint(layout: ScoreLayout, x: number, y: number): number | null {
+  const map = layout.timeMap;
+  if (!map.length) return null;
+  let nearest = map[0];
+  let distance = Infinity;
+  for (const entry of map) {
+    const away = y < entry.y0 ? entry.y0 - y : y > entry.y1 ? y - entry.y1 : 0;
+    if (away < distance) {
+      distance = away;
+      nearest = entry;
     }
-    const sounding = new Set(activeCarrierIds);
-    for (const id of soundingRef.current) if (!sounding.has(id)) index.byId.get(id)?.forEach((node) => node.classList.remove('playback-active'));
-    for (const id of sounding) if (!soundingRef.current.has(id)) index.byId.get(id)?.forEach((node) => node.classList.add('playback-active'));
-    soundingRef.current = sounding;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeKey, layout]);
-  useEffect(() => () => {
-    const index = indexRef.current;
-    soundingRef.current.forEach((id) => index?.byId.get(id)?.forEach((node) => node.classList.remove('playback-active')));
-  }, []);
-  return null;
+  }
+  const row = map.filter((entry) => entry.y0 === nearest.y0);
+  if (x <= row[0].x) return row[0].timeBeats;
+  for (let i = 0; i < row.length - 1; i++) {
+    const a = row[i];
+    const b = row[i + 1];
+    if (x < b.x) return a.timeBeats + ((x - a.x) / (b.x - a.x || 1)) * (b.timeBeats - a.timeBeats);
+  }
+  return row[row.length - 1].timeBeats;
 }
 
 /** the bar being played, washed lighter */
 function PlayingWash({ layout, doc }: { layout: ScoreLayout; doc: ScoreDocument }) {
   // The component renders when the bar changes, not on every movement of the playhead.
-  const barIndex = usePlaybackValue((state) => barAtBeat(doc, state.timeBeats).index);
+  const barIndex = useNavigationValue((state) => barAtBeat(doc, state.timeBeats).index);
   // `layout.measures` is in document order, one box per measure
   const measure = layout.measures[barIndex];
   return measure ? <rect className="playing-wash" x={measure.x} y={measure.y} width={measure.w} height={measure.h} /> : null;
@@ -112,47 +107,120 @@ function PlayingWash({ layout, doc }: { layout: ScoreLayout; doc: ScoreDocument 
 
 /** The playback cursor. It follows the playhead onto the next system: when its system leaves the visible part of the
  *  sheet (above any floating chrome), it glides back into view with the settle spring. Only on a system change, never per frame. */
-function PlayheadLine({ layout, playing, followOnMount, layoutReady }: {
+function PlayheadLine({ layout, playing, followOnMount, layoutReady, scrub }: {
   layout: ScoreLayout;
   playing: boolean;
   followOnMount: boolean;
   layoutReady: boolean;
+  /** What moves the position when the line is dragged. */
+  scrub: TransportScrub;
 }) {
   // The line has one writer, the animation frame, which reads the same playhead whether the transport runs or is held;
-  // React only decides whether the line exists and where it first appears.
-  const shown = usePlaybackValue((state) => state.playing || state.timeBeats > 0);
-  const cursor = layoutReady && shown ? cursorAt(layout, playback.getTimeBeats()) : null;
+  // React only decides whether the line exists and where it first appears. The overlay mounts it while the sound plays or is held, not when the transport is stopped.
+  const cursor = layoutReady ? cursorAt(layout, navigation.getTimeBeats()) : null;
   const cursorRef = useRef<SVGLineElement>(null);
+  const grabRef = useRef<SVGLineElement>(null);
+  const captionRef = useRef<HTMLDivElement>(null);
   const followOnReveal = useRef(followOnMount);
   const [playingSystem, setPlayingSystem] = useState<number | null>(null);
   const cursorSystem = playingSystem ?? cursor?.y0 ?? null;
+
+  // Dragging the line: the place under the pointer, in the pass the line stands in, becomes the position; the sound is held until the line is let go.
+  const route = useRoute();
+  const drag = useRef<{ pass: number; ms: number } | null>(null);
+  const [caption, setCaption] = useState<string | null>(null);
+  const place = (event: React.PointerEvent<SVGLineElement>) => {
+    const svg = event.currentTarget.ownerSVGElement;
+    if (!drag.current || !svg || !route.bars.length) return;
+    const box = svg.getBoundingClientRect();
+    const beats = beatAtPoint(layout, (event.clientX - box.left) / (box.width / layout.width), (event.clientY - box.top) / (box.height / layout.height));
+    if (beats === null) return;
+    const position = positionAtBeat(route, beats, drag.current.pass);
+    drag.current.ms = msAtPosition(route, position);
+    scrub.to(drag.current.ms);
+    const bar = route.bars[Math.min(Math.floor(position), route.bars.length - 1)];
+    setCaption(`Bar ${bar.measure + 1}${bar.passes > 1 ? ` · pass ${bar.pass}/${bar.passes}` : ''} · ${formatClock(drag.current.ms)}`);
+  };
+  const release = () => {
+    const held = drag.current;
+    if (!held) return;
+    drag.current = null;
+    setCaption(null);
+    scrub.end(held.ms);
+  };
   useEffect(() => {
-    if (!shown || !layoutReady) {
+    if (!layoutReady) {
       setPlayingSystem(null);
       return;
     }
     let system: number | null = null;
-    return onAnimationFrame(() => {
+    let layers: PlaybackLayers | null = null;
+    const stop = onAnimationFrame(() => {
       const line = cursorRef.current;
       if (!line) return;
-      const at = cursorAt(layout, playback.getTimeBeats());
+      const at = cursorAt(layout, navigation.getTimeBeats());
       if (!at) return;
       line.setAttribute('x1', String(at.x));
       line.setAttribute('x2', String(at.x));
       line.setAttribute('y1', String(at.y0));
       line.setAttribute('y2', String(at.y1));
+      // The line, the washed bar and the notes that sound are drawn on layers of whole device pixels; the SVG line and rect are only where the browser says they stand.
+      const area = line.closest<HTMLElement>('.canvas-area');
+      if (area) {
+        layers ??= createPlaybackLayers(area);
+        layers.draw(line, area.querySelector('.playing-wash'), navigation.getState().activeCarrierIds);
+      }
+      const grab = grabRef.current;
+      if (grab) {
+        grab.setAttribute('x1', String(at.x));
+        grab.setAttribute('x2', String(at.x));
+        grab.setAttribute('y1', String(at.y0));
+        grab.setAttribute('y2', String(at.y1));
+      }
+      // the caption is a plate of the page, not of the score: it follows the line's top on the screen and keeps its size at any zoom
+      const tip = captionRef.current;
+      if (tip) {
+        const box = line.getBoundingClientRect();
+        tip.style.left = `${box.left}px`;
+        tip.style.top = `max(${box.top}px, calc(var(--editor-bar-h) + var(--space-8)))`;
+        tip.style.visibility = 'visible';
+      }
       if (at.y0 !== system) {
         system = at.y0;
         setPlayingSystem(at.y0);
       }
     });
-  }, [shown, layoutReady, layout]);
+    return () => {
+      stop();
+      layers?.dispose();
+    };
+  }, [layoutReady, layout]);
   const reduce = useReducedMotion();
+  // the sheet the line was last on: when the line goes on to another sheet the page is turned, it is not scrolled to
+  const sheetShown = useRef<number | null>(null);
   useEffect(() => {
+    // which sheet the line is on is kept up to date whether or not the page follows it
+    const sheet = cursorSystem === null ? -1 : layout.pages.findIndex((page) => cursorSystem >= page.y && cursorSystem < page.y + page.h);
+    const before = sheetShown.current;
+    if (sheet >= 0) sheetShown.current = sheet;
     const line = cursorRef.current;
     const area = line?.closest<HTMLElement>('.canvas-area');
     if ((!playing && !followOnReveal.current) || cursorSystem === null || !line || !area) return;
+    const revealing = followOnReveal.current;
     followOnReveal.current = false;
+    const paper = area.querySelector<HTMLElement>('.paper');
+    const target = sheet >= 0 ? area.querySelector<HTMLElement>(`.sheet-page[data-page="${sheet}"]`) : null;
+    if (before !== null && before !== sheet && sheet >= 0 && !revealing && paper && target) {
+      // The page is turned: the sheet that was in view leaves, the view goes to the top of the next, and that one arrives; forward when the line goes on, back when it goes round again.
+      const direction = sheet > before ? 1 : -1;
+      let arriving: (() => void) | undefined;
+      const leaving = fadeScreenOpacity(paper, 0, reduce, () => {
+        const top = target.getBoundingClientRect().top - area.getBoundingClientRect().top + area.scrollTop - 32;
+        area.scrollTop = Math.max(0, Math.min(area.scrollHeight - area.clientHeight, top));
+        arriving = fadeScreenOpacity(paper, 1, reduce, undefined, false, false, direction);
+      }, false, true, direction);
+      return () => { leaving?.(); arriving?.(); paper.style.opacity = '1'; };
+    }
     const lineRect = line.getBoundingClientRect();
     const areaRect = area.getBoundingClientRect();
     const viewBottom = visibleBottom(area);
@@ -161,8 +229,44 @@ function PlayheadLine({ layout, playing, followOnMount, layoutReady }: {
     const max = area.scrollHeight - area.clientHeight;
     const top = Math.max(0, Math.min(max, area.scrollTop + lineRect.top - areaRect.top - margin));
     return springScrollTo(area, { top }, reduce || !playing);
-  }, [playing, cursorSystem, reduce]);
-  return cursor ? <line ref={cursorRef} className="cursor" x1={cursor.x} y1={cursor.y0} x2={cursor.x} y2={cursor.y1} /> : null;
+  }, [playing, cursorSystem, reduce, layout]);
+  return cursor ? (
+    <g className="playhead">
+      <line ref={cursorRef} className="cursor" x1={cursor.x} y1={cursor.y0} x2={cursor.x} y2={cursor.y1} />
+      <line
+        ref={grabRef}
+        className="cursor-grab"
+        x1={cursor.x}
+        y1={cursor.y0}
+        x2={cursor.x}
+        y2={cursor.y1}
+        onPointerDown={(event) => {
+          if (event.button !== 0) return;
+          event.stopPropagation();
+          event.preventDefault();
+          event.currentTarget.setPointerCapture(event.pointerId);
+          const ms = navigation.getTimeMs();
+          drag.current = { pass: route.bars[indexAtMs(route, ms)]?.pass ?? 1, ms };
+          scrub.begin();
+          place(event);
+        }}
+        onPointerMove={(event) => {
+          if (!drag.current) return;
+          event.stopPropagation();
+          place(event);
+        }}
+        onPointerUp={(event) => {
+          if (!drag.current) return;
+          event.stopPropagation();
+          release();
+        }}
+        onPointerCancel={release}
+        onLostPointerCapture={release}
+        onClick={(event) => event.stopPropagation()}
+      />
+      {caption !== null && createPortal(<div ref={captionRef} className="line-caption" style={{ visibility: 'hidden' }}>{caption}</div>, document.body)}
+    </g>
+  ) : null;
 }
 
 /** a point on the score a mark tool resolved the pointer to: measure, quarter beats in it, the staff
@@ -260,7 +364,6 @@ function stemHitRange(h: StemHandle): {
 interface HitActions {
   clickRelation: (id: string, additive: boolean) => void;
   clickModifier: (event: React.MouseEvent, mark: ModifierBox) => void;
-  downNote: (event: React.PointerEvent, box: NoteBox) => void;
   clickNote: (event: React.MouseEvent, box: NoteBox) => void;
   doubleClickNote: (event: React.MouseEvent, box: NoteBox) => void;
 }
@@ -362,6 +465,7 @@ const SystemNotes = memo(function SystemNotes({ layout, offsetY, actions }: {
           className="hit"
           data-pick-kind={m.noteId ? 'note' : 'stem'}
           data-pick-id={m.noteId ?? m.carrierId}
+          data-pick-ink="true"
           x={m.x}
           y={m.y}
           width={m.w}
@@ -381,7 +485,6 @@ const SystemNotes = memo(function SystemNotes({ layout, offsetY, actions }: {
           width={b.w}
           height={b.h}
           rx={3}
-          onPointerDown={(e) => actions.current!.downNote(e, b)}
           onClick={(e) => actions.current!.clickNote(e, b)}
           onDoubleClick={(e) => actions.current!.doubleClickNote(e, b)}
           // hover preview isn't wired here — see `computeHover`, which decides note-vs-stem
@@ -396,6 +499,7 @@ export function Overlay({
   layout,
   scoreActive = true,
   playbackLayoutReady = true,
+  lineScrub,
   onHoverNote,
   onInserted,
   onBeamPreview,
@@ -408,6 +512,8 @@ export function Overlay({
   layout: ScoreLayout;
   scoreActive?: boolean;
   playbackLayoutReady?: boolean;
+  /** What moves the position when the playback line is dragged. */
+  lineScrub: TransportScrub;
   /** ids of what an insert just created (the placed notes, or the placed rest) — flashed once */
   onInserted: (ids: string[]) => void;
   /** ids to lightly tint in the render SVG — a single note on note-hover, all of a measure's on
@@ -457,6 +563,9 @@ export function Overlay({
   const stemOverrides = useEditor((s) => s.stemOverrides);
   // the clock ticks every frame: only the playhead below follows it, so the score's hit areas are not rebuilt sixty times a second
   const playing = usePlaybackValue((state) => scoreActive && state.playing);
+  const paused = usePlaybackValue((state) => scoreActive && state.paused);
+  // a practice that holds the line moves it the way the playback does: the bar is washed and the page follows it
+  const practiceLine = useNavigationValue((state) => scoreActive && state.cursorShown);
   const previousScoreActive = useRef(scoreActive);
   const followOnReveal = scoreActive && !previousScoreActive.current;
   useLayoutEffect(() => { previousScoreActive.current = scoreActive; }, [scoreActive]);
@@ -1491,17 +1600,26 @@ export function Overlay({
     };
     svgRef.current?.setPointerCapture(event.pointerId);
   };
-  const onNotehead = (id: string, point: { x: number; y: number }): boolean => {
-    const head = svgRef.current?.closest('.score-scale')?.querySelector<SVGGraphicsElement>(`[data-individual-note-id="${CSS.escape(id)}"]`);
-    if (!head) return false;
-    const box = inkBox(head);
-    return point.x >= box.x && point.x <= box.x + box.width && point.y >= box.y && point.y <= box.y + box.height;
-  };
+  // The elements the pointer is on, nearest first (`pick.ts`): each one with the pointer in its hit area is given its distance to its ink, and
+  // only the nearest are returned. A note, a rest or a chord's key is at the distance to its notehead; a stem at the distance to its line;
+  // a mark, a beam, a handle is its own ink (its hit area is its shape).
   const pickTargetsAt = (event: { clientX: number; clientY: number }): PickTarget[] => {
     const svg = svgRef.current;
     if (!svg) return [];
-    const seen = new Set<string>();
-    const targets: PickTarget[] = [];
+    const point = toSvg(event);
+    const stemDistance = (id: string): number => {
+      const handle = layout.stemHandles.find((entry) => entry.noteId === id);
+      if (!handle) return 0;
+      const range = stemHitRange(handle);
+      return distanceToUprightLine(handle.x, range.yMin, range.yMax, point);
+    };
+    const candidates = new Map<string, Candidate<PickTarget>>();
+    const add = (target: PickTarget, distance: number): void => {
+      const key = pickKey(target);
+      const known = candidates.get(key);
+      if (!known) candidates.set(key, { target, distance });
+      else known.distance = Math.min(known.distance, distance);
+    };
     for (const element of document.elementsFromPoint(event.clientX, event.clientY)) {
       if (!svg.contains(element)) continue;
       const hit = element.closest<SVGElement>('[data-pick-kind]');
@@ -1512,28 +1630,19 @@ export function Overlay({
       const target: PickTarget = { kind, id };
       if (hit.dataset.pickSide) target.side = hit.dataset.pickSide as PickTarget['side'];
       if (hit.dataset.pickShapeIndex) target.shapeIndex = Number(hit.dataset.pickShapeIndex);
-      const key = pickKey(target);
-      if (!seen.has(key)) {
-        seen.add(key);
-        targets.push(target);
-      }
+      if (kind === 'note' && !hit.hasAttribute('data-pick-ink')) {
+        const head = svg.closest('.score-scale')?.querySelector<SVGGraphicsElement>(`[data-individual-note-id="${CSS.escape(id)}"]`);
+        add(target, head ? distanceToBox(inkBox(head), point) : 0);
+      } else if (kind === 'stem' && hit.classList.contains('stem-handle-group')) add(target, stemDistance(id));
+      else add(target, 0);
     }
     // a stem under its beam's bar is not a second choice: the beam answers there
-    if (targets.some((target) => target.kind === 'beam')) {
-      for (let index = targets.length - 1; index >= 0; index -= 1) if (targets[index].kind === 'stem') targets.splice(index, 1);
+    if ([...candidates.values()].some((candidate) => candidate.target.kind === 'beam')) {
+      for (const [key, candidate] of candidates) if (candidate.target.kind === 'stem') candidates.delete(key);
     }
-    const point = toSvg(event);
     const stem = stemAtPoint(point.x, point.y);
-    if (stem) {
-      const target: PickTarget = { kind: 'stem', id: stem.noteId };
-      if (!seen.has(pickKey(target))) targets.push(target);
-    }
-    const notes = targets.filter((target) => target.kind === 'note');
-    if (notes.length > 1) {
-      const heads = new Set(notes.filter((target) => onNotehead(target.id, point)).map((target) => target.id));
-      return targets.filter((target) => target.kind !== 'note' || heads.has(target.id));
-    }
-    return targets;
+    if (stem) add({ kind: 'stem', id: stem.noteId }, stemDistance(stem.noteId));
+    return nearest([...candidates.values()]);
   };
   const clickedNote = (event: { clientX: number; clientY: number }, fallback: NoteBox): NoteBox | null => {
     const notes = pickTargetsAt(event).filter((target) => target.kind === 'note');
@@ -1593,12 +1702,55 @@ export function Overlay({
     if (target.kind === 'time') return 'Time signature';
     return 'Marking';
   };
+  // What a press on each kind of target starts. A press goes to the target a click would pick (`pickTargetsAt`), whatever lies over it in
+  // the drawing. A kind that is not dragged has no entry; an entry says whether it took the press.
+  const grabbers: Partial<Record<PickKind, (event: React.PointerEvent, target: PickTarget) => boolean>> = {
+    note: (event, target) => {
+      const box = layout.noteBoxes.find((entry) => entry.id === target.id);
+      if (!box || entityKinds(doc).get(box.id) !== 'rest') return false;
+      onDownRest(event, box);
+      // the rest is what was pressed: not a stem or the background that lies under the same point
+      event.stopPropagation();
+      return true;
+    },
+    context: (event, target) => {
+      const context = doc.contexts.find((entry) => entry.id === target.id);
+      if (!context) return false;
+      // a volta has several ends, so it has no `endMeasureId`, but it is picked like a span, not dragged as a point mark
+      if (!('endMeasureId' in context) && context.kind !== 'volta') onDownContext(event, target.id, 'start', target.shapeIndex);
+      else {
+        event.stopPropagation();
+        if (isDoubleClick(`context:${target.id}`)) void selectContextContent(target.id, event.shiftKey);
+        else selectStructure(target.id, event.shiftKey);
+      }
+      return true;
+    },
+    beamHandle: (event, target) => {
+      const shape = layout.beamShapes.find((entry) => entry.id === target.id && entry.handles);
+      if (!shape || !(target.side === 'left' || target.side === 'center' || target.side === 'right')) return false;
+      onDownBeamHandle(event, shape, target.side);
+      return true;
+    },
+    slurHandle: (event, target) => {
+      const shape = layout.slurShapes.find((entry) => entry.id === target.id);
+      if (!shape || !target.side) return false;
+      onDownSlurHandle(event, shape, target.side as SlurHandle);
+      return true;
+    },
+    contextHandle: (event, target) => {
+      if (target.side !== 'start' && target.side !== 'end') return false;
+      onDownContext(event, target.id, target.side, target.shapeIndex);
+      return true;
+    },
+  };
   const onPickDownCapture = (event: React.PointerEvent<SVGSVGElement>) => {
     suppressPickClickRef.current = false;
     playback.unlock();
     if (locked || armed || event.button !== 0) return;
     // a boundary handle takes its own press: whatever lies under it is not a choice to offer
-    if ((event.target as Element).closest('.context-endpoint')) return;
+    if ((event.target as Element).closest('.context-endpoint:not([data-pick-kind])')) return;
+    // the playback line takes its own press
+    if ((event.target as Element).closest('.cursor-grab')) return;
     const targets = pickTargetsAt(event);
     if (!targets.length && (event.target as Element).closest('[data-pick-kind="note"]')) {
       onDownBg(event);
@@ -1616,25 +1768,35 @@ export function Overlay({
       setOverlapPicker(null);
       return;
     }
-    if (targets.length < 2 && targets[0]?.kind !== 'beamHandle') return;
+    // one target that is not picked yet: the press is its own
+    if (targets.length < 2 && !targets.some(isPicked)) {
+      if (targets[0]) grabbers[targets[0].kind]?.(event, targets[0]);
+      return;
+    }
     const picked = targets.filter(isPicked);
     const selected = picked.find((target) => target.kind === 'beamHandle' || target.kind === 'contextHandle' || target.kind === 'slurHandle') ?? picked[0];
     if (selected) {
       const top = targets[0];
       const coveredStructure = selected.kind !== 'note' && selected.kind !== 'stem' && (event.target as Element).closest('[data-pick-kind="note"]') !== null;
+      const handle = selected.kind === 'beamHandle' || selected.kind === 'contextHandle' || selected.kind === 'slurHandle';
+      if (handle) {
+        // a handle takes the press whatever lies over it
+        event.stopPropagation();
+        event.preventDefault();
+        suppressPickClickRef.current = true;
+        if (grabbers[selected.kind]?.(event, selected)) setOverlapPicker(null);
+        return;
+      }
+      // a picked element that is dragged takes the press wherever it lies under the pointer: what a menu picked can be moved
+      if (grabbers[selected.kind]?.(event, selected)) {
+        setOverlapPicker(null);
+        return;
+      }
       if (pickKey(selected) === pickKey(top) && !coveredStructure) return;
       event.stopPropagation();
       event.preventDefault();
       suppressPickClickRef.current = true;
-      if (selected.kind === 'beamHandle') {
-        const shape = layout.beamShapes.find((shape) => shape.id === selected.id && shape.handles);
-        if (shape && (selected.side === 'left' || selected.side === 'center' || selected.side === 'right')) onDownBeamHandle(event, shape, selected.side);
-      } else if (selected.kind === 'slurHandle' && selected.side) {
-        const shape = layout.slurShapes.find((shape) => shape.id === selected.id);
-        if (shape) onDownSlurHandle(event, shape, selected.side as SlurHandle);
-      } else if (selected.kind === 'contextHandle' && (selected.side === 'start' || selected.side === 'end')) {
-        onDownContext(event, selected.id, selected.side, selected.shapeIndex);
-      } else selectPick(selected, event.shiftKey);
+      selectPick(selected, event.shiftKey);
       setOverlapPicker(null);
       return;
     }
@@ -1960,7 +2122,6 @@ export function Overlay({
       else if (isDoubleClick(`note:${m.noteId}`)) selectMany(chordNoteIds(doc, m.carrierId), e.shiftKey, [m.carrierId]);
       else select(m.noteId, e.shiftKey);
     },
-    downNote: (e, b) => onDownRest(e, b),
     clickNote: (e, b) => {
       e.stopPropagation();
       if (suppressNextClickRef.current) {
@@ -2061,7 +2222,7 @@ export function Overlay({
         onPointerDown={onDownBg}
       />
       {/* during playback, the bar being played gets a lighter wash of its own */}
-      {playing && <PlayingWash layout={layout} doc={doc} />}
+      {(playing || practiceLine) && <PlayingWash layout={layout} doc={doc} />}
       {/* measure selection: a soft wash across the measure's full system height, multiplied into
           the paper so it reads as an underlay beneath the engraving, never a box over it */}
       {layout.measures
@@ -2090,7 +2251,7 @@ export function Overlay({
             const t = i / 2;
             const x = h.x0 + (h.x1 - h.x0) * t;
             const y = leftY + (rightY - leftY) * t;
-            return <g key={side} role="button" aria-label={`Move beam ${side}`} data-pick-kind="beamHandle" data-pick-id={shape.id} data-pick-side={side} style={{ cursor: 'ns-resize' }} onPointerDown={event => onDownBeamHandle(event, shape, side)} onClick={event => event.stopPropagation()}>
+            return <g key={side} role="button" aria-label={`Move beam ${side}`} data-pick-kind="beamHandle" data-pick-id={shape.id} data-pick-side={side} style={{ cursor: 'ns-resize' }} onClick={event => event.stopPropagation()}>
               <circle cx={x} cy={y} r={h.staffSpace * 0.8} fill="transparent" pointerEvents="all" />
               <HandleMark role={side === 'center' ? 'move' : 'shape'} x={x} y={y} size={h.staffSpace * 0.3} fill="currentColor" pointerEvents="none" />
             </g>;
@@ -2141,15 +2302,7 @@ export function Overlay({
         // a volta has several ends, so it has no `endMeasureId`, but it is picked like a span, not dragged as a point mark
         const isPoint = context && !('endMeasureId' in context) && context.kind !== 'volta';
         const box = isPoint ? node?.getBBox() : null;
-        return <g key={`${c.id}:${i}`} className="structure-hit context-hit" data-pick-kind="context" data-pick-id={c.id}
-          onPointerDown={(e) => {
-            if (isPoint) onDownContext(e, c.id, 'start', shapeIndex);
-            else {
-              e.stopPropagation();
-              if (isDoubleClick(`context:${c.id}`)) void selectContextContent(c.id, e.shiftKey);
-              else selectStructure(c.id, e.shiftKey);
-            }
-          }}
+        return <g key={`${c.id}:${i}`} className="structure-hit context-hit" data-pick-kind="context" data-pick-id={c.id} data-pick-shape-index={shapeIndex}
           onClick={(e) => e.stopPropagation()}>
           {box && <rect x={box.x} y={box.y} width={box.width} height={box.height} />}
           <g dangerouslySetInnerHTML={{ __html: c.html }} />
@@ -2166,7 +2319,7 @@ export function Overlay({
           {SLUR_HANDLES.map((handle) => {
             const at: Point = points[handle];
             return <g key={handle} role="button" aria-label={`Reshape slur ${handle}`} data-pick-kind="slurHandle" data-pick-id={shape.id} data-pick-side={handle}
-              style={{ cursor: handle === 'top' ? 'ns-resize' : 'move' }} onPointerDown={event => onDownSlurHandle(event, shape, handle)} onClick={event => event.stopPropagation()}>
+              style={{ cursor: handle === 'top' ? 'ns-resize' : 'move' }} onClick={event => event.stopPropagation()}>
               <circle cx={at.x} cy={at.y} r={sp * 0.8} fill="transparent" pointerEvents="all" />
               <HandleMark role={SLUR_HANDLE_ROLES[handle]} x={at.x} y={at.y} size={sp * 0.3} fill={SLUR_HANDLE_ROLES[handle] === 'move' ? 'currentColor' : 'var(--color-paper)'} stroke="currentColor" strokeWidth={sp * 0.1} pointerEvents="none" />
             </g>;
@@ -2203,7 +2356,6 @@ export function Overlay({
             aria-label={`Move ${context.kind} ${edge}`} data-context-id={context.id} data-edge={edge}
             data-pick-kind="contextHandle" data-pick-id={context.id} data-pick-side={edge} data-pick-shape-index={shapeIndex}
             transform={`translate(${anchor.x} ${anchor.y})`}
-            onPointerDown={(e) => onDownContext(e, context.id, edge, shapeIndex)}
             onKeyDown={(e) => moveHandleByKey(e, context, edge)} onClick={(e) => e.stopPropagation()}>
             <circle className="context-endpoint-hit" r={anchor.zone.stepPx * 2.2} />
             <HandleMark role="span" className="context-endpoint-dot" x={0} y={0} size={anchor.zone.stepPx * 0.8} />
@@ -2240,9 +2392,9 @@ export function Overlay({
           dangerouslySetInnerHTML={{ __html: ghostMarkup(ghost.staffStep, ghost.staffId) ?? '' }}
         />
       )}
-      {scoreActive && <>
-        <SoundingMarks layout={layout} anchor={svgRef} />
-        <PlayheadLine layout={layout} playing={playing} followOnMount={followOnReveal} layoutReady={playbackLayoutReady} />
+      {/* the line is there while the sound plays or is held, and while a practice holds it; a transport stopped with the square has none */}
+      {scoreActive && (playing || paused || practiceLine) && <>
+        <PlayheadLine layout={layout} playing={playing || practiceLine} followOnMount={followOnReveal} layoutReady={playbackLayoutReady} scrub={lineScrub} />
       </>}
     </svg>
     {overlapPicker && createPortal(
