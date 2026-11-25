@@ -63,8 +63,8 @@ const doc = () => ({ id: 'd', title: '', staffOrder: ['upper', 'lower'], voices:
   contexts: [
     { id: 'clef-u', kind: 'clef', staffId: 'upper', measureId: 'm', position: f(0), clef: 'treble' },
     { id: 'clef-l', kind: 'clef', staffId: 'lower', measureId: 'm', position: f(0), clef: 'bass' },
-    { id: 'dynamic-u', kind: 'dynamic', voiceIds: ['v'], measureId: 'm', position: f(0), dynamic: 'p' },
-    { id: 'dynamic-l', kind: 'dynamic', voiceIds: ['l'], measureId: 'm', position: f(0), dynamic: 'f' },
+    { id: 'dynamic-u', kind: 'dynamic', voiceId: 'v', measureId: 'm', position: f(0), dynamic: 'p' },
+    { id: 'dynamic-l', kind: 'dynamic', voiceId: 'l', measureId: 'm', position: f(0), dynamic: 'f' },
     { id: 'tempo', kind: 'tempo', measureId: 'm', position: f(0), bpm: 90 },
   ], stemOverrides: {},
 });
@@ -188,7 +188,7 @@ await test('staff gestures include both outer lines but exclude headers and the 
 });
 await test('neither staff nor both-staff background picks include voice or score contexts', () => {
   const d = doc();
-  d.contexts.push({ id: 'hairpin', kind: 'hairpin', voiceIds: ['v'], measureId: 'm', position: f(0), endMeasureId: 'm', endPosition: f(1, 2) });
+  d.contexts.push({ id: 'hairpin', kind: 'hairpin', voiceId: 'v', measureId: 'm', position: f(0), endMeasureId: 'm', endPosition: f(1, 2) });
   d.contexts.push({ id: 'octave', kind: 'octave', staffId: 'upper', measureId: 'm', position: f(0), endMeasureId: 'm', endPosition: f(1, 2) });
   for (const staff of ['upper', undefined]) {
     const g = measureContentSelection(d, 'm', staff);
@@ -226,10 +226,16 @@ await test('HTTP gateway adds and removes a voice of a context through the two u
   } };
   cache.delete('src/core/gateway/HttpGateway.ts');
   const { HttpGateway } = load('src/core/gateway/HttpGateway.ts');
-  await new HttpGateway().apply('d', { type: 'addContextVoice', contextId: 'c', voiceId: 'v' });
-  await new HttpGateway().apply('d', { type: 'removeContextVoice', contextId: 'c', voiceId: 'v' });
-  assert.deepEqual(requests.map(request => request.url), ['/api/drafts/d/edit/context-voices', '/api/drafts/d/edit/context-voice-removals']);
-  assert.deepEqual(requests.map(request => plain(request.body)), [{ context_id: 'c', voice_id: 'v' }, { context_id: 'c', voice_id: 'v' }]);
+  const position = { numerator: 1, denominator: 4 };
+  await new HttpGateway().apply('d', { type: 'moveContextStart', contextIds: ['a', 'b'], measureId: 'm', position, mode: 'preserve_step' });
+  await new HttpGateway().apply('d', { type: 'openContextEnd', contextIds: ['a', 'b'], mode: 'preserve_step' });
+  await new HttpGateway().apply('d', { type: 'setHairpinTarget', hairpinIds: ['a', 'b'], target: 'f' });
+  assert.deepEqual(requests.map(request => request.url), ['/api/drafts/d/edit/context-starts', '/api/drafts/d/edit/context-open-ends', '/api/drafts/d/edit/hairpin-targets']);
+  assert.deepEqual(requests.map(request => plain(request.body)), [
+    { context_ids: ['a', 'b'], measure_id: 'm', position, mode: 'preserve_step' },
+    { context_ids: ['a', 'b'], mode: 'preserve_step' },
+    { hairpin_ids: ['a', 'b'], target: 'f' },
+  ]);
 });
 await test('relative staff-step command includes selected notes across chords and ignores rests', async () => {
   reset(); const commands = [];
