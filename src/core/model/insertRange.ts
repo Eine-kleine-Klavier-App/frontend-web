@@ -71,7 +71,7 @@ export function insertRange(doc: ScoreDocument, spec: MarkSpec, placed: MarkPoin
       return first ? { main: { staffIds: [first.staffId], from: a, to: b } } : null;
     case 'dynamic': {
       const voices = spec.voiceIds?.length ? spec.voiceIds : [env.voiceId];
-      return { main: { staffIds: null, from: pointer, to: untilNext('dynamic', (context) => context.kind === 'dynamic' && context.voiceIds.some((id) => voices.includes(id))) } };
+      return { main: { staffIds: null, from: pointer, to: untilNext('dynamic', (context) => context.kind === 'dynamic' && voices.includes(context.voiceId)) } };
     }
     case 'tempoWord':
     case 'tempoBpm':

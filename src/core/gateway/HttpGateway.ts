@@ -250,10 +250,6 @@ export class HttpGateway implements EditorGateway {
           voice_ids: command.voiceIds,
           dynamic: command.dynamic,
         });
-      case 'addContextVoice':
-        return this.send(draftId, 'POST', 'context-voices', { context_id: command.contextId, voice_id: command.voiceId });
-      case 'removeContextVoice':
-        return this.send(draftId, 'POST', 'context-voice-removals', { context_id: command.contextId, voice_id: command.voiceId });
       case 'createHairpin':
         return this.send(draftId, 'POST', 'hairpins', {
           start_measure_id: command.start.measureId,
@@ -264,7 +260,7 @@ export class HttpGateway implements EditorGateway {
           target: command.target,
         });
       case 'setHairpinTarget':
-        return this.send(draftId, 'PUT', 'hairpin-targets', { hairpin_id: command.hairpinId, target: command.target });
+        return this.send(draftId, 'PUT', 'hairpin-targets', { hairpin_ids: command.hairpinIds, target: command.target });
       case 'createRefrain':
         return this.send(draftId, 'POST', 'refrains', {
           start_measure_id: command.start.measureId,
@@ -333,7 +329,7 @@ export class HttpGateway implements EditorGateway {
           position: command.at.position,
         });
       case 'openContextEnd':
-        return this.send(draftId, 'PUT', 'context-open-ends', { context_id: command.contextId, mode: command.mode });
+        return this.send(draftId, 'PUT', 'context-open-ends', { context_ids: command.contextIds, mode: command.mode });
       case 'createSlur':
         return this.send(draftId, 'POST', 'slurs', {
           start_measure_id: command.start.measureId,
@@ -388,7 +384,7 @@ export class HttpGateway implements EditorGateway {
         });
       case 'moveContextStart':
         return this.send(draftId, 'PUT', 'context-starts', {
-          context_id: command.contextId,
+          context_ids: command.contextIds,
           measure_id: command.measureId,
           position: command.position,
           mode: command.mode,
@@ -396,7 +392,7 @@ export class HttpGateway implements EditorGateway {
         });
       case 'moveContextEnd':
         return this.send(draftId, 'PUT', 'context-ends', {
-          context_id: command.contextId,
+          context_ids: command.contextIds,
           measure_id: command.measureId,
           position: command.position,
           mode: command.mode,
