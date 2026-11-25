@@ -13,6 +13,8 @@ import { useAuthStore } from '@/core/auth/authStore';
 import { useAuthPrompt } from '@/core/auth/authPrompt';
 import { withPreview } from '@/features/browse/previewRoute';
 import { PageReadinessScope, PageTransition, TransitionLoading, usePageReady, usePageTransitionPhase, useScreenOpacity } from '@/ui/PageTransition';
+import { usePlaybackValue } from '@/core/playback/PlaybackController';
+import { useWakeLock } from '@/ui/useWakeLock';
 
 function RootRoute() {
   const status = useAuthStore((state) => state.status);
@@ -148,7 +150,7 @@ function WorkspaceRoutes({ location }: { location: Location }) {
   useScreenOpacity(cover, covered ? 1 : 0, () => {
     if (covered) setCoverOpaque(true);
     else if (handoff && ready) setHandoff(false);
-  });
+  }, false, covered);
 
   return (
     <div className="workspace-transition">
@@ -170,6 +172,9 @@ function WorkspaceRoutes({ location }: { location: Location }) {
  * owns a second transition inside its persistent shell. */
 function RoutedApp() {
   const location = useLocation();
+  // The waterfall is a view of the editor and plays through the same playback.
+  const playing = usePlaybackValue((state) => state.playing);
+  useWakeLock(playing);
   // Browse views animate inside AppShell so its navigation remains persistent. Crossing the
   // browse/editor boundary replaces the whole application surface with the same default
   // lifecycle. Auth stays outside this layer and owns its separate welcome/reveal sequence.
@@ -180,7 +185,13 @@ function RoutedApp() {
   return (
     <>
       <LiquidGlassDefs />
-      <PageTransition transitionKey={routeFamily} requestKey={requestKey} className="route-transition-root">
+      <PageTransition
+        transitionKey={routeFamily}
+        requestKey={requestKey}
+        className="route-transition-root"
+        // the workspace is deeper than browse: opening a score goes forward, leaving it goes back
+        direction={(from, to) => (from === to ? 0 : to === 'editor' ? 1 : -1)}
+      >
         {routeFamily === 'editor' ? <WorkspaceRoutes location={location} /> : (
           <Routes location={location}>
             <Route path="*" element={<AppShell renderOutlet={renderBrowseRoutes} />} />

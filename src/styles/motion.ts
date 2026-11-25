@@ -46,6 +46,19 @@ export const SPRING_SETTLE = { stiffness: 380, damping: 39 } as const;
 export const springSettle = { type: 'spring', ...SPRING_SETTLE } as const;
 /** the exit — 120ms ease-exit, opacity + 4px up */
 export const lift = { duration: 0.12, ease: [0.3, 0, 1, 1] } as const;
+/** The one curve of every move of a screen or a panel: slow out of rest, quick through the middle, slow into rest (ease in, ease out). */
+export const EASE_IN_OUT = [0.65, 0, 0.35, 1] as const;
+export const EASE_IN_OUT_CSS = 'cubic-bezier(0.65, 0, 0.35, 1)';
+/** How long a panel takes to come or go, a screen to leave and to arrive, and a strip to be carried to a place the line jumped to. */
+export const PANEL_MS = 420;
+export const LEAVE_MS = 220;
+export const ARRIVE_MS = 340;
+export const CARRY_MS = 360;
+/** A screen leaves and arrives along the way the player is going: it moves this far (in rem) while it fades, the old one back, the new one in. */
+export const TRAVEL_REM = 1.5;
+/* A screen that is replaced by another leaves first and the new one arrives after it, the two never overlapping. */
+/** A side panel has cleared the content when no more than this share of it is still on screen; what arrives next may start. */
+export const PANEL_CLEARED = 0.2;
 /** reduced motion: a settle collapses to this opacity crossfade; slides become instant */
 export const reducedFade = { duration: 0.12, ease: 'linear' } as const;
 
@@ -238,9 +251,22 @@ export function useLayoutSafeSpring(
 }
 
 
-/** Left/right side panels share the preserved quiet profile with zero injected velocity.
- *  Its non-overshooting progress can safely carry both the slot and the fixed-width surface. */
+/** Left/right side panels: one value from 0 (away) to 1 (open), moved on the shared ease-in-out over `PANEL_MS`. A request taken back mid-way goes
+ *  from where it is and takes the share of the time that is left to cover. The one value is the panel's slot and its surface alike. */
 export function useSidePanelMotion(open: boolean): { layout: MotionValue<number>; visual: MotionValue<number> } {
-  const { visual } = useLayoutSafeSpring(open);
-  return { layout: visual, visual };
+  const reduce = useReducedMotion();
+  const progress = useMotionValue(open ? 1 : 0);
+  const lastOpen = useRef<boolean | null>(null);
+  useEffect(() => {
+    const target = open ? 1 : 0;
+    const changed = lastOpen.current !== null && lastOpen.current !== open;
+    lastOpen.current = open;
+    if (reduce || !changed) {
+      progress.jump(target);
+      return;
+    }
+    const controls = animate(progress, target, { duration: (PANEL_MS / 1000) * Math.max(0.4, Math.abs(target - progress.get())), ease: EASE_IN_OUT });
+    return () => controls.stop();
+  }, [open, reduce, progress]);
+  return { layout: progress, visual: progress };
 }

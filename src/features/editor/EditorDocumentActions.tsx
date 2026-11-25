@@ -11,7 +11,6 @@ import { Button } from '@/ui/Button';
 import { errorMessage } from '@/core/errorMessage';
 import { ChoiceGroup } from '@/ui/ChoiceGroup';
 import { ArrowLeftIcon } from '@/ui/icons';
-import { OpenInEditorButton } from '@/ui/OpenInEditorButton';
 
 interface DocumentMeta {
   title: string;
@@ -49,7 +48,6 @@ function SavedScoreIdentity({ scoreId }: { scoreId: string }) {
       <span className="title" title={title}>
         <strong>{title}</strong>
       </span>
-      <OpenInEditorButton scoreId={scoreId} disabled={score?.id !== scoreId} />
     </div>
   );
 }
