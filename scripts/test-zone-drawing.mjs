@@ -10,7 +10,7 @@ const source = ts.createSourceFile('VexflowRenderer.tsx', text, ts.ScriptTarget.
 
 // The real zone helpers, taken out of the renderer and run against stubbed geometry: no React or VexFlow is mounted.
 const wanted = new Set(['sameBreaks', 'scrollerOf', 'systemTop', 'screenOf', 'systemsNearScreen', 'anchorOf']);
-const constants = new Set(['ZONE_MARGIN', 'SYSTEM_ROOM']);
+const constants = new Set(['SYSTEM_ROOM']);
 const parts = [];
 for (const node of source.statements) {
   if (ts.isFunctionDeclaration(node) && wanted.has(node.name?.text)) parts.push(node.getText(source));
@@ -18,14 +18,15 @@ for (const node of source.statements) {
 }
 assert.equal(parts.length, wanted.size + constants.size, 'every zone helper and constant must be found in the renderer');
 const js = ts.transpileModule(parts.join('\n'), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText
-  + '\nthis.exported = { sameBreaks, scrollerOf, systemsNearScreen, anchorOf, ZONE_MARGIN, SYSTEM_ROOM };';
+  + '\nthis.exported = { sameBreaks, scrollerOf, systemsNearScreen, anchorOf, SYSTEM_ROOM };';
 const ctx = { window: { innerHeight: 600 }, getComputedStyle: node => ({ overflowY: node.overflowY ?? 'visible' }) };
 vm.createContext(ctx); vm.runInContext(js, ctx);
-const { sameBreaks, scrollerOf, systemsNearScreen, anchorOf, ZONE_MARGIN, SYSTEM_ROOM } = ctx.exported;
+const { sameBreaks, scrollerOf, systemsNearScreen, anchorOf, SYSTEM_ROOM } = ctx.exported;
 
 // 20 systems, each 100 drawing units high; `unit` pixels per drawing unit (the zoom); the page is scrolled by `scroll` pixels
 const SYSTEMS = 20, BAND = 100;
-function drawingAt({ scroll, unit, state }) {
+// `perSheet`: how many systems a sheet holds (the chunk of a system is its sheet); without it every system is its own chunk
+function drawingAt({ scroll, unit, state, perSheet = 1 }) {
   const height = SYSTEMS * BAND;
   const lines = Array.from({ length: SYSTEMS }, (_, si) => `m${si * 3}:a m${si * 3 + 1}:b m${si * 3 + 2}:c`);
   return {
@@ -33,6 +34,7 @@ function drawingAt({ scroll, unit, state }) {
     height,
     tops: Array.from({ length: SYSTEMS }, (_, si) => si * BAND + SYSTEM_ROOM),
     applied: Array.from({ length: SYSTEMS }, () => 0),
+    sheetOf: Array.from({ length: SYSTEMS }, (_, si) => Math.floor(si / perSheet)),
     shiftY: 0,
     state: state ?? Array.from({ length: SYSTEMS }, () => 'blank'),
     signature: lines.join('\n'),
@@ -42,16 +44,28 @@ const screen = { getBoundingClientRect: () => ({ top: 0, bottom: 600 }) };
 const near = (drawing, scroller = screen) => [...systemsNearScreen(drawing, scroller)].sort((a, b) => a - b);
 const range = (from, to) => Array.from({ length: to - from + 1 }, (_, i) => from + i);
 
-// a screen of 600 with a margin of 0.75 of it on both sides: the systems whose band meets [-450, 1050]
-assert.equal(ZONE_MARGIN, 0.75);
-assert.deepEqual(near(drawingAt({ scroll: 0, unit: 2 })), range(0, 5), 'the top of the score: the systems down to one screen and a half');
-assert.deepEqual(near(drawingAt({ scroll: 2000, unit: 2 })), range(7, 15), 'the middle: systems above and below the screen, not the ends');
-assert.deepEqual(near(drawingAt({ scroll: 3400, unit: 2 })), range(14, 19), 'the bottom: the last systems, none past the end');
-// the same screen at another zoom meets other systems: bands are read in screen pixels, not drawing units
-assert.deepEqual(near(drawingAt({ scroll: 0, unit: 4 })), range(0, 2), 'zoomed in, fewer systems fit the same screen');
-assert.deepEqual(near(drawingAt({ scroll: 0, unit: 1 })), range(0, 10), 'zoomed out, more systems fit');
+// a screen of 600: the middle of it is at 300. The chunk (here a system) there is the current one; nothing else is asked for
+// until the current one is drawn whole
+assert.deepEqual(near(drawingAt({ scroll: 0, unit: 2 })), [1], 'the top of the score: the system at the middle of the screen');
+assert.deepEqual(near(drawingAt({ scroll: 2000, unit: 2 })), [11], 'the middle of the score: only the system at the middle of the screen');
+assert.deepEqual(near(drawingAt({ scroll: 3400, unit: 2 })), [18], 'the bottom: the system at the middle, none past the end');
+// the same screen at another zoom has another system at its middle: bands are read in screen pixels, not drawing units
+assert.deepEqual(near(drawingAt({ scroll: 0, unit: 4 })), [0], 'zoomed in, the first system fills the middle');
+assert.deepEqual(near(drawingAt({ scroll: 0, unit: 1 })), [2], 'zoomed out, a system further down is at the middle');
+// once the current chunk is drawn the ones above and below it are asked for, and no more
+const drawnRange = (from, to) => Array.from({ length: SYSTEMS }, (_, si) => (si >= from && si <= to ? 'drawn' : 'blank'));
+assert.deepEqual(near(drawingAt({ scroll: 0, unit: 2, state: drawnRange(1, 1) })), [0, 1, 2], 'the current one is drawn: its neighbours come next');
+assert.deepEqual(near(drawingAt({ scroll: 0, unit: 2, state: drawnRange(0, 0) })), [1], 'a neighbour drawn is not the current one: the current one still comes first');
+assert.deepEqual(near(drawingAt({ scroll: 3400, unit: 2, state: drawnRange(18, 18) })), [17, 18, 19], 'the neighbours of the one at the middle, below too');
+// the chunk is a sheet (sheets of 5 systems here): the current sheet whole, the neighbours only when it is drawn
+assert.deepEqual(near(drawingAt({ scroll: 0, unit: 2, perSheet: 5 })), range(0, 4), 'the first sheet, whole, and no other');
+assert.deepEqual(near(drawingAt({ scroll: 0, unit: 2, perSheet: 5, state: drawnRange(0, 4) })), range(0, 9), 'the first sheet is drawn: the sheet below it comes next');
+assert.deepEqual(near(drawingAt({ scroll: 2000, unit: 2, perSheet: 5 })), range(10, 14), 'a sheet in the middle of the score, alone');
+assert.deepEqual(near(drawingAt({ scroll: 2000, unit: 2, perSheet: 5, state: drawnRange(10, 14) })), range(5, 19), 'drawn: the sheets above and below it come next');
+assert.deepEqual(near(drawingAt({ scroll: 2000, unit: 2, perSheet: 5, state: drawnRange(10, 13) })), range(10, 14), 'one system of the sheet is not drawn: no neighbours yet');
+assert.ok(!near(drawingAt({ scroll: 0, unit: 2, perSheet: 5, state: drawnRange(0, 4) })).includes(10), 'a sheet two away stays out of the zone');
 // a page that scrolls by itself is measured against the window
-assert.deepEqual(near(drawingAt({ scroll: 0, unit: 2 }), null), range(0, 5), 'without a scroller the window is the screen');
+assert.deepEqual(near(drawingAt({ scroll: 0, unit: 2 }), null), [1], 'without a scroller the window is the screen');
 
 // the scroller is the nearest ancestor that scrolls
 const page = { overflowY: 'visible', parentElement: null };

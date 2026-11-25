@@ -133,7 +133,7 @@ try {
       const rect = container?.getBoundingClientRect();
       const alpha = layers.map(layer => Number(getComputedStyle(layer).opacity));
       const transforms = layers.map(layer => getComputedStyle(layer).transform);
-      if (rect) samples.push({ now, count: layers.length, minimumCoverage: Math.max(...alpha), top: rect.top, height: rect.height, transforms });
+      if (rect) samples.push({ now, count: layers.length, coverage: Math.max(...alpha), visible: alpha.filter(value => value > 0.001).length, top: rect.top, height: rect.height, transforms });
       handle = requestAnimationFrame(take);
     };
     handle = requestAnimationFrame(take);
@@ -146,8 +146,16 @@ try {
       return samples;
     });
     assert.ok(frames.length >= 4, `${label}: too few animation frames`);
-    assert.ok(frames.every(sample => sample.minimumCoverage >= 0.999), `${label}: opaque base disappeared`);
-    assert.ok(frames.every(sample => sample.transforms.every(transform => transform === 'none')), `${label}: whole screen was transformed`);
+    // A scene leaves before the next one arrives: at no frame are two scenes on screen together, and the empty moment between them is short.
+    assert.ok(frames.every(sample => sample.visible <= 1), `${label}: two scenes were visible at once`);
+    let emptySince = null;
+    let longestEmpty = 0;
+    for (const sample of frames) {
+      if (sample.coverage < 0.05) emptySince ??= sample.now;
+      else if (emptySince !== null) { longestEmpty = Math.max(longestEmpty, sample.now - emptySince); emptySince = null; }
+    }
+    assert.ok(longestEmpty < 400, `${label}: the screen was empty for ${longestEmpty.toFixed(0)}ms between the scenes`);
+    assert.ok(frames.every(sample => sample.transforms.every(transform => transform === 'none' || /^matrix\(1, 0, 0, 1, -?[\d.]+, 0\)$/.test(transform))), `${label}: a screen was moved other than sideways`);
     assert.ok(frames.every(sample => sample.count <= 3), `${label}: excess retained layers`);
     if (stableGeometry) {
       assert.ok(frames.every(frame => frame.top === frames[0].top && frame.height === frames[0].height), `${label}: jumping layout`);

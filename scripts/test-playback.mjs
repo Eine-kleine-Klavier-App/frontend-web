@@ -181,20 +181,22 @@ class Cache {
 }
 class Preview { releases=0;invalidations=0; async prepare(){} async unlock(){} release(){this.releases++;}close(){}bindSource(source){this.source=source;}invalidate(){this.invalidations++;}async preview(d,c,n,finish,error,settings){this.finish=finish;this.settings=settings;} }
 class AuthRequiredError extends Error {}
-const { ServerPlaybackController,timeAtBeat,beatAtTime }=load('src/core/playback/PlaybackController.ts',{
-  react:{useSyncExternalStore(){}},'@/core/auth/authorizedFetch':{AuthRequiredError},'@/core/auth/authPrompt':{useAuthPrompt:{getState:()=>({open(){}})}},
+const reactStub={useSyncExternalStore(){}};
+const { ScoreNavigation,timeAtBeat,beatAtTime }=load('src/core/navigation/ScoreNavigation.ts',{react:reactStub});
+const { ServerPlaybackController }=load('src/core/playback/PlaybackController.ts',{
+  react:reactStub,'@/core/auth/authorizedFetch':{AuthRequiredError},'@/core/auth/authPrompt':{useAuthPrompt:{getState:()=>({open(){}})}},
   './HttpPlaybackGateway':{HttpPlaybackGateway:class {}},'./PcmStreamPlayer':{PcmStreamPlayer:Player},'./PlaybackCache':{PlaybackCache:Cache},'./LocalPreview':{LocalPreview:Preview},
 });
-const preview=new Preview(),controller=new ServerPlaybackController({map:async()=>map},preview);
-controller.bindDraft('d');controller.setTotalBeats(2);const started=controller.play();await flush();
+const preview=new Preview(),nav=new ScoreNavigation(),controller=new ServerPlaybackController({map:async()=>map},preview,undefined,nav);
+controller.bindDraft('d');nav.setTotalBeats(2);const started=controller.play();await flush();
 const firstCall=player.calls[0];firstCall.ready();assert.equal(controller.getState().playing,true);
-firstCall.tick(250);assert.equal(controller.getState().timeBeats,.5);
+firstCall.tick(250);assert.equal(nav.getState().timeBeats,.5);
 let releaseSeek;Cache.latest.gate=new Promise(resolve=>releaseSeek=resolve);
 controller.seek(1.5);await flush();assert.equal(firstCall.signal.aborted,false);assert.equal(controller.getState().playing,true);
-firstCall.tick(400);assert.equal(controller.getState().seekBeats,1.5,'slider retains the requested target');assert.equal(controller.getState().timeBeats,.8,'score line follows the old sound until the handoff');
+firstCall.tick(400);assert.equal(controller.getState().seekBeats,1.5,'slider retains the requested target');assert.equal(nav.getState().timeBeats,.8,'score line follows the old sound until the handoff');
 releaseSeek();await flush();const replacement=player.calls.at(-1);assert.equal(firstCall.signal.aborted,false,'old source waits for output priming');
 replacement.ready();replacement.tick(1000);await flush();assert.equal(firstCall.signal.aborted,true);assert.equal(controller.getState().playing,true);assert.equal(replacement.start,1000);
-firstCall.tick(50);assert.equal(controller.getState().timeBeats,1.5,'late old ticks cannot rewind new source');
+firstCall.tick(50);assert.equal(nav.getState().timeBeats,1.5,'late old ticks cannot rewind new source');
 controller.pause();await flush();replacement.tick(1200);assert.equal(controller.getState().paused,true);
 let resumeReady;player.unlockGate=new Promise(resolve=>resumeReady=resolve);
 const resuming=controller.play();assert.equal(controller.getState().paused,true);
@@ -210,9 +212,10 @@ await controller.previewCarrier('a','d');const obsoleteFinish=preview.finish;con
 assert.equal(timeAtBeat(map,1.5),1000);assert.equal(beatAtTime(map,1000),1.5);
 console.log('PASS uninterrupted seek handoff, stale tick isolation, pause/resume and document invalidation');
 
-const buffered = new ServerPlaybackController({ map: async () => map }, new Preview());
+const bufferedNav = new ScoreNavigation();
+const buffered = new ServerPlaybackController({ map: async () => map }, new Preview(), undefined, bufferedNav);
 buffered.bindDraft('buffered');
-buffered.setTotalBeats(2);
+bufferedNav.setTotalBeats(2);
 const readyFrames = new Set();
 const frameRequests = [];
 const detachFrameBuffer = buffered.setFrameBuffer({
@@ -241,7 +244,7 @@ await flush();
 const cancelled = frameRequests.at(-1);
 assert.equal(cancelled.time, 1000);
 assert.equal(outgoing.signal.aborted, true, 'a cold seek stops the previous audio');
-assert.equal(buffered.getTimeMs(), 240, 'the visible clock holds its previous position');
+assert.equal(bufferedNav.getTimeMs(), 240, 'the visible clock holds its previous position');
 assert.equal(buffered.getState().seekBeats, 1.5);
 assert.equal(buffered.getState().loading, true);
 assert.equal(player.calls.length, 1, 'no replacement audio before frame readiness');
@@ -250,7 +253,7 @@ await flush();
 const latest = frameRequests.at(-1);
 assert.equal(cancelled.signal.aborted, true, 'a newer seek cancels old frame preparation');
 assert.equal(buffered.getState().seekBeats, 1);
-assert.equal(buffered.getTimeMs(), 240);
+assert.equal(bufferedNav.getTimeMs(), 240);
 cancelled.ready();
 await flush();
 assert.equal(player.calls.length, 1, 'a late frame window cannot start superseded audio');
@@ -290,8 +293,8 @@ buffered.seek(2);
 await flush();
 await ending;
 assert.equal(beforeEnd.signal.aborted, true);
-assert.equal(buffered.getTimeMs(), map.extentMs, 'seeking to the end clears a pending hold at the requested endpoint');
-assert.equal(buffered.getState().timeBeats, 2);
+assert.equal(bufferedNav.getTimeMs(), map.extentMs, 'seeking to the end clears a pending hold at the requested endpoint');
+assert.equal(bufferedNav.getState().timeBeats, 2);
 assert.equal(buffered.getState().loading, false);
 detachFrameBuffer();
 console.log('PASS cold play and seek preparation, frozen clock, latest-seek wins, hot handoff and stop');
@@ -311,21 +314,22 @@ console.log('PASS JSON-only gateways, physical release vs sustain and invalid me
 // Equal raw ids still name distinct resources; saved reading never asks for a draft plan.
 let draftMaps=0,savedMaps=0;
 const savedPreview=new Preview();
+const readerNav=new ScoreNavigation();
 const reader=new ServerPlaybackController({map:async()=>{draftMaps++;return map;}},savedPreview,
-  {mapScore:async()=>{savedMaps++;return map;}});
-reader.bindScore('same');reader.setTotalBeats(2);await reader.prepareMap();
+  {mapScore:async()=>{savedMaps++;return map;}},readerNav);
+reader.bindScore('same');readerNav.setTotalBeats(2);await reader.prepareMap();
 assert.equal(savedMaps,1);assert.equal(draftMaps,0);
 const savedRun=reader.play();await flush();const savedOutput=player.calls.at(-1);savedOutput.ready();savedOutput.tick(500);
-assert.equal(reader.getState().timeBeats,1);reader.pause();await flush();assert.equal(reader.getState().paused,true);
+assert.equal(readerNav.getState().timeBeats,1);reader.pause();await flush();assert.equal(reader.getState().paused,true);
 await reader.play();assert.equal(reader.getState().playing,true);
 assert.equal(savedPreview.source.kind,'saved');
 reader.pause();await reader.previewCarrier('a','same');assert.equal(typeof savedPreview.finish,'function','saved selection uses the same short preview');
 assert.equal(draftMaps,0);assert.equal(savedPreview.settings.transpose,0);savedPreview.finish();assert.equal(reader.getState().previewing,false);
 reader.stop();await savedRun;reader.bindDraft('same');await reader.prepareMap();
 assert.equal(draftMaps,1);assert.equal(savedMaps,1);
-let staleMap;const staleReader=new ServerPlaybackController({map:async()=>map},new Preview(),{mapScore:()=>new Promise(resolve=>staleMap=resolve)});
+let staleMap;const staleNav=new ScoreNavigation();const staleReader=new ServerPlaybackController({map:async()=>map},new Preview(),{mapScore:()=>new Promise(resolve=>staleMap=resolve)},staleNav);
 staleReader.bindScore('old');const stalePreparation=staleReader.prepareMap();staleReader.bindDraft('new');staleMap({...map,version:99});await stalePreparation;
-assert.equal(staleReader.getState().map,null,'late saved map cannot overwrite new draft');reader.bindDraft(null);staleReader.bindDraft(null);
+assert.equal(staleNav.getState().map,null,'late saved map cannot overwrite new draft');reader.bindDraft(null);staleReader.bindDraft(null);
 console.log('PASS saved reading transport, pause/resume, source-kind isolation and stale map cancellation');
 
 const { withPlaybackSettings, validateTransposition }=load('src/core/playback/PlaybackSettings.ts');
@@ -341,23 +345,25 @@ validateTransposition(edges,0,piano);
 for(const offset of [-1,1])assert.throws(()=>validateTransposition(edges,offset,piano),/at least one note/);
 for(const speed of [0,0.49,2.01,NaN])assert.throws(()=>withPlaybackSettings(map,{speed,transpose:0}),{name:'RangeError'});
 assert.throws(()=>withPlaybackSettings(map,{speed:1,transpose:.5}),{name:'RangeError'});
-const listening=new ServerPlaybackController({map:async()=>map},new Preview(),{mapScore:async()=>map});
-listening.bindScore('listening');listening.setTotalBeats(2);await listening.prepareMap();
+const listeningNav=new ScoreNavigation();
+const listening=new ServerPlaybackController({map:async()=>map},new Preview(),{mapScore:async()=>map},listeningNav);
+listening.bindScore('listening');listeningNav.setTotalBeats(2);await listening.prepareMap();
 const runListening=listening.play();await flush();let output=player.calls.at(-1);output.ready();player.clock=500;output.tick(500);
 listening.setListeningSettings({speed:2,transpose:2},piano);assert.equal(output.signal.aborted,true);await flush();
 output=player.calls.at(-1);assert.equal(output.start,250,'speed replacement preserves musical place');output.ready();
-assert.equal(listening.getState().map.notes[0].pitch,62);assert.equal(listening.getState().timeBeats,1);
+assert.equal(listeningNav.getState().map.notes[0].pitch,62);assert.equal(listeningNav.getState().timeBeats,1);
 player.clock=500;output.tick(500);listening.pause();await flush();
 listening.setListeningSettings({speed:.5,transpose:-2},piano);assert.equal(listening.getState().paused,true);
-assert.equal(listening.getState().timeBeats,1.5);const resumedListening=listening.play();await flush();
+assert.equal(listeningNav.getState().timeBeats,1.5);const resumedListening=listening.play();await flush();
 output=player.calls.at(-1);assert.equal(output.start,2000,'resume after paused configuration starts from the retained beat');output.ready();
 assert.equal(listening.getState().playing,true);listening.stop();await runListening;await resumedListening;
 listening.bindDraft('editing');assert.equal(listening.getState().listening.speed,1);assert.equal(listening.getState().listening.transpose,0);listening.bindDraft(null);
-const strict=new ServerPlaybackController({map:async()=>map},new Preview(),{mapScore:async()=>edges});
-strict.bindScore('edges');strict.setTotalBeats(2);await strict.prepareMap();const strictRun=strict.play();await flush();
-const strictOutput=player.calls.at(-1);strictOutput.ready();const priorMap=strict.getState().map;
+const strictNav=new ScoreNavigation();
+const strict=new ServerPlaybackController({map:async()=>map},new Preview(),{mapScore:async()=>edges},strictNav);
+strict.bindScore('edges');strictNav.setTotalBeats(2);await strict.prepareMap();const strictRun=strict.play();await flush();
+const strictOutput=player.calls.at(-1);strictOutput.ready();const priorMap=strictNav.getState().map;
 assert.throws(()=>strict.setListeningSettings({speed:1.5,transpose:1},piano),/at least one note/);
-assert.equal(strict.getState().map,priorMap);assert.equal(strict.getState().listening.speed,1);assert.equal(strict.getState().listening.transpose,0);
+assert.equal(strictNav.getState().map,priorMap);assert.equal(strict.getState().listening.speed,1);assert.equal(strict.getState().listening.transpose,0);
 assert.equal(strictOutput.signal.aborted,false,'reject entire invalid setting before cancelling sound');assert.equal(strict.getState().playing,true);
 strict.stop();await strictRun;strict.bindDraft(null);
 console.log('PASS non-mutating speed/pitch plan, pedal/anchor timing, strict whole-score A0–C8 rejection, live musical-position preservation, paused reconfiguration and editor reset');

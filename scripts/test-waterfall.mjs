@@ -45,7 +45,7 @@ console.log('PASS voice colour → ramp follows hue, saturation and value');
 
 const { waterfallNotes, waterfallBars } = load('src/features/playback/waterfall/waterfallNotes.ts', {
   '@/core/model/contexts': { measureBeats: (signature) => signature.beats * 4 / signature.beatValue },
-  '@/core/playback/PlaybackController': { timeInSegment: (segment, beats) => segment.startMs + (beats - segment.startBeats) / (segment.endBeats - segment.startBeats) * (segment.endMs - segment.startMs) },
+  '@/core/navigation/ScoreNavigation': { timeInSegment: (segment, beats) => segment.startMs + (beats - segment.startBeats) / (segment.endBeats - segment.startBeats) * (segment.endMs - segment.startMs) },
 });
 const document = {
   voices: [{ id: 'first', index: 0 }, { id: 'second', index: 1 }],
@@ -175,11 +175,11 @@ async function checkRecordedWaterfall(browser, engine, cases) {
     await page.route('**/WaterfallStage.tsx*', async route => {
       const response = await route.fetch();
       const source = await response.text();
-      const clock = 'const playhead = () => Math.max(0, playback.getTimeMs());';
+      const clock = 'const playhead = () => Math.max(0, navigation.getTimeMs());';
       const tick = 'const tick = () => {';
       assert.ok(source.includes(clock) && source.includes(tick), 'the probe reads the audible clock and the frame callback');
       await route.fulfill({ response, body: source
-        .replace(clock, clock + ' window.waterfallTiming.playback=playback;')
+        .replace(clock, clock + ' window.waterfallTiming.playback=playback; window.waterfallTiming.navigation=navigation;')
         .replace(tick, tick + ' if(window.waterfallTiming.active){window.waterfallTiming.tick=window.waterfallTiming.tickStart=performance.now();}') });
     });
     await page.route('**/rollScene.ts*', async route => {
@@ -191,7 +191,7 @@ async function checkRecordedWaterfall(browser, engine, cases) {
         const probe = globalThis.waterfallTiming;
         const rendering = probe?.active && this.canvas.classList?.contains('waterfall-canvas');
         const started = rendering ? performance.now() : 0;
-        const audible = rendering ? probe.playback.getTimeMs() : 0;
+        const audible = rendering ? probe.navigation.getTimeMs() : 0;
         try {
       `).replace(
         '}, lights);',
@@ -200,15 +200,15 @@ async function checkRecordedWaterfall(browser, engine, cases) {
     });
     const button = (name) => page.getByRole('button', { name, exact: true });
     const seek = (milliseconds) => page.evaluate(async (time) => {
-      const { beatAtTime } = await import('/src/core/playback/PlaybackController.ts');
-      const playback = window.waterfallTiming.playback;
-      playback.seek(beatAtTime(playback.getState().map, time));
+      const { beatAtTime } = await import('/src/core/navigation/ScoreNavigation.ts');
+      const { playback, navigation } = window.waterfallTiming;
+      playback.seek(beatAtTime(navigation.getState().map, time));
     }, milliseconds);
 
     try {
       await page.goto(origin + '/scores/waterfall-timing');
       await page.getByRole('radio', { name: 'Waterfall', exact: true }).click();
-      await page.waitForFunction(() => document.querySelector('.editor-screen.is-waterfall') && window.waterfallTiming.playback?.getState().map);
+      await page.waitForFunction(() => document.querySelector('.editor-screen.is-waterfall') && window.waterfallTiming.navigation?.getState().map);
       if (await button('Show panel').isVisible()) await button('Show panel').click();
       await page.getByRole('radio', { name: 'Vertical', exact: true }).click();
       if (await button('Hide panel').isVisible()) await button('Hide panel').click();
@@ -216,8 +216,8 @@ async function checkRecordedWaterfall(browser, engine, cases) {
       await page.waitForFunction(() => window.waterfallTiming.playback.getState().playing);
       await seek(startMs);
       await page.waitForFunction(time => {
-        const { playback } = window.waterfallTiming;
-        return playback.getState().playing && Math.abs(playback.getTimeMs() - time) < 750;
+        const { playback, navigation } = window.waterfallTiming;
+        return playback.getState().playing && Math.abs(navigation.getTimeMs() - time) < 750;
       }, startMs);
       await page.evaluate(() => {
         window.waterfallTiming.samples.length = 0;
@@ -269,7 +269,7 @@ async function checkRecordedWaterfall(browser, engine, cases) {
       });
       await button('Pause playback').click();
       await page.waitForFunction(() => window.waterfallTiming.playback.getState().paused);
-      const heldMs = await page.evaluate(() => window.waterfallTiming.playback.getTimeMs());
+      const heldMs = await page.evaluate(() => window.waterfallTiming.navigation.getTimeMs());
       await page.waitForTimeout(120);
       const held = await page.evaluate(() => window.waterfallTiming.samples.at(-1));
       assert.ok(held && Math.abs(held.time - heldMs) < 1, 'paused pose matches the held PCM position');
@@ -1005,11 +1005,13 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
 
     const clockSteps = await page.evaluate(async () => {
       const { ServerPlaybackController } = await import('/src/core/playback/PlaybackController.ts');
+      const { ScoreNavigation } = await import('/src/core/navigation/ScoreNavigation.ts');
+      const navigation = new ScoreNavigation();
       // The audio clock moves in render-quantum steps of 5.33 ms; frames come every 16.7 ms.
       const quantum = 128 / 48000 * 1000;
       let audioMs = 5000;
       const player = { positionMs: () => audioMs, sampleRate: 48000, async prepare() {}, async unlock() {}, async pause() { return audioMs; }, stop() {}, dispose() {} };
-      const controller = new ServerPlaybackController({ map: async () => ({}) }, { async prepare() {}, async unlock() {}, release() {}, close() {}, bindSource() {}, invalidate() {} });
+      const controller = new ServerPlaybackController({ map: async () => ({}) }, { async prepare() {}, async unlock() {}, release() {}, close() {}, bindSource() {}, invalidate() {} }, undefined, navigation);
       controller.player = player;
       controller.state = { ...controller.state, playing: true };
       const steps = [];
@@ -1019,7 +1021,7 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
         const loop = frameTime => {
           origin ??= frameTime;
           audioMs = 5000 + Math.floor((frameTime - origin) / quantum) * quantum;
-          const shown = controller.getTimeMs();
+          const shown = navigation.getTimeMs();
           if (last !== undefined) steps.push(shown - last.shown - (frameTime - last.frame));
           last = { shown, frame: frameTime };
           if (steps.length < 120) requestAnimationFrame(loop);
@@ -1035,6 +1037,8 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
 
     const heldPicture = await page.evaluate(async () => {
       const { ServerPlaybackController } = await import('/src/core/playback/PlaybackController.ts');
+      const { ScoreNavigation } = await import('/src/core/navigation/ScoreNavigation.ts');
+      const navigation = new ScoreNavigation();
       let audioMs = 5000;
       let pausedAt = 0;
       const player = {
@@ -1042,10 +1046,11 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
         async pause() { audioMs = pausedAt; return pausedAt; },
         async resume() { return audioMs; },
       };
-      const controller = new ServerPlaybackController({ map: async () => ({}) }, { async prepare() {}, async unlock() {}, release() {}, close() {}, bindSource() {}, invalidate() {} });
+      const controller = new ServerPlaybackController({ map: async () => ({}) }, { async prepare() {}, async unlock() {}, release() {}, close() {}, bindSource() {}, invalidate() {} }, undefined, navigation);
       controller.player = player;
       controller.request = new AbortController();
-      controller.state = { ...controller.state, playing: true, timeMs: 5000 };
+      controller.state = { ...controller.state, playing: true };
+      navigation.update({ timeMs: 5000 });
       let shown = 0;
       await new Promise(resolve => {
         let origin;
@@ -1053,7 +1058,7 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
         const loop = frameTime => {
           origin ??= frameTime;
           audioMs = 5000 + (frameTime - origin);
-          shown = controller.getTimeMs();
+          shown = navigation.getTimeMs();
           if (++frames < 40) requestAnimationFrame(loop);
           else resolve();
         };
@@ -1064,11 +1069,11 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
       controller.pause();
       await new Promise(resolve => setTimeout(resolve, 20));
       const paused = controller.getState();
-      const rest = controller.getTimeMs();
+      const rest = navigation.getTimeMs();
       const resuming = controller.play();
-      const resumed = controller.getTimeMs();
+      const resumed = navigation.getTimeMs();
       await resuming;
-      return { shown, flags: [paused.paused, paused.playing], stored: paused.timeMs, rest, resumed };
+      return { shown, flags: [paused.paused, paused.playing], stored: navigation.getState().timeMs, rest, resumed };
     });
     assert.deepEqual(heldPicture.flags, [true, false], 'the transport is held after the pause');
     assert.equal(heldPicture.rest, heldPicture.shown, `a pause leaves the picture where its last frame drew it (${heldPicture.shown} -> ${heldPicture.rest})`);
@@ -1471,6 +1476,8 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
       const { fromView } = await import('/src/core/model/fromView.ts');
       const { playback } = await import(source.match(/from ["']([^"']*PlaybackController\.ts[^"']*)["']/)[1]);
       window.testPlayback = playback;
+      const { navigation } = await import(source.match(/from ["']([^"']*ScoreNavigation\.ts[^"']*)["']/)[1]);
+      window.testNavigation = navigation;
       const createdWorkers = new WeakSet();
       const workerProbe = { generations: [], arrivals: [], displayed: [], fail: null, delayUntil: 0 };
       window.waterfallWorkerProbe = workerProbe;
@@ -1498,14 +1505,15 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
         gateway: { ...state.gateway, load: async () => fromView(view, 'tilt-test') },
       }));
       playback.prepareMap = async () => {
-        playback.set({ map: { notes: [21, 24, 36, 48, 60, 72, 84, 96, 108].flatMap((pitch, index) => Array.from({ length: 12 }, (_, n) => ({ sourceId: 'fixture', pitch, startMs: 400 + n * 500, keyReleaseMs: 700 + n * 500, endMs: 700 + n * 500, velocity: 80 + index }))), pedals: [{ downMs: 400, upMs: 1600 }], anchors: [], segments: [], extentMs: 8000, version: 1 }, mapLoading: false });
+        navigation.update({ map: { notes: [21, 24, 36, 48, 60, 72, 84, 96, 108].flatMap((pitch, index) => Array.from({ length: 12 }, (_, n) => ({ sourceId: 'fixture', pitch, startMs: 400 + n * 500, keyReleaseMs: 700 + n * 500, endMs: 700 + n * 500, velocity: 80 + index }))), pedals: [{ downMs: 400, upMs: 1600 }], anchors: [], segments: [], extentMs: 8000, version: 1 } });
+        playback.set({ mapLoading: false });
       };
       const stageSource = await (await fetch(source.match(/from ["']([^"']*WaterfallStage\.tsx[^"']*)["']/)[1])).text();
       const { WaterfallScene } = await import(stageSource.match(/from ["']([^"']*rollScene\.ts[^"']*)["']/)[1]);
       const renderScene = WaterfallScene.prototype.render;
       WaterfallScene.prototype.render = function(time, prepared) {
         const result = renderScene.call(this, time, prepared);
-        workerProbe.displayed.push({ time, prepared: !!prepared, audio: playback.getTimeMs() });
+        workerProbe.displayed.push({ time, prepared: !!prepared, audio: navigation.getTimeMs() });
         return result;
       };
       const setTilt = WaterfallScene.prototype.setTilt;
@@ -1733,11 +1741,12 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
         const probe = window.waterfallWorkerProbe;
         probe.delayUntil = performance.now() + 380;
         probe.cancelPreparation = new AbortController();
-        const targetMap = { ...window.testPlayback.getState().map };
-        window.testPlayback.set({ map: targetMap, loading: true, seekBeats: 4 });
+        const targetMap = { ...window.testNavigation.getState().map };
+        window.testNavigation.update({ map: targetMap });
+        window.testPlayback.set({ loading: true, seekBeats: 4 });
         const ready = window.testPlayback.frameBuffer.prepare(targetMap, 5000, probe.cancelPreparation.signal);
         if (!ready) throw new Error('Expected a wait for the distant frame window');
-        const repeat = window.testPlayback.frameBuffer.prepare(window.testPlayback.getState().map, 5000, probe.cancelPreparation.signal);
+        const repeat = window.testPlayback.frameBuffer.prepare(window.testNavigation.getState().map, 5000, probe.cancelPreparation.signal);
         if (repeat !== ready) throw new Error('A repeated call must wait for the same frame window');
         ready.then(() => { probe.prepared = true; });
       });
@@ -1756,7 +1765,7 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
       await page.waitForFunction(() => window.waterfallWorkerProbe.prepared === true);
       await page.evaluate(() => {
         window.testTimeMs = 5000;
-        window.testPlayback.getTimeMs = () => window.testTimeMs;
+        window.testNavigation.getTimeMs = () => window.testTimeMs;
         window.testPlayback.set({ playing: true, loading: false, seekBeats: null });
       });
       await loader.waitFor({ state: 'detached' });
@@ -1774,7 +1783,7 @@ if (process.env.PLAYWRIGHT_MODULE_PATH && !process.env.WATERFALL_PERF_FIXTURES) 
       await page.waitForFunction(() => window.waterfallWorkerProbe.displayed.at(-1)?.time === .013);
       console.log(`PASS ${engine}: draws a ready measure window, recovers from worker failure and seeks exactly`);
     }
-    await page.evaluate(() => window.testPlayback.set({ playing: true, timeBeats: 2 }));
+    await page.evaluate(() => { window.testNavigation.update({ timeBeats: 2 }); window.testPlayback.set({ playing: true }); });
     assert.equal(await page.locator('.desk .cursor').count(), 0, 'the hidden score has no active playback cursor');
     await page.getByRole('radio', { name: 'Score', exact: true }).click();
     await page.locator('.desk .cursor').waitFor({ state: 'attached' });

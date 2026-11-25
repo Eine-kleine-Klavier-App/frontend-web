@@ -19,6 +19,7 @@ try {
   const {PlaybackCache}=await import('/src/core/playback/PlaybackCache.ts');
   const {PcmStreamPlayer}=await import('/src/core/playback/PcmStreamPlayer.ts');
   const {ServerPlaybackController}=await import('/src/core/playback/PlaybackController.ts');
+  const {ScoreNavigation}=await import('/src/core/navigation/ScoreNavigation.ts');
   const {LocalPreview}=await import('/src/core/playback/LocalPreview.ts');
   const check=(v,message)=>{if(!v)throw Error(message)};
   const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -50,8 +51,9 @@ try {
    synth.close();
    let mapReads=0;
    const previewStub={async prepare(){},async unlock(){},close(){},release(){},bindDraft(){},invalidate(){},async preview(){}};
-   const controller=new ServerPlaybackController({async map(){mapReads++;return map},async previewCarrier(){throw Error('not used')}},previewStub);
-   controller.bindDraft('test');controller.setTotalBeats(12);const completed=controller.play();await until(()=>controller.getState().playing,'play did not start');
+   const navigation=new ScoreNavigation();
+   const controller=new ServerPlaybackController({async map(){mapReads++;return map},async previewCarrier(){throw Error('not used')}},previewStub,undefined,navigation);
+   controller.bindDraft('test');navigation.setTotalBeats(12);const completed=controller.play();await until(()=>controller.getState().playing,'play did not start');
    const player=controller.player,context=player.context,records=[];
    const source=`class Meter extends AudioWorkletProcessor { process(inputs){const a=inputs[0]?.[0];if(a){let e=0;for(const x of a)e+=x*x;this.port.postMessage({time:currentTime,rms:Math.sqrt(e/a.length)})}return true;} } registerProcessor('local-synth-meter',Meter);`;
    const url=URL.createObjectURL(new Blob([source],{type:'text/javascript'}));await context.audioWorklet.addModule(url);URL.revokeObjectURL(url);
@@ -59,7 +61,7 @@ try {
    await wait(150);check(records.some(r=>r.rms>.0001),'output meter must hear the synthesizer');
    const blockUntil=performance.now()+300;while(performance.now()<blockUntil){}await wait(100);
    for(const beat of [7,2,8,3,6]){controller.seek(beat);await wait(20);check(controller.getState().playing,'seek must retain playing mode');}
-   await until(()=>Math.abs(controller.getState().timeBeats-6)<.7,'last seek did not win');await wait(150);
+   await until(()=>Math.abs(navigation.getState().timeBeats-6)<.7,'last seek did not win');await wait(150);
    const first=records.findIndex(r=>r.rms>.0001),last=records.findLastIndex(r=>r.rms>.0001);let silence=0,maxSilence=0;
    for(const row of records.slice(first,last+1)){silence=row.rms<1e-7?silence+128/context.sampleRate:0;maxSilence=Math.max(maxSilence,silence)}
    check(maxSilence<.02,`seek/output gap ${maxSilence}s`);
@@ -67,17 +69,17 @@ try {
    controller.pause();
    check(controller.getState().playing,'Pause was published before the audible boundary');
    await until(()=>controller.getState().paused,'Pause never reached the audible boundary');
-   const paused=controller.getTimeMs();
+   const paused=navigation.getTimeMs();
    const silenceFrom=context.currentTime;
    await wait(100);
    const held=records.filter(row=>row.time>=silenceFrom);
    check(held.length>0&&held.every(row=>row.rms<1e-7),'the output produced sound after the acknowledged Pause');
-   check(controller.getTimeMs()===paused&&context.state==='running','Pause did not hold the PCM position in a running graph');
+   check(navigation.getTimeMs()===paused&&context.state==='running','Pause did not hold the PCM position in a running graph');
    const resume=controller.play();
-   const afterResume=[];const watch=frameTime=>{afterResume.push([frameTime,controller.getTimeMs()]);if(afterResume.length<30)requestAnimationFrame(watch)};requestAnimationFrame(watch);
+   const afterResume=[];const watch=frameTime=>{afterResume.push([frameTime,navigation.getTimeMs()]);if(afterResume.length<30)requestAnimationFrame(watch)};requestAnimationFrame(watch);
    check(controller.getState().paused,'Resume was published before the audible boundary');
    await resume;
-   await until(()=>controller.getTimeMs()>paused+30,'resume did not advance');
+   await until(()=>navigation.getTimeMs()>paused+30,'resume did not advance');
    // After Resume the picture waits for the sound and then runs evenly: no step back, no change of speed.
    await until(()=>afterResume.length>=30,'the frames after Resume were not recorded');
    const resumeSteps=afterResume.slice(1).map((row,index)=>[row[0]-afterResume[index][0],row[1]-afterResume[index][1]]);
@@ -217,8 +219,9 @@ try {
        moments: [{ beats: 0, timeMs: 0 }, { beats: 1200, timeMs: 600000 }] }],
      notes: Array.from({ length: 2400 }, (_, index) => ({ sourceId: String(index), pitch: 48 + index % 24, velocity: 80,
        startMs: index * 250, keyReleaseMs: index * 250 + 200, endMs: index * 250 + 200 })) };
-   const longController = new ServerPlaybackController({ async map() { return longMap; } }, previewStub);
-   longController.bindDraft('long'); longController.setTotalBeats(1200);
+   const longNavigation = new ScoreNavigation();
+   const longController = new ServerPlaybackController({ async map() { return longMap; } }, previewStub, undefined, longNavigation);
+   longController.bindDraft('long'); longNavigation.setTotalBeats(1200);
    await longController.cache.prepare(longController.player.sampleRate);
    let primedAt = null;
    const playOutput = longController.player.play.bind(longController.player);
