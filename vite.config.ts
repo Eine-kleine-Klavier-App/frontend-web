@@ -12,7 +12,8 @@ export default defineConfig({
     // same-origin API in dev -> backend on :8000 (avoids CORS, matches HttpGateway's /api base)
     proxy: {
       '/api': {
-        target: 'http://127.0.0.1:8000',
+        // API_TARGET is set only in the container (backend service name); natively the backend is on the host.
+        target: process.env.API_TARGET ?? 'http://127.0.0.1:8000',
         changeOrigin: true,
         ws: true,
         rewrite: (path) => path.replace(/^\/api/, ''),
