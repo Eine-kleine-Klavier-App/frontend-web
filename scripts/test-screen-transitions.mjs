@@ -274,6 +274,12 @@ try {
   await stage(root).locator('.paper[data-ready="true"] svg').first().waitFor();
   console.log('PASS Read to Editor, Library ↔ Editor, Back and Forward');
 
+  await go('/scores/' + saved.id + '/practice');
+  await page.locator('.practice-screen').waitFor();
+  await page.getByRole('radiogroup', { name: 'View' }).getByRole('radio', { name: 'Waterfall' }).click();
+  await page.waitForFunction(() => document.querySelector('.editor-screen.is-waterfall') && getComputedStyle(document.querySelector('.workspace-transition-cover')).opacity === '0', null, { timeout: 8000 });
+  console.log('PASS Practice to Waterfall opens and settles');
+
   await go('/scores/missing-score');
   await page.getByRole('alert').filter({ hasText: 'This score could not be found.' }).waitFor();
   await page.waitForFunction(() => getComputedStyle(document.querySelector('.workspace-transition-cover')).opacity === '0');
