@@ -38,6 +38,14 @@ interface OutputGain {
   end: number;
 }
 
+/** How long an output takes to go to silence when it is stopped while it sounds (every kind of output: a stream, a live preview), and the
+ *  room left for the fade to be heard out before the node is let go. */
+const OUTPUT_FADE_S = 0.01;
+const OUTPUT_SLACK_MS = 30;
+/** How long the output takes to go to silence when the player is torn down while it sounds, and the room left for the fade to be heard out. */
+const DISPOSE_FADE_S = 0.03;
+const DISPOSE_SLACK_MS = 40;
+
 /** Transport only: the server has resolved pitch, timing and dynamics. */
 export class PcmStreamPlayer {
   private context: AudioContext | null = null;
@@ -138,13 +146,22 @@ export class PcmStreamPlayer {
     const context = this.context!;
     const node = new AudioWorkletNode(context, 'piano-pcm-output', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [2] });
     const channel = new MessageChannel();
-    node.connect(this.gain!);
+    // an output of its own that goes to silence before the node is let go: a node taken off the graph while it sounds is a step in the signal
+    const fade = context.createGain();
+    node.connect(fade).connect(this.gain!);
     node.port.postMessage({ type: 'source', port: channel.port1 }, [channel.port1]);
     const stop = () => {
       this.outputs.delete(stop);
-      node.port.postMessage({ type: 'stop' });
-      node.disconnect();
-      node.port.close();
+      const at = context.currentTime;
+      fade.gain.cancelScheduledValues(at);
+      fade.gain.setValueAtTime(fade.gain.value, at);
+      fade.gain.linearRampToValueAtTime(0, at + OUTPUT_FADE_S);
+      window.setTimeout(() => {
+        node.port.postMessage({ type: 'stop' });
+        node.disconnect();
+        fade.disconnect();
+        node.port.close();
+      }, OUTPUT_FADE_S * 1000 + OUTPUT_SLACK_MS);
     };
     this.outputs.add(stop);
     node.onprocessorerror = () => {
@@ -295,13 +312,31 @@ export class PcmStreamPlayer {
     this.lifecycle?.();
     this.lifecycle = null;
     const context = this.context;
-    this.gain?.disconnect();
+    const gain = this.gain;
     this.gain = null;
     this.context = null;
     this.module = null;
     this.suspension = null;
     this.resumption = null;
-    if (context && context.state !== 'closed') void context.close().catch(() => {});
+    if (!context || context.state === 'closed') {
+      gain?.disconnect();
+      return;
+    }
+    if (gain && context.state === 'running') {
+      // Sound that is still going out is not cut at its present value (a step in the signal is a click): the output is faded to
+      // silence over a few milliseconds and the context is closed once the fade is over.
+      const now = context.currentTime;
+      gain.gain.cancelScheduledValues(now);
+      gain.gain.setValueAtTime(gain.gain.value, now);
+      gain.gain.linearRampToValueAtTime(0, now + DISPOSE_FADE_S);
+      window.setTimeout(() => {
+        gain.disconnect();
+        void context.close().catch(() => {});
+      }, DISPOSE_FADE_S * 1000 + DISPOSE_SLACK_MS);
+      return;
+    }
+    gain?.disconnect();
+    void context.close().catch(() => {});
   }
 
   private fadeOutput(output: OutputGain, to: number, at: number, end: number): void {
