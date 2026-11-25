@@ -4,21 +4,23 @@ import type { AnimationPlaybackControls } from 'motion/react';
 import { useEditor } from '@/app/store';
 import { VexflowRenderer } from '@/rendering/vexflow/VexflowRenderer';
 import { Overlay } from './Overlay';
+import { playbackScrub } from '@/features/playback/PlaybackBar';
+import type { TransportScrub } from '@/features/playback/Transport';
 import type { ScoreLayout } from '@/rendering/ScoreRenderer';
 import { StaffMarker } from './StaffMarker';
 import { ScoreErrorBoundary } from './ScoreErrorBoundary';
 import type { BeamOverride } from '@/core/model/score';
 import type { SlurOffsets } from '@/core/model/slurHandles';
 import type { SpanPreview } from '@/rendering/ScoreRenderer';
-import { playback } from '@/core/playback/PlaybackController';
+import { navigation } from '@/core/navigation/ScoreNavigation';
 import { SPRING_SMOOTH } from '@/styles/motion';
 import { visibleBottom } from './visibleBottom';
 import { readCssLength } from '@/ui/cssLength';
-import { SCORE_MARGIN_X } from '@/rendering/vexflow/VexflowRenderer';
+import { SHEET_MARGIN_RATIO } from '@/rendering/vexflow/VexflowRenderer';
 
 // Sheet geometry comes from the stylesheet's tokens (one source), resolved to pixels:
-// `--sheet-gutter` (the canvas's side padding = browse's gutter), `--sheet-max` (a page, not a
-// banner), `--paper-frame` (the paper's padding, both sides, plus slack) and `--title-band` (the
+// `--sheet-gutter` (the canvas's side padding = browse's gutter), `--sheet-max` (a page, not a banner),
+// `--paper-frame` (the paper's padding, both sides, plus slack) and `--title-band` (the
 // engraved title block above the score — added to the paper's height, never part of the score's
 // own coordinates, so the overlay and hit-testing are untouched).
 interface SheetGeometry {
@@ -27,6 +29,13 @@ interface SheetGeometry {
   frame: number;
   band: number;
 }
+/** The sheets are A4: 297 high for 210 wide. */
+const A4_RATIO = 297 / 210;
+/** What 100% means: the share of the engraving's natural size that the notes are drawn at. */
+const NOTE_SIZE_AT_100 = 0.9;
+/** How long a sheet has to be in view and still empty before its three dots show (ms). */
+const WAIT_BEFORE_DOTS_MS = 300;
+
 function readSheetGeometry(el: Element): SheetGeometry {
   return {
     gutter: readCssLength(el, '--sheet-gutter'),
@@ -46,10 +55,12 @@ export function createHoverFeedback(show: (ids: string[]) => void) {
   };
 }
 
-export function EditorView({ title, scoreActive = true, onFirstPaint }: {
+export function EditorView({ title, scoreActive = true, onFirstPaint, lineScrub = playbackScrub }: {
   title?: string;
   scoreActive?: boolean;
   onFirstPaint?: (ready: boolean) => void;
+  /** What moves the position when the playback line is dragged: the sound player unless the screen has its own. */
+  lineScrub?: TransportScrub;
 } = {}) {
   const tool = useEditor(s => s.tool);
   const reading = useEditor(s => s.source?.kind === 'saved');
@@ -57,7 +68,8 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
   const selectedIds = useEditor((s) => s.selectedIds);
   const scrollToSelection = useEditor((s) => s.scrollToSelection);
   const carrierSelectedIds = useEditor((s) => s.carrierSelectedIds);
-  const zoom = useEditor((s) => s.zoom);
+  const shownZoom = useEditor((s) => s.zoom);
+  const zoom = shownZoom * NOTE_SIZE_AT_100;
   const voiceColors = useEditor((s) => s.voiceColors);
   const stemOverrides = useEditor((s) => s.stemOverrides);
   const [layout, setLayout] = useState<ScoreLayout | null>(null);
@@ -97,17 +109,17 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
 
   const onLayout = useCallback((l: ScoreLayout) => {
     setLayout(l);
-    playback.setTotalBeats(l.totalBeats);
+    navigation.setTotalBeats(l.totalBeats);
   }, []);
   const onEngraveError = useCallback((message: string) => {
     useEditor.setState({ error: `The score could not be drawn: ${message}` });
   }, []);
 
-  // Reflow-zoom: the rendered sheet width stays pinned to the desk's available width (capped at
-  // SHEET_MAX_W) regardless of zoom, so the sheet never needs horizontal scroll — zoom only changes
-  // how much content fits per system. Recomputed off the store's `zoom` (commits instantly, unlike
-  // the animated `scale`), which does trigger a fresh layout per click; also watches
-  // `.canvas-area`'s own size via `ResizeObserver` for window resizes.
+  // Reflow-zoom: the rendered sheet width stays pinned to the desk's available width regardless
+  // of zoom, so the sheet never needs horizontal scroll — zoom only changes how much content
+  // fits per system. Recomputed off the store's `zoom` (commits instantly, unlike the animated
+  // `scale`), which does trigger a fresh layout per click; also watches `.canvas-area`'s own size
+  // via `ResizeObserver` for window resizes.
   const [pageContentWidth, setPageContentWidth] = useState<number | undefined>(undefined);
   // the sheet's token geometry in pixels; re-read with every size change (a font-size change
   // reflows the canvas too, so the ResizeObserver below catches it)
@@ -120,10 +132,10 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
     const recompute = () => {
       const g = (geometryRef.current = readSheetGeometry(area));
       // Inverts EditorView's own `paperW` formula (`w*zoom + frame`) and VexflowRenderer's
-      // `totalW = SCORE_MARGIN_X + pageContentWidth` against the actual available box:
+      // the sheet's width being `pageContentWidth / (1 − 2 × SHEET_MARGIN_RATIO)` against the actual available box:
       // the sheet is min(--sheet-max, column − 2 gutters).
       const available = Math.min(area.clientWidth - 2 * g.gutter, g.max);
-      const target = (available - g.frame) / zoom - SCORE_MARGIN_X;
+      const target = (available - g.frame) / zoom * (1 - 2 * SHEET_MARGIN_RATIO);
       pageWidthRef.current = { available, requested: Math.max(200, target) };
       syncSizes();
       setPageContentWidth(Math.max(200, target));
@@ -134,10 +146,9 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
     return () => ro.disconnect();
   }, [zoom]);
 
-  // --- ZOOM (unchanged, works): store `zoom` commits instantly; one spring chases it, and the
-  // scale transform + container sizes are all read from that ONE value every frame so they can't
-  // desync. A content edit leaves the spring at rest, so the size transforms recompute to the new
-  // w/h instantly — edits never lag.
+  // --- ZOOM: store `zoom` commits instantly and the scale takes it at once (no spring); the scale transform + container
+  // sizes are all read from that ONE value so they can't desync. A content edit leaves it unchanged, so the size
+  // transforms recompute to the new w/h instantly — edits never lag.
   const scale = useSpring(zoom, SPRING_SMOOTH);
   const onBeamPreview = useCallback((preview: { id: string; override: BeamOverride; anchorId: string | null } | null) => {
     if (preview?.anchorId && beamAnchorRef.current?.id !== preview.anchorId) {
@@ -153,18 +164,19 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
     if (!preview && beamAnchorRef.current) beamAnchorRef.current.releaseLayout = beamLayoutRef.current;
     setBeamPreview(preview);
   }, [scale]);
+  // the scale goes to its value at once, with the layout asked for it: a spring let the content lag behind the sheets and stand
+  // outside them for a moment (staves beyond the page's edge), and ran beside the re-layout of every step
   useEffect(() => {
-    if (reduce) scale.jump(zoom);
-    else scale.set(zoom);
-  }, [zoom, reduce, scale]);
+    scale.jump(zoom);
+  }, [zoom, scale]);
 
-  // Zoom anchors on the VIEWPORT CENTER, not the scroll container's top-left (the default: a
-  // scaled box growing/shrinking from `transformOrigin: top left` leaves `scrollLeft`/`scrollTop`
-  // untouched, so the content pixel that was at the top-left corner stays put — everything visibly
-  // drifts away from center as you zoom). Captured once per zoom trigger (the content-local point
-  // currently under the viewport's center, read from the CURRENT scale before this change starts
-  // animating), then re-applied on every `scale` tick for the rest of the spring's flight so the
-  // anchor stays fixed on screen throughout the animation, not just once it settles.
+  // Zoom anchors on the VIEWPORT CENTER, not the scroll container's top: a scaled box growing/shrinking
+  // from `transformOrigin: top left` leaves `scrollTop` untouched, so the content row that was at the top
+  // stays put — everything visibly drifts away from the center as you zoom. Captured once per zoom trigger
+  // (the content-local row under the viewport's center, read from the CURRENT scale before this change
+  // starts animating), then re-applied on every `scale` tick for the rest of the spring's flight so the
+  // anchor stays fixed on screen throughout the animation, not just once it settles. Only the vertical
+  // axis is held: the sheet never moves sideways, its own margins keep it centred.
   useEffect(() => {
     const area = canvasAreaRef.current;
     const content = scoreContentRef.current;
@@ -173,12 +185,8 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
     const areaRect = area.getBoundingClientRect();
     const contentRect = content.getBoundingClientRect();
     const s = scale.get() || 1;
-    const centerX = areaRect.left + areaRect.width / 2;
     const centerY = areaRect.top + areaRect.height / 2;
-    const anchor = {
-      x: (centerX - contentRect.left) / s,
-      y: (centerY - contentRect.top) / s,
-    };
+    const anchorY = (centerY - contentRect.top) / s;
 
     return scale.on('change', (curS) => {
       const a = canvasAreaRef.current;
@@ -186,12 +194,7 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
       if (!a || !c) return;
       const aRect = a.getBoundingClientRect();
       const cRect = c.getBoundingClientRect();
-      const cx = aRect.left + aRect.width / 2;
-      const cy = aRect.top + aRect.height / 2;
-      const anchorScreenX = cRect.left + anchor.x * curS;
-      const anchorScreenY = cRect.top + anchor.y * curS;
-      a.scrollLeft += anchorScreenX - cx;
-      a.scrollTop += anchorScreenY - cy;
+      a.scrollTop += cRect.top + anchorY * curS - (aRect.top + aRect.height / 2);
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [zoom]);
@@ -222,37 +225,28 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
 
     const boxes = layout.noteBoxes.filter((nb) => selectedIds.includes(nb.id));
     if (!boxes.length) return;
-    const minX = Math.min(...boxes.map((b) => b.x));
-    const maxX = Math.max(...boxes.map((b) => b.x + b.w));
     const minY = Math.min(...boxes.map((b) => b.y));
     const maxY = Math.max(...boxes.map((b) => b.y + b.h));
 
     const s = scale.get() || 1;
     const contentRect = content.getBoundingClientRect();
     const areaRect = area.getBoundingClientRect();
-    const boxLeft = contentRect.left + minX * s;
-    const boxRight = contentRect.left + maxX * s;
     const boxTop = contentRect.top + minY * s;
     const boxBottom = contentRect.top + maxY * s;
-    const viewLeft = areaRect.left;
-    const viewRight = areaRect.left + areaRect.width;
     const viewTop = areaRect.top;
     const viewBottom = visibleBottom(area);
 
     // already fully on screen — don't yank the view for a selection change that's already visible
-    // (a plain click), only rescue one that navigated past the edge.
-    if (boxLeft >= viewLeft && boxRight <= viewRight && boxTop >= viewTop && boxBottom <= viewBottom) return;
+    // (a plain click), only rescue one that navigated past the edge. The sheet never moves sideways,
+    // so only the vertical position is looked at.
+    if (boxTop >= viewTop && boxBottom <= viewBottom) return;
 
-    const deltaX = (boxLeft + boxRight) / 2 - (viewLeft + viewRight) / 2;
     const deltaY = (boxTop + boxBottom) / 2 - (viewTop + viewBottom) / 2;
-    const startL = area.scrollLeft;
     const startT = area.scrollTop;
-    const targetL = startL + deltaX;
     const targetT = startT + deltaY;
 
     selectionScrollAnimRef.current?.stop();
     if (reduce) {
-      area.scrollLeft = targetL;
       area.scrollTop = targetT;
       return;
     }
@@ -260,7 +254,6 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
       type: 'spring',
       ...SPRING_SMOOTH,
       onUpdate: (t) => {
-        area.scrollLeft = startL + (targetL - startL) * t;
         area.scrollTop = startT + (targetT - startT) * t;
       },
     });
@@ -292,7 +285,7 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
   const syncSizes = useCallback(() => {
     const z = scale.get();
     const { w: ww, h: hh } = sizeRef.current;
-    const { frame, band } = geometryRef.current;
+    const { frame } = geometryRef.current;
     scaleW.set(ww * z);
     scaleH.set(hh * z);
     // a layout engraved for another width than the one now asked for is stale (it arrives a frame or more after a zoom step): the paper keeps the width it has until the current layout comes
@@ -301,7 +294,7 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
     const current = layoutRef.current?.engravedFor === requested;
     if (current || !available) paperW.set(ww * zoomRef.current + frame);
     else if (paperW.get() === 0) paperW.set(available);
-    paperH.set(hh * z + frame + band);
+    paperH.set(hh * z + frame);
     paperVisibility.set(ww * z > 0 ? 'visible' : 'hidden');
   }, [scale, scaleW, scaleH, paperW, paperH, paperVisibility]);
   useLayoutEffect(syncSizes, [w, h, layout, syncSizes]);
@@ -340,6 +333,35 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
     return () => { cancelAnimationFrame(frame); cancelAnimationFrame(afterPaint); };
   }, [onFirstPaint, paintReady, pageContentWidth]);
 
+  // A sheet that waits for its drawing shows its dots only once it has been in view for a while (`data-seen`): the wait is counted from
+  // the moment the sheet comes into view, so a jump to a sheet that has waited off screen for long does not flash them for a blink.
+  const sheetCount = layout?.pages.length ?? 0;
+  useEffect(() => {
+    const area = canvasAreaRef.current;
+    if (!area || !sheetCount) return;
+    const timers = new Map<Element, number>();
+    const observer = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        const sheet = entry.target as HTMLElement;
+        window.clearTimeout(timers.get(sheet));
+        timers.delete(sheet);
+        if (!entry.isIntersecting) delete sheet.dataset.seen;
+        else timers.set(sheet, window.setTimeout(() => { sheet.dataset.seen = 'true'; }, WAIT_BEFORE_DOTS_MS));
+      }
+    }, { root: area });
+    area.querySelectorAll('.sheet-page').forEach((sheet) => observer.observe(sheet));
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+      observer.disconnect();
+    };
+  }, [sheetCount]);
+
+  // The sheets stand at the size of the paper, not of the layer the zoom spring scales: a layout that
+  // arrives for a new width must not make them shrink or swell while the spring catches up. `unit` is
+  // how many pixels a unit of the layout is worth once it has settled.
+  const sheetPx = pageWidthRef.current.available - geometryRef.current.frame;
+  const unit = layout?.engravedFor !== undefined ? sheetPx * (1 - 2 * SHEET_MARGIN_RATIO) / layout.engravedFor : 0;
+
   return (
     <div
       className="canvas-area"
@@ -361,8 +383,13 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
       {/* invisible until the first layout exists: before it the paper's width is just its frame,
           which painted as a thin full-height strip that then jumped to full width */}
       <motion.div className="paper" data-ready={layout && w > 0 ? 'true' : 'false'} style={{ width: paperW, height: paperH, visibility: paperVisibility }}>
-        <div className="sheet-title" aria-hidden="true">
-          <h1>{title || document.title || 'Untitled'}</h1>
+        {/* the sheets: the score is cut into pages of one proportion, and each stands on the desk with its own edge */}
+        <div className="sheet-pages" aria-hidden="true">
+          {unit > 0 && layout?.pages.map((page, index) => (
+            <div key={index} className="sheet-page" data-page={index} data-waiting={page.waiting} style={{ top: page.y * unit, width: sheetPx, height: page.h * unit }}>
+              <div className="sheet-wait"><span /><span /><span /></div>
+            </div>
+          ))}
         </div>
         <motion.div className="score-scale" style={{ width: scaleW, height: scaleH }}>
           <motion.div
@@ -370,6 +397,11 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
             className="score-content"
             style={{ scale, transformOrigin: 'top left', width: w, height: h, position: 'relative' }}
           >
+            {layout?.pages[0] && (
+              <div className="sheet-title" aria-hidden="true" style={{ top: layout.pages[0].y, left: layout.pages[0].x, width: layout.pages[0].w }}>
+                <h1>{title || document.title || 'Untitled'}</h1>
+              </div>
+            )}
             <ScoreErrorBoundary document={document}>
               {pageContentWidth !== undefined && <VexflowRenderer
                 document={document}
@@ -377,6 +409,7 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
                 selectedIds={selectedIds}
                 carrierSelectedIds={carrierSelectedIds}
                 pageContentWidth={pageContentWidth}
+                pageRatio={A4_RATIO}
                 onLayout={onLayout}
                 voiceColors={voiceColors}
                 stemOverrides={stemOverrides}
@@ -395,6 +428,7 @@ export function EditorView({ title, scoreActive = true, onFirstPaint }: {
                   layout={layout}
                   scoreActive={scoreActive}
                   playbackLayoutReady={layout.engravedFor === pageContentWidth}
+                  lineScrub={lineScrub}
                   // pointer moves report the same hover again and again: only a change re-renders
                   onHoverNote={hoverFeedback.hover}
                   onInserted={onInserted}
