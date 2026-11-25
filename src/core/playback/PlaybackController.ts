@@ -3,6 +3,7 @@ import { AuthRequiredError } from '@/core/auth/authorizedFetch';
 import { useAuthPrompt } from '@/core/auth/authPrompt';
 import { errorMessage } from '@/core/errorMessage';
 import type { ScoreSource } from '@/core/model/scoreSource';
+import { navigation as sharedNavigation, beatAtTime, timeAtBeat, type ScoreNavigation } from '@/core/navigation/ScoreNavigation';
 import { draftSounds } from './draftSounds';
 import { HttpPlaybackGateway } from './HttpPlaybackGateway';
 import type { PlaybackAudio, PlaybackGateway, PlaybackMap, PlaybackSegment, SavedScorePlaybackGateway } from './PlaybackGateway';
@@ -27,13 +28,10 @@ export interface PlaybackState {
   previewing: boolean;
   ready: boolean;
   mapLoading: boolean;
-  map: PlaybackMap | null;
-  timeMs: number;
-  timeBeats: number;
   seekBeats: number | null;
-  totalBeats: number;
+  /** The time a seek in flight goes to, for a seek made by the time of the route. */
+  seekMs: number | null;
   error: string | null;
-  activeCarrierIds: string[];
 }
 export type PlaybackListener = (state: PlaybackState) => void;
 
@@ -55,12 +53,14 @@ export interface PlaybackController {
   pause(): void;
   stop(): void;
   seek(beats: number): void;
-  setTotalBeats(total: number): void;
+  /** A seek by the time of the route, which tells apart the passes of a repeated part that a place of the score cannot. */
+  seekMs(ms: number): void;
+  /** The sound is held while the position is moved by hand; `endScrub` puts it where it was left and goes on if it was playing. */
+  beginScrub(): void;
+  scrubTo(ms: number): void;
+  endScrub(ms: number): void;
   setFrameBuffer(buffer: PlaybackFrameBuffer): () => void;
   getState(): PlaybackState;
-  /** The position of the sound being heard now, read on the animation frame; the state's time is written only on transport events and a few times a second. */
-  getTimeMs(): number;
-  getTimeBeats(): number;
   getOutputDelayMs(): number;
   /** Positive when the sound is heard later than the output reports. */
   setOutputDelayMs(milliseconds: number): void;
@@ -82,13 +82,8 @@ export class ServerPlaybackController implements PlaybackController {
     previewing: false,
     ready: false,
     mapLoading: false,
-    map: null,
-    timeMs: 0,
-    timeBeats: 0,
-    seekBeats: null,
-    totalBeats: 0,
+    seekBeats: null, seekMs: null,
     error: null,
-    activeCarrierIds: [],
   };
   private source: ScoreSource | null = null;
   private rawMap: PlaybackMap | null = null;
@@ -105,14 +100,28 @@ export class ServerPlaybackController implements PlaybackController {
   private cache = new PlaybackCache();
   private frameBuffer: PlaybackFrameBuffer | undefined;
   private previews: PreviewTransport;
+  private scrubResume = false;
 
   constructor(
     private gateway: PlaybackGateway = draftSounds,
     previews: PreviewTransport | undefined = undefined,
     private savedGateway: SavedScorePlaybackGateway = new HttpPlaybackGateway(),
+    private navigation: ScoreNavigation = sharedNavigation,
   ) {
     this.previews = previews ?? new LocalPreview(gateway, savedGateway);
+    this.navigation.attach(this.positionSource);
   }
+
+  /** The position of the sound being heard now, read on the animation frame; null while no sound is running, when the navigation keeps the held position. */
+  private positionSource = (): number | null => {
+    if (!this.state.playing && !(this.state.paused && this.transportIntent?.running)) {
+      this.clock.reset();
+      return null;
+    }
+    const { timeMs } = this.navigation.getState();
+    // Starting again from a pause, the picture goes on from where it was held, not from the sound.
+    return this.clock.at(this.player.positionMs() ?? timeMs, this.state.paused ? timeMs : undefined);
+  };
 
   bindDraft(draftId: string | null): void {
     this.bindSource(draftId ? { kind: 'draft', id: draftId } : null);
@@ -135,7 +144,8 @@ export class ServerPlaybackController implements PlaybackController {
       void Promise.all([this.player.prepare(), this.cache.prepare(this.player.sampleRate)]).catch(() => {});
       void this.previews.prepare?.().catch(() => {});
     }
-    this.set({ listening: { ...DEFAULT_PLAYBACK_SETTINGS }, ready: source !== null, timeBeats: 0, timeMs: 0, totalBeats: 0, error: null });
+    this.navigation.update({ timeBeats: 0, timeMs: 0, totalBeats: 0 });
+    this.set({ listening: { ...DEFAULT_PLAYBACK_SETTINGS }, ready: source !== null, error: null });
   }
 
   documentChanged(_snapshot = ''): void {
@@ -151,11 +161,13 @@ export class ServerPlaybackController implements PlaybackController {
     this.mapRequest = null;
     this.mapPromise = null;
     this.rawMap = null;
-    this.set({ map: null, mapLoading: false });
+    this.navigation.update({ map: null });
+    this.set({ mapLoading: false });
   }
 
   private loadMap(): Promise<PlaybackMap> {
-    if (this.state.map) return Promise.resolve(this.state.map);
+    const loaded = this.navigation.getState().map;
+    if (loaded) return Promise.resolve(loaded);
     if (this.mapPromise) return this.mapPromise;
     const source = this.source;
     if (!source) return Promise.reject(new DOMException('No score is open.', 'AbortError'));
@@ -167,7 +179,8 @@ export class ServerPlaybackController implements PlaybackController {
       if (this.mapRequest !== request || request.signal.aborted) throw new DOMException('Obsolete map.', 'AbortError');
       this.rawMap = map;
       const configured = withPlaybackSettings(map, this.state.listening);
-      this.set({ map: configured, mapLoading: false });
+      this.navigation.update({ map: configured });
+      this.set({ mapLoading: false });
       return configured;
     });
     this.mapPromise = attempt;
@@ -204,10 +217,12 @@ export class ServerPlaybackController implements PlaybackController {
     const map = withPlaybackSettings(this.rawMap, settings);
     const resume = this.state.playing || this.state.loading;
     const paused = this.state.paused;
-    const beat = this.state.map ? beatAtTime(this.state.map, this.getTimeMs()) : this.state.timeBeats;
+    const current = this.navigation.getState();
+    const beat = current.map ? beatAtTime(current.map, this.navigation.getTimeMs()) : current.timeBeats;
     this.cancel();
     this.cache.clear();
-    this.set({ listening: { ...settings }, map, timeBeats: beat, timeMs: timeAtBeat(map, beat), paused, error: null });
+    this.navigation.update({ map, timeBeats: beat, timeMs: timeAtBeat(map, beat) });
+    this.set({ listening: { ...settings }, paused, error: null });
     if (resume) void this.play();
     else void this.cache.prepare(this.player.sampleRate).catch(() => {});
   }
@@ -255,7 +270,8 @@ export class ServerPlaybackController implements PlaybackController {
       this.transportIntent = intent;
       const current = () => this.request === request && this.transportIntent === intent;
       try {
-        const { paused, map, timeMs } = this.state;
+        const { paused } = this.state;
+        const { map, timeMs } = this.navigation.getState();
         const frames = paused && map ? this.frameBuffer?.prepare(map, timeMs, request.signal) : undefined;
         // Acquire audio permission within the gesture if the device interrupted the context.
         const ready = this.player.unlock();
@@ -270,7 +286,8 @@ export class ServerPlaybackController implements PlaybackController {
         if (!current()) return;
         const position = await this.player.resume();
         if (!current()) return;
-        this.set({ ...this.positionPatch(position ?? timeMs), loading: false, playing: true, paused: false });
+        this.navigation.setTime(position ?? timeMs);
+        this.set({ loading: false, playing: true, paused: false });
       } catch (error) {
         if (current()) {
           if (isAbort(error)) this.set({ loading: false });
@@ -281,22 +298,25 @@ export class ServerPlaybackController implements PlaybackController {
       }
       return;
     }
-    await this.startAt(this.state.timeBeats);
+    const { timeBeats, timeMs } = this.navigation.getState();
+    await this.startAt(timeBeats, false, timeMs);
   }
 
-  private async startAt(beats: number, hold = false): Promise<void> {
+  /** `ms` is where the sound starts when the place is known by its time (a pass of a repeated part); without it the first time the place of the score is reached. */
+  private async startAt(beats: number, hold = false, ms: number | null = null): Promise<void> {
     this.cancel();
     const request = new AbortController();
     this.request = request;
-    this.set({ loading: true, error: null, seekBeats: hold ? beats : null });
+    this.set({ loading: true, error: null, seekBeats: hold ? beats : null, seekMs: hold ? ms : null });
     try {
       await this.player.unlock();
       const map = await this.loadMap();
       if (request.signal.aborted) return;
-      const startMs = timeAtBeat(map, beats);
+      const startMs = ms ?? timeAtBeat(map, beats);
       if (startMs >= map.extentMs) {
         this.request = null;
-        this.set({ loading: false, seekBeats: null, timeMs: startMs, timeBeats: beats });
+        this.navigation.update({ timeMs: startMs, timeBeats: beats });
+        this.set({ loading: false, seekBeats: null, seekMs: null });
         return;
       }
       const frames = this.frameBuffer?.prepare(map, startMs, request.signal);
@@ -313,7 +333,7 @@ export class ServerPlaybackController implements PlaybackController {
         await this.playAudio(audio, request, startMs);
       } else if (this.request === request) {
         this.request = null;
-        this.set({ loading: false, playing: false, paused: false, seekBeats: null });
+        this.set({ loading: false, playing: false, paused: false, seekBeats: null, seekMs: null });
       }
     } catch (error) {
       if (!request.signal.aborted) this.fail(error, () => void this.startAt(beats, hold));
@@ -325,8 +345,10 @@ export class ServerPlaybackController implements PlaybackController {
       audio,
       request.signal,
       () => {
-        if (this.request === request) this.set({ ...this.positionPatch(this.player.positionMs() ?? startMs),
-          loading: false, playing: true, paused: false, seekBeats: null });
+        if (this.request === request) {
+          this.navigation.setTime(this.player.positionMs() ?? startMs);
+          this.set({ loading: false, playing: true, paused: false, seekBeats: null, seekMs: null });
+        }
       },
       startMs,
       (ms) => {
@@ -334,7 +356,7 @@ export class ServerPlaybackController implements PlaybackController {
         const now = performance.now();
         if (now - this.timeWrittenAt < TIME_STORE_INTERVAL_MS) return;
         this.timeWrittenAt = now;
-        this.set(this.positionPatch(ms));
+        this.navigation.setTime(ms);
       },
       false,
       () => {
@@ -350,53 +372,65 @@ export class ServerPlaybackController implements PlaybackController {
     if (this.request === request) {
       this.request = null;
       this.transportIntent = null;
-      this.set({ loading: false, playing: false, paused: false, activeCarrierIds: [] });
+      this.navigation.update({ activeCarrierIds: [] });
+      this.set({ loading: false, playing: false, paused: false });
     }
   }
 
   seek(beats: number): void {
     if (!Number.isFinite(beats)) return;
-    const at = Math.max(0, Math.min(beats, this.state.totalBeats));
+    this.seekTo(Math.max(0, Math.min(beats, this.navigation.getState().totalBeats)), null);
+  }
+
+  seekMs(ms: number): void {
+    const { map } = this.navigation.getState();
+    if (!map || !Number.isFinite(ms)) return;
+    const at = Math.max(0, Math.min(ms, map.extentMs));
+    this.seekTo(beatAtTime(map, at), at);
+  }
+
+  /** `at` is the place in beats; `ms` its time when that is known (a pass of a repeated part), otherwise the first time the place is reached. */
+  private seekTo(at: number, ms: number | null): void {
     this.seekRequest?.abort();
     this.seekRequest = null;
     const resuming = this.state.paused && this.transportIntent?.running === true;
     if (!resuming && (!this.state.playing || this.transportIntent?.running === false)) {
       const restart = this.state.loading;
       if (restart && (this.state.seekBeats !== null || this.frameBuffer?.active())) {
-        void this.startAt(at, true);
+        void this.startAt(at, true, ms);
         return;
       }
       this.cancel();
-      this.set({ timeBeats: at, timeMs: this.state.map ? timeAtBeat(this.state.map, at) : 0, error: null });
+      const { map } = this.navigation.getState();
+      this.navigation.update({ timeBeats: at, timeMs: ms ?? (map ? timeAtBeat(map, at) : 0) });
+      this.set({ error: null });
       if (restart) void this.play();
       return;
     }
     const request = new AbortController();
     this.seekRequest = request;
-    this.set({ seekBeats: at });
+    this.set({ seekBeats: at, seekMs: ms });
     void (async () => {
       try {
         await this.player.unlock();
         if (request.signal.aborted) return;
         const map = await this.loadMap();
-        const startMs = timeAtBeat(map, at);
+        const startMs = ms ?? timeAtBeat(map, at);
         if (startMs >= map.extentMs) {
           if (!request.signal.aborted) {
             this.cancel();
-            this.set({ timeBeats: at, timeMs: startMs });
+            this.navigation.update({ timeBeats: at, timeMs: startMs });
           }
           return;
         }
         const frames = this.frameBuffer?.prepare(map, startMs, request.signal);
         if (frames) {
-          const timeMs = this.getTimeMs();
+          const timeMs = this.navigation.getTimeMs();
           const previous = this.request;
           this.request = request;
           this.seekRequest = null;
-          this.set({
-            playing: false, loading: true, paused: false,
-            timeMs, timeBeats: beatAtTime(map, timeMs), activeCarrierIds: [],
-          });
+          this.navigation.update({ timeMs, timeBeats: beatAtTime(map, timeMs), activeCarrierIds: [] });
+          this.set({ playing: false, loading: true, paused: false });
           previous?.abort();
           this.player.stop();
           await this.player.unlock();
@@ -416,7 +450,7 @@ export class ServerPlaybackController implements PlaybackController {
         if (audio) await this.playAudio(audio, request, startMs, !frames);
         else if (this.request === request) {
           this.request = null;
-          this.set({ loading: false, seekBeats: null });
+          this.set({ loading: false, seekBeats: null, seekMs: null });
         }
       } catch (error) {
         if (request.signal.aborted) return;
@@ -425,9 +459,30 @@ export class ServerPlaybackController implements PlaybackController {
           return;
         }
         if (this.seekRequest === request) this.seekRequest = null;
-        this.set({ seekBeats: null, error: errorMessage(error, 'Seek could not prepare.') });
+        this.set({ seekBeats: null, seekMs: null, error: errorMessage(error, 'Seek could not prepare.') });
       }
     })();
+  }
+
+  beginScrub(): void {
+    this.scrubResume = this.state.playing || (this.state.loading && this.request !== null);
+    this.navigation.update({ held: true });
+    this.pause();
+  }
+
+  scrubTo(ms: number): void {
+    const { map } = this.navigation.getState();
+    if (!map || !Number.isFinite(ms)) return;
+    const at = Math.max(0, Math.min(ms, map.extentMs));
+    this.navigation.update({ timeMs: at, timeBeats: beatAtTime(map, at), activeCarrierIds: [] });
+  }
+
+  endScrub(ms: number): void {
+    const resume = this.scrubResume;
+    this.scrubResume = false;
+    this.navigation.update({ held: false });
+    this.seekMs(ms);
+    if (resume) void this.play();
   }
 
   pause(): void {
@@ -441,10 +496,13 @@ export class ServerPlaybackController implements PlaybackController {
     }
     const intent = { running: false };
     this.transportIntent = intent;
-    this.set({ seekBeats: null });
+    this.set({ seekBeats: null, seekMs: null });
     const current = () => this.request === request && this.transportIntent === intent;
     void this.player.pause().then((position) => {
-      if (current()) this.set({ ...this.positionPatch(this.clock.hold() ?? position ?? this.state.timeMs), playing: false, paused: true });
+      if (current()) {
+        this.navigation.setTime(this.clock.hold() ?? position ?? this.navigation.getState().timeMs);
+        this.set({ playing: false, paused: true });
+      }
     }).catch((error) => {
       if (current()) this.fail(error);
     }).finally(() => {
@@ -454,7 +512,8 @@ export class ServerPlaybackController implements PlaybackController {
 
   stop(): void {
     this.cancel();
-    this.set({ timeBeats: 0, timeMs: 0, error: null });
+    this.navigation.update({ timeBeats: 0, timeMs: 0 });
+    this.set({ error: null });
   }
 
   private cancel(releasePreview = true): void {
@@ -466,22 +525,16 @@ export class ServerPlaybackController implements PlaybackController {
     this.transportIntent = null;
     this.player.stop();
     if (releasePreview) this.previews.release();
-    this.set({ playing: false, loading: false, paused: false, previewing: false, seekBeats: null, activeCarrierIds: [] });
+    this.navigation.update({ activeCarrierIds: [] });
+    this.set({ playing: false, loading: false, paused: false, previewing: false, seekBeats: null, seekMs: null });
   }
 
   private audioState(running: boolean): void {
     if (!this.request || this.request.signal.aborted || (running && (this.state.loading || this.transportIntent))) return;
     if (running ? !this.state.paused : !this.state.playing) return;
-    const timeMs = (running ? null : this.clock.hold()) ?? this.player.positionMs() ?? this.state.timeMs;
-    this.set({ ...this.positionPatch(timeMs), playing: running, paused: !running });
-  }
-
-  private positionPatch(timeMs: number): Pick<PlaybackState, 'timeMs' | 'timeBeats' | 'activeCarrierIds'> {
-    const { map, timeBeats, activeCarrierIds } = this.state;
-    if (!map) return { timeMs, timeBeats, activeCarrierIds };
-    const active = map.anchors.filter((anchor) => anchor.startMs <= timeMs && timeMs < anchor.endMs).map((anchor) => anchor.carrierId);
-    const same = active.length === activeCarrierIds.length && active.every((id, index) => id === activeCarrierIds[index]);
-    return { timeMs, timeBeats: beatAtTime(map, Math.min(timeMs, map.extentMs)), activeCarrierIds: same ? activeCarrierIds : active };
+    const timeMs = (running ? null : this.clock.hold()) ?? this.player.positionMs() ?? this.navigation.getState().timeMs;
+    this.navigation.setTime(timeMs);
+    this.set({ playing: running, paused: !running });
   }
 
   private fail(error: unknown, retry?: () => void): void {
@@ -497,10 +550,6 @@ export class ServerPlaybackController implements PlaybackController {
     }
   }
 
-  setTotalBeats(total: number): void {
-    if (Number.isFinite(total) && total >= 0) this.set({ totalBeats: total, timeBeats: Math.min(total, this.state.timeBeats) });
-  }
-
   setFrameBuffer(buffer: PlaybackFrameBuffer): () => void {
     this.frameBuffer = buffer;
     return () => {
@@ -510,20 +559,6 @@ export class ServerPlaybackController implements PlaybackController {
 
   getState(): PlaybackState {
     return this.state;
-  }
-
-  getTimeMs(): number {
-    if (!this.state.playing && !(this.state.paused && this.transportIntent?.running)) {
-      this.clock.reset();
-      return this.state.timeMs;
-    }
-    // Starting again from a pause, the picture goes on from where it was held, not from the sound.
-    return this.clock.at(this.player.positionMs() ?? this.state.timeMs, this.state.paused ? this.state.timeMs : undefined);
-  }
-
-  getTimeBeats(): number {
-    const { map, timeBeats } = this.state;
-    return map ? beatAtTime(map, Math.min(this.getTimeMs(), map.extentMs)) : timeBeats;
   }
 
   getOutputDelayMs(): number {
@@ -563,42 +598,4 @@ export function usePlaybackValue<T>(select: (state: PlaybackState) => T): T {
     (cb) => playback.subscribe(() => cb()),
     () => select(playback.getState()),
   );
-}
-
-/** The time at a place of one segment, read between its moments. */
-export function timeInSegment(segment: PlaybackSegment, beats: number): number {
-  const points = segment.moments;
-  if (beats <= points[0].beats) return points[0].timeMs;
-  for (let i = 1; i < points.length; i++) {
-    const a = points[i - 1];
-    const b = points[i];
-    if (beats <= b.beats) return a.timeMs + ((beats - a.beats) / (b.beats - a.beats)) * (b.timeMs - a.timeMs);
-  }
-  return points.at(-1)!.timeMs;
-}
-
-/** The time the playback first reaches a place of the score (a repeated part is reached again
- *  later, its first pass counts). A place that is never played gives the time of the next one
- *  played. */
-export function timeAtBeat(map: PlaybackMap, beats: number): number {
-  for (const segment of map.segments) {
-    if (beats < segment.startBeats) return segment.startMs;
-    if (beats <= segment.endBeats) return timeInSegment(segment, beats);
-  }
-  return map.extentMs;
-}
-
-/** The place of the score the playback is at when the time is `ms`: in the segment, so a repeated
- *  part gives its own pass. */
-export function beatAtTime(map: PlaybackMap, ms: number): number {
-  const segment = map.segments.find((candidate) => ms < candidate.endMs) ?? map.segments.at(-1);
-  if (!segment) return 0;
-  const points = segment.moments;
-  if (ms <= points[0].timeMs) return points[0].beats;
-  for (let i = 1; i < points.length; i++) {
-    const a = points[i - 1];
-    const b = points[i];
-    if (ms <= b.timeMs) return a.beats + ((ms - a.timeMs) / (b.timeMs - a.timeMs)) * (b.beats - a.beats);
-  }
-  return points.at(-1)!.beats;
 }

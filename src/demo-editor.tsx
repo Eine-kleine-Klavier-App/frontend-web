@@ -6,7 +6,8 @@ import './styles/tokens.css';
 import './index.css';
 import { useEditor } from '@/app/store';
 import { fromView } from '@/core/model/fromView';
-import { playback, timeAtBeat, beatAtTime } from '@/core/playback/PlaybackController';
+import { playback } from '@/core/playback/PlaybackController';
+import { navigation, timeAtBeat, beatAtTime } from '@/core/navigation/ScoreNavigation';
 import type { PlaybackMap, PlaybackNote, PlaybackSegment } from '@/core/playback/PlaybackGateway';
 import EditorScreen from '@/features/editor/EditorScreen';
 
@@ -70,9 +71,12 @@ const controller = playback as never as { prepareMap: () => Promise<void>; set: 
 playback.bindDraft('demo');
 const t = Number(params.get('t') ?? 6 * MS_PER_BEAT * 4 + 120); // bar 7-ish, shortly after an onset
 const playing = params.get('playing') !== '0';
-const apply = (ms: number, on = playing) => controller.set({ map, ready: true, mapLoading: false, playing: on, timeMs: ms, timeBeats: beatAtTime(map, ms), totalBeats });
+const apply = (ms: number, on = playing) => {
+  navigation.update({ map, timeMs: ms, timeBeats: beatAtTime(map, ms), totalBeats });
+  controller.set({ ready: true, mapLoading: false, playing: on });
+};
 controller.prepareMap = async () => {
-  if (!playback.getState().map) apply(t);
+  if (!navigation.getState().map) apply(t);
 };
 apply(t);
 if (params.get('clock') === '1') {
@@ -82,15 +86,15 @@ if (params.get('clock') === '1') {
   let last = performance.now();
   standIn.play = async () => { running = true; controller.set({ playing: true, paused: false }); };
   standIn.pause = () => { running = false; controller.set({ playing: false, paused: true }); };
-  standIn.stop = () => { running = false; ms = 0; controller.set({ playing: false, paused: false, timeMs: 0, timeBeats: 0 }); };
-  standIn.seek = ((beats: number) => { ms = timeAtBeat(map, beats); controller.set({ timeMs: ms, timeBeats: beats }); }) as never;
+  standIn.stop = () => { running = false; ms = 0; navigation.update({ timeMs: 0, timeBeats: 0 }); controller.set({ playing: false, paused: false }); };
+  standIn.seek = ((beats: number) => { ms = timeAtBeat(map, beats); navigation.update({ timeMs: ms, timeBeats: beats }); }) as never;
   const tick = (now: number) => {
     requestAnimationFrame(tick);
     const step = now - last;
     last = now;
     if (!running) return;
     ms = ms >= map.extentMs ? 0 : Math.min(map.extentMs, ms + step);
-    controller.set({ timeMs: ms, timeBeats: beatAtTime(map, ms) });
+    navigation.update({ timeMs: ms, timeBeats: beatAtTime(map, ms) });
   };
   requestAnimationFrame(tick);
 }
