@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { useEditor } from '@/app/store';
-import { ContextIndex, keyOfAlterations } from '@/core/model/contexts';
+import { ContextIndex, keyOfAlterations, markGroup } from '@/core/model/contexts';
 import { ARTICULATION_LABEL } from '@/core/model/articulation';
 import { ORNAMENT_SIGNS } from '@/core/model/ornament';
 import { describeSelection } from '@/core/model/query';
@@ -51,10 +51,10 @@ function contextRows(doc: ScoreDocument, context: ScoreContext): [string, ReactN
   switch (context.kind) {
     case 'clef': return [['Clef', capital(context.clef)], ['Staff', staffName(doc.staffOrder, context.staffId)], ['Octave', context.octaveTransposition === 0 ? 'As written' : String(context.octaveTransposition)], from];
     case 'keySignature': return [['Key', keyOfAlterations(context.alterations).name], ['Staff', staffName(doc.staffOrder, context.staffId)], from];
-    case 'dynamic': return [['Dynamic', context.dynamic], ['Voices', voiceNames(doc, context.voiceIds)], from];
+    case 'dynamic': return [['Dynamic', context.dynamic], ['Voices', voiceNames(doc, markGroup(doc, context).map((mark) => mark.voiceId))], from];
     case 'tempo': return [['Beats per minute', context.bpm ?? 'None'], ['Word', context.label ? capital(context.label) : 'None'], from];
-    case 'hairpin': return [['Kind', context.type === 'crescendo' ? 'Crescendo' : 'Diminuendo'], ['Voices', voiceNames(doc, context.voiceIds)], ['Covers', barsOf(doc, context.measureId, context.endMeasureId, context.endPosition)]];
-    case 'slur': return [['Voices', voiceNames(doc, context.voiceIds)], ['Covers', barsOf(doc, context.measureId, context.endMeasureId, context.endPosition)]];
+    case 'hairpin': return [['Kind', context.type === 'crescendo' ? 'Crescendo' : 'Diminuendo'], ['Voices', voiceNames(doc, markGroup(doc, context).map((mark) => mark.voiceId))], ['Covers', barsOf(doc, context.measureId, context.endMeasureId, context.endPosition)]];
+    case 'slur': return [['Voices', voiceNames(doc, [context.voiceId])], ['Covers', barsOf(doc, context.measureId, context.endMeasureId, context.endPosition)]];
     case 'octave': return [['Line', ({ '1': '8va', '2': '15ma', '-1': '8vb', '-2': '15mb' } as Record<string, string>)[String(context.octaves)] ?? `${context.octaves} octaves`], ['Staff', staffName(doc.staffOrder, context.staffId)], ['Covers', barsOf(doc, context.measureId, context.endMeasureId, context.endPosition)]];
     case 'tempoTransition': return [['Kind', context.ratio && context.ratio.numerator < context.ratio.denominator ? 'Ritardando' : 'Accelerando'], ['Covers', barsOf(doc, context.measureId, context.endMeasureId, context.endPosition)]];
     case 'sustain': return [['Covers', barsOf(doc, context.measureId, context.endMeasureId, context.endPosition)]];

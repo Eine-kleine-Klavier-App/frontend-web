@@ -21,7 +21,7 @@ import { BoundaryHandles } from './BoundaryHandles';
 import { HandleMark } from './HandleMark';
 import { automaticArch, dragSlur, fitted, framed, handlePoints, slurChanges, slurOffsets, SLUR_HANDLES, SLUR_HANDLE_ROLES, type Point, type SlurHandle, type SlurOffsets } from '@/core/model/slurHandles';
 import { beamDragResult, staffInsertionX, staffOnsetX, staffInsertionBeat, type ScoreLayout, type SystemLayout, type ModifierBox, type GraceSlot, type NoteBox, type StaffZone, type StemHandle, type BeamShape, type SlurShape, type SpanPreview } from '@/rendering/ScoreRenderer';
-import { ContextIndex, defaultClef, endOfSpan, toBeats, fromBeats, measureBeats as lengthOfMeasure } from '@/core/model/contexts';
+import { ContextIndex, defaultClef, endOfSpan, markGroup, toBeats, fromBeats, measureBeats as lengthOfMeasure } from '@/core/model/contexts';
 import { InsertRange } from './InsertRange';
 import { draggedSpanRange, insertRange } from '@/core/model/insertRange';
 import { isSpanMark, markClicks, parseMark, pointCommand, spanCommand, type MarkPoint } from '@/core/model/markTools';
@@ -905,7 +905,7 @@ export function Overlay({
   const frozenSlurHeight = (context: ScoreContext, edge: ContextEdge, target: { measureId: string; beats: number }, arch = slurArchOf(context.id)): PresentationChange[] => {
     const shape = layout.slurShapes.find((slur) => slur.id === context.id);
     if (!shape || context.kind !== 'slur' || arch === undefined) return [];
-    const voiceId = context.voiceIds[0];
+    const voiceId = context.voiceId;
     const first = edge === 'start' ? target : { measureId: context.measureId, beats: toBeats(context.position) };
     const endPlace = endOfSpan(doc, context);
     const last = edge === 'end' ? target : { measureId: endPlace.measureId, beats: toBeats(endPlace.position) };
@@ -952,7 +952,7 @@ export function Overlay({
         return;
       }
       contextCommittingRef.current = true;
-      void dispatch({ type: 'openContextEnd', contextId: drag.context.id, mode: pitchMode })
+      void dispatch({ type: 'openContextEnd', contextIds: markGroup(doc, drag.context).map((mark) => mark.id), mode: pitchMode })
         .finally(() => {
           onSpanPreview(null);
           contextCommittingRef.current = false;
@@ -996,7 +996,7 @@ export function Overlay({
       return;
     }
     contextCommittingRef.current = true;
-    void dispatch({ type: drag.edge === 'end' ? 'moveContextEnd' : 'moveContextStart', contextId: drag.context.id,
+    void dispatch({ type: drag.edge === 'end' ? 'moveContextEnd' : 'moveContextStart', contextIds: markGroup(doc, drag.context).map((mark) => mark.id),
       measureId: target.measureId, position: fromBeats(target.beats), mode: pitchMode, presentation: frozenSlurHeight(drag.context, drag.edge, target, drag.slurArch) }).then(() => {
         if (!useEditor.getState().error && drag.range && !('endMeasureId' in drag.context))
           useEditor.getState().setContextFactor(drag.context.id, contextFactor(drag));
@@ -1027,7 +1027,7 @@ export function Overlay({
       mi++;
     }
     if (beats < 0 || beats > lengthOfMeasure(doc.measures[mi].timeSignature)) return;
-    void dispatch({ type: edge === 'end' ? 'moveContextEnd' : 'moveContextStart', contextId: context.id,
+    void dispatch({ type: edge === 'end' ? 'moveContextEnd' : 'moveContextStart', contextIds: markGroup(doc, context).map((mark) => mark.id),
       measureId: doc.measures[mi].id, position: fromBeats(beats), mode: pitchMode,
       presentation: frozenSlurHeight(context, edge, { measureId: doc.measures[mi].id, beats }) });
   };

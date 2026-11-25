@@ -7,7 +7,7 @@
 import { inkBox, type CollisionLayout, type Placement } from './collisionLayout';
 import { Flow, Glyph, KeySignature, Stave, TextDynamics, Voice, Formatter, type RenderContext } from 'vexflow';
 import type { ContextIndex } from '@/core/model/contexts';
-import { toBeats, keyOfAlterations } from '@/core/model/contexts';
+import { toBeats, keyOfAlterations, markKey } from '@/core/model/contexts';
 import type { DurationValue, Fraction, RefrainContext, ScoreContext, ScoreDocument, KeyAlteration, ClefName, VoltaContext } from '@/core/model/score';
 import { staffOnsetX, type ContextShape, type SlurShape, type SpanPreview, type StaffZone } from '@/rendering/ScoreRenderer';
 import { derivedEnding, passesLabel, refrainLabel, voltaParts, type Place } from '@/core/model/repeats';
@@ -237,7 +237,7 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
     measureId,
     staffId: c.kind === 'sustain' ? staffOrder[staffOrder.length - 1]
       : 'staffId' in c ? c.staffId
-      : 'voiceIds' in c && c.voiceIds[0] ? index.staffOfVoice(c.voiceIds[0], measureId, toBeats(c.position)) : staffOrder[0],
+      : 'voiceId' in c ? index.staffOfVoice(c.voiceId, measureId, toBeats(c.position)) : staffOrder[0],
     kind: c.kind === 'slur' ? 'attached' : 'context',
   });
   const sideOf = (c: ScoreContext): -1 | 1 => c.kind === 'tempo' || c.kind === 'tempoTransition' || c.kind === 'octave' && c.octaves > 0 ? -1 : 1;
@@ -394,22 +394,21 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
   }
 
 
-  const expanded = doc.contexts.flatMap((c): ScoreContext[] => {
-    if (!('voiceIds' in c)) return [c];
-    const seen = new Set<string>();
-    // a dynamic or hairpin shared by voices of both staffs is drawn once, under the topmost staff
-    const drawnOnce = c.kind === 'dynamic' || c.kind === 'hairpin';
-    const staffRank = (voiceId: string): number =>
-      staffOrder.indexOf(index.staffOfVoice(voiceId, c.measureId, toBeats(c.position)));
-    const voiceIds = drawnOnce ? [...c.voiceIds].sort((a, b) => staffRank(a) - staffRank(b)) : c.voiceIds;
-    return voiceIds.flatMap((voiceId) => {
-      if (c.kind !== 'dynamic' && !index.voiceSounds(voiceId)) return [];
-      const staff = index.staffOfVoice(voiceId, c.measureId, toBeats(c.position));
-      const key = c.kind === 'slur' ? voiceId : drawnOnce ? c.id : staff;
-      if (seen.has(key)) return [];
-      seen.add(key);
-      return [{ ...c, voiceIds: [voiceId] }];
-    });
+  // a dynamic or a hairpin for several voices is a context for each voice: those of one place and
+  // value are one mark, drawn once from the voice of the topmost staff
+  const rankOf = (c: ScoreContext & { voiceId: string }): number =>
+    staffOrder.indexOf(index.staffOfVoice(c.voiceId, c.measureId, toBeats(c.position)));
+  const drawn = new Map<string, ScoreContext & { voiceId: string }>();
+  for (const c of doc.contexts) {
+    const key = markKey(c);
+    if (key === null || !('voiceId' in c) || (c.kind === 'hairpin' && !index.voiceSounds(c.voiceId))) continue;
+    const best = drawn.get(key);
+    if (!best || rankOf(c) < rankOf(best)) drawn.set(key, c);
+  }
+  const expanded = doc.contexts.filter((c) => {
+    const key = markKey(c);
+    if (key !== null) return drawn.get(key) === c;
+    return !('voiceId' in c) || index.voiceSounds(c.voiceId);
   });
   // a pedal stands under everything else in its system, so it is drawn after every other mark
   const priority = (c: ScoreContext) => c.kind === 'clef' || c.kind === 'keySignature' ? 0 : c.kind === 'slur' ? 1 : c.kind === 'sustain' ? 3 : 2;
@@ -426,8 +425,7 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
     activeContext = c;
     switch (c.kind) {
       case 'dynamic': {
-        const voiceId = c.voiceIds[0];
-        if (!voiceId) break;
+        const voiceId = c.voiceId;
         const at = startOf(c);
         const staffId = index.staffOfVoice(voiceId, at.measureId, at.beats);
         const x = xAt(at.measureId, at.beats);
@@ -456,10 +454,10 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
         break;
       }
       case 'hairpin': {
-        const voiceId = c.voiceIds[0];
+        const voiceId = c.voiceId;
         const start = startOf(c);
         const end = endOf(c);
-        const staffId = voiceId ? index.staffOfVoice(voiceId, start.measureId, start.beats) : staffOrder[0];
+        const staffId = index.staffOfVoice(voiceId, start.measureId, start.beats);
         group(
           c.id,
           (g) => {
@@ -485,13 +483,12 @@ export function drawContextMarks(env: MarkEnv): { shapes: ContextShape[]; nodes:
             }
           },
           voiceId,
-          voiceId ? rowUnder(start.measureId, staffId)?.range : undefined,
+          rowUnder(start.measureId, staffId)?.range,
         );
         break;
       }
       case 'slur': {
-        const voiceId = c.voiceIds[0];
-        if (!voiceId) break;
+        const voiceId = c.voiceId;
         const start = startOf(c);
         const end = endOf(c);
         const items = itemsOfVoice(voiceId, start, end);
