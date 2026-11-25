@@ -6,8 +6,19 @@ import { createScratchHost } from './scratchHost';
 /** the gap between two staff lines, in score units — VexFlow's own stave spacing; every engraving
  *  distance in the score, the overlay and the context marks is a multiple of it */
 export const STAFF_SPACE = 10;
+/** a repeat sign: the thick bar is centred on its barline, the thin bar and the dots stand on the side the music is on */
+export const REPEAT_BAR_HALF = 0.25 * STAFF_SPACE;
+export const REPEAT_THIN_OFFSET = 0.8 * STAFF_SPACE;
+export const REPEAT_DOT_OFFSET = 1.4 * STAFF_SPACE;
+export const REPEAT_DOT_RADIUS = 0.22 * STAFF_SPACE;
+/** how far the sign's ink reaches from its barline, on the side of the dots */
+export const REPEAT_SIGN_REACH = REPEAT_DOT_OFFSET + REPEAT_DOT_RADIUS;
+/** the clear space kept between a repeat sign's ink and whatever stands beside it: a clef, a signature, a note, a hairpin's point */
+export const REPEAT_SIGN_GAP = STAFF_SPACE;
 /** the room a start-of-repeat sign takes at the start of a system, between the time signature and the first note */
-export const REPEAT_SIGN_ROOM = 3.4 * STAFF_SPACE;
+export const REPEAT_SIGN_ROOM = REPEAT_SIGN_GAP + REPEAT_BAR_HALF + REPEAT_SIGN_REACH + REPEAT_SIGN_GAP;
+/** where the thick bar of that sign stands, before the first note */
+export const REPEAT_SIGN_BEFORE_NOTES = REPEAT_SIGN_ROOM - REPEAT_SIGN_GAP - REPEAT_BAR_HALF;
 
 // VexFlow silently adds a fixed offset to a note's rendered x beyond what
 // `staff.getNoteStartX() + <formatter x>` predicts (constant ~12px, independent of

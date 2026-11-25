@@ -5,7 +5,7 @@ import type { Fraction, ScoreContext, ScoreDocument } from '@/core/model/score';
 import type { ScoreLayout } from '@/rendering/ScoreRenderer';
 import { measureBeats } from '@/core/model/contexts';
 import type { RangeSpan } from '@/core/model/insertRange';
-import { REPEAT_SIGN_ROOM, STAFF_SPACE } from '@/rendering/vexflow/engravingScale';
+import { REPEAT_SIGN_BEFORE_NOTES } from '@/rendering/vexflow/engravingScale';
 import { HandleMark } from './HandleMark';
 import { InsertRange } from './InsertRange';
 
@@ -92,7 +92,7 @@ export function BoundaryHandles({ layout, toSvg, enabled }: {
       const zones = layout.staffZones.filter((zone) => zone.measureId === doc.measures[index]?.id);
       const first = zones.find((zone) => zone.staffId === doc.staffOrder[0]);
       const last = zones.find((zone) => zone.staffId === doc.staffOrder[doc.staffOrder.length - 1]);
-      return first && last ? { left: first.left, signX: first.x0 - REPEAT_SIGN_ROOM + 0.9 * STAFF_SPACE, right: first.x1, top: first.bottomLineY - 8 * first.stepPx, bottom: last.bottomLineY, step: first.stepPx } : null;
+      return first && last ? { left: first.left, signX: first.x0 - REPEAT_SIGN_BEFORE_NOTES, right: first.x1, top: first.bottomLineY - 8 * first.stepPx, bottom: last.bottomLineY, step: first.stepPx } : null;
     };
     const before = barline > 0 ? rect(barline - 1) : null;
     const own = barline < doc.measures.length ? rect(barline) : null;

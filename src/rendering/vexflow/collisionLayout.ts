@@ -92,6 +92,15 @@ export class CollisionLayout {
    *  keeps the place it has at rest). */
   placeOutside(element: SVGGraphicsElement, placement: Placement, side: -1 | 1, span?: { x0: number; x1: number }, allowBridgeOverlap = false): void {
     const { dx, dy } = this.outsideOffset(span ? { ...inkBox(element), x: span.x0, width: span.x1 - span.x0 } : inkBox(element), placement.staffId, side, allowBridgeOverlap, placement.timed);
+    this.settle(element, placement, dx, dy, span);
+  }
+  /** Marks that are parts of one figure (the endings of a volta) stand at one height: the farthest out any of them needs. */
+  placeOutsideLevel(marks: { element: SVGGraphicsElement; placement: Placement }[], side: -1 | 1): void {
+    const offsets = marks.map(({ element, placement }) => this.outsideOffset(inkBox(element), placement.staffId, side, false, placement.timed));
+    const dy = side < 0 ? Math.min(...offsets.map((o) => o.dy)) : Math.max(...offsets.map((o) => o.dy));
+    marks.forEach(({ element, placement }, i) => this.settle(element, placement, offsets[i].dx, dy));
+  }
+  private settle(element: SVGGraphicsElement, placement: Placement, dx: number, dy: number, span?: { x0: number; x1: number }): void {
     if (dx || dy) {
       const wrapper = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       wrapper.setAttribute('transform', `translate(${dx} ${dy})`);

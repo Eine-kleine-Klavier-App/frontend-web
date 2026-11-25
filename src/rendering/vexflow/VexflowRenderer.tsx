@@ -53,16 +53,16 @@ import { staffStepToKey } from '@/core/model/pitch';
 import { ContextIndex, letterOfStep, measureBeats as lengthOfMeasure } from '@/core/model/contexts';
 import { drawContextMarks, createKeySignature } from '@/rendering/vexflow/contextMarks';
 import { repeatBarlines } from '@/core/model/repeats';
-import { shrinkWholeNotehead, getNotePaddingPx, fixLedgerLineWidth, REPEAT_SIGN_ROOM, STAFF_SPACE } from '@/rendering/vexflow/engravingScale';
+import { drawBarline } from '@/rendering/vexflow/barlines';
+import { shrinkWholeNotehead, getNotePaddingPx, fixLedgerLineWidth, REPEAT_BAR_HALF, REPEAT_SIGN_GAP, REPEAT_SIGN_REACH, REPEAT_SIGN_ROOM, STAFF_SPACE } from '@/rendering/vexflow/engravingScale';
 
 /** the most times a score is laid out again after a measurement asked for more room */
 const MAX_LAYOUT_PASSES = 40;
-/** a score of more systems than this draws the ones near the screen first; a smaller one is drawn whole */
-const ZONE_MIN_SYSTEMS = 12;
-/** the systems drawn before the screen is known */
-const DEFAULT_ZONE = 6;
-/** the zone reaches this many screen heights above and below the screen */
-const ZONE_MARGIN = 0.75;
+/** a score of more chunks than this draws the ones near the screen first; a smaller one is drawn whole. A chunk is a sheet (a score
+ *  that is not cut into sheets: a system). */
+const ZONE_MIN_CHUNKS = 2;
+/** the chunks drawn before the screen is known */
+const DEFAULT_ZONE_CHUNKS = 1;
 /** the room above a system's upper staff that still belongs to the system */
 const SYSTEM_ROOM = 40;
 /** the screen stands still this long (ms without a scroll) before the systems it is missing are drawn: a drawing inside a scroll drops frames */
@@ -99,16 +99,28 @@ function screenOf(scroller: Element | null): { top: number; bottom: number } {
   return scroller ? scroller.getBoundingClientRect() : { top: 0, bottom: window.innerHeight };
 }
 
-/** the systems near the screen: those whose band meets the screen widened by the margin */
+/** the systems the screen asks to have drawn: the chunk (a sheet) at the middle of the screen; once that one is drawn whole, the chunks
+ *  above and below it too, and no more */
 function systemsNearScreen(drawing: BaseDrawing, scroller: Element | null): Set<number> {
   const view = screenOf(scroller);
-  const margin = (view.bottom - view.top) * ZONE_MARGIN;
+  const middle = (view.top + view.bottom) / 2;
   const bottomOfDrawing = drawing.svg.getBoundingClientRect().bottom;
-  const near = new Set<number>();
+  let current = 0;
+  let nearestGap = Infinity;
   for (let si = 0; si < drawing.tops.length; si++) {
     const bottom = si + 1 < drawing.tops.length ? systemTop(drawing, si + 1) : bottomOfDrawing;
-    if (bottom >= view.top - margin && systemTop(drawing, si) <= view.bottom + margin) near.add(si);
+    const gap = Math.max(systemTop(drawing, si) - middle, middle - bottom, 0);
+    if (gap < nearestGap) {
+      nearestGap = gap;
+      current = drawing.sheetOf[si];
+    }
   }
+  const currentDrawn = drawing.sheetOf.every((chunk, si) => chunk !== current || drawing.state[si] === 'drawn');
+  const chunks = new Set<number>(currentDrawn ? [current - 1, current, current + 1] : [current]);
+  const near = new Set<number>();
+  drawing.sheetOf.forEach((chunk, si) => {
+    if (chunks.has(chunk)) near.add(si);
+  });
   return near;
 }
 
@@ -133,26 +145,20 @@ function noteBeats(n: { duration: DurationValue; dots: number }): number {
   return b;
 }
 
-/** The actually visible horizontal gap between a stave's begin and end modifiers. The begin
- * side may be just a barline or a whole system header (clef/key/time); the algorithm is identical
- * because it reads the rendered SVG bounds rather than reconstructing VexFlow's spacing. */
+/** The actually visible horizontal gap of a stave: from the end of its system header (clef, key, time signature), or from its own start
+ * where it has none, to its end. The header is measured off the rendered SVG bounds rather than reconstructing VexFlow's spacing. */
 function clearSpanBetweenModifiers(stave: Stave): { left: number; right: number } {
-  const boundsAt = (position: StaveModifierPosition): DOMRect[] =>
-    stave
-      .getModifiers(position)
-      .map((modifier) => modifier.getSVGElement() as SVGGraphicsElement | undefined)
-      .filter((element): element is SVGGraphicsElement => !!element && typeof element.getBBox === 'function')
-      .map((element) => element.getBBox())
-      .filter((bounds) => bounds.width > 0);
+  const headerEnds: number[] = stave
+    .getModifiers(StaveModifierPosition.BEGIN)
+    .map((modifier) => modifier.getSVGElement() as SVGGraphicsElement | undefined)
+    .filter((element): element is SVGGraphicsElement => !!element && typeof element.getBBox === 'function')
+    .map((element) => element.getBBox())
+    .filter((bounds) => bounds.width > 0)
+    .map((bounds) => bounds.x + bounds.width);
+  const left: number = Math.max(stave.getX(), ...headerEnds);
+  const right: number = stave.getX() + stave.getWidth();
 
-  const beginBounds = boundsAt(StaveModifierPosition.BEGIN);
-  const endBounds = boundsAt(StaveModifierPosition.END);
-  const left = Math.max(...beginBounds.map((bounds) => bounds.x + bounds.width));
-  const right = Math.min(...endBounds.map((bounds) => bounds.x));
-
-  if (!Number.isFinite(left) || !Number.isFinite(right) || left >= right) {
-    throw new Error('Stave has no visible horizontal span between its begin and end modifiers');
-  }
+  if (left >= right) throw new Error('Stave has no visible horizontal span between its header and its end');
   return { left, right };
 }
 
@@ -292,13 +298,20 @@ const ARTICULATION_CODE: Record<Exclude<ArticulationMark, 'arpeggio_up' | 'arpeg
 // `spacing_between_lines_px`, 10 score units at the default size). They live in the score's own
 // coordinates, which zoom scales as a whole; expressing them in staff spaces keeps the engraving's
 // proportions explicit instead of hiding them in pixel numbers.
+/** The room between the edge of a sheet and the engraving, on every side, as a share of the sheet's width (never a size in pixels).
+ *  EditorView inverts the sheet's width with it. */
+export const SHEET_MARGIN_RATIO = 0.05;
+/** A score that is not cut into sheets (the practice strip) keeps this room beside and above its systems. */
 const MARGIN_L = 2.4 * STAFF_SPACE;
-/** both side margins of a system, in score units — EditorView inverts the page width with it */
-export const SCORE_MARGIN_X = 2 * MARGIN_L;
 const MARGIN_T = 4 * STAFF_SPACE;
 const STAFF_H = 4 * STAFF_SPACE; // staff height (5 lines); stepPx = STAFF_H / 8 (half a line gap per staff_step)
 const STAFF_CLEARANCE = 3.4 * STAFF_SPACE; // min gap between a treble's bottom and a bass's top, beyond ledgers
+/** The gap between two sheets, as a share of a sheet's width: sheets keep their pixel positions whatever the zoom. */
+const PAGE_GAP_RATIO = 0.03;
+const TITLE_ROOM = 7.2 * STAFF_SPACE;
 const SYSTEM_GAP = 7.6 * STAFF_SPACE; // min gap between systems, beyond ledger extents (roomy — leaves headroom for measure numbers)
+/** The most a gap between two systems of a sheet grows when the room left under the sheet's last system is shared between them. */
+const MAX_GAP_GROWTH = SYSTEM_GAP;
 const PAGE_CONTENT_W = 70 * STAFF_SPACE; // A4-ish usable width — the per-system justification target;
 // fallback only for when `pageContentWidth` isn't measured yet (Props.pageContentWidth overrides
 // this per render — reflow-zoom, see EditorView.tsx)
@@ -470,6 +483,8 @@ interface BaseDrawing {
   /** where each system's upper staff stands, and how far each group is moved down now */
   tops: number[];
   applied: number[];
+  /** the chunk each system is drawn with when the screen asks for it: its sheet (its own index when the score is not cut into sheets) */
+  sheetOf: number[];
   layouts: SystemLayout[];
   /** the drawn mark of each context shape */
   nodes: Map<ContextShape, Element>;
@@ -567,8 +582,10 @@ interface HeaderSpec {
   keyClefs?: [ClefName, ClefName];
   cancelKeys: [KeyAlteration[], KeyAlteration[]] | null;
   timeSignature: string | null;
-  /** the measure begins a repeat: room for its sign is kept before the first note (contextMarks draws the sign) */
+  /** the measure begins a repeat: room for its sign is kept (contextMarks draws the sign) */
   repeatSign?: boolean;
+  /** the measure before it ends a repeat, so a `:|` stands on this measure's left barline */
+  afterRepeatEnd?: boolean;
 }
 
 interface Props {
@@ -588,6 +605,11 @@ interface Props {
    *  taller document), never page width — the sheet never needs horizontal scroll. Undefined
    *  (before the first measurement) falls back to the fixed `PAGE_CONTENT_W` constant. */
   pageContentWidth?: number;
+  /** The height of a sheet as a share of its width (A4: 297 / 210). With it the systems are cut into sheets of that proportion, none of them across two;
+   *  without it the score is one continuous drawing. */
+  pageRatio?: number;
+  /** The whole score on one system, however long: no system breaks and no stretching to a width (a strip that moves under a fixed line). */
+  continuous?: boolean;
   onLayout: (layout: ScoreLayout) => void;
   /** custom voice-color overrides (keyed by voice id) — see core/model/voiceColors. */
   voiceColors: Record<string, string>;
@@ -620,6 +642,8 @@ export function VexflowRenderer({
   selectedIds,
   carrierSelectedIds,
   pageContentWidth,
+  pageRatio,
+  continuous = false,
   onLayout,
   voiceColors: currentVoiceColors,
   stemOverrides,
@@ -727,11 +751,13 @@ export function VexflowRenderer({
     let baseDrawing: BaseDrawing | null = null;
     let partial: Set<number> | null = null;
     const stale = new Set<number>();
+    // the drawn systems that are let go in this pass: they come back as empty bands (see below)
+    let evicted: ReadonlySet<number> = new Set();
     if (previewing) {
       baseDrawing = previewBase;
       partial = previewSystems;
     } else if (previewBase && changedVoices.size === 0) {
-      // the screen asks for the systems it is missing one at a time, the nearest to the middle of it first, so that no task draws more than one
+      // the screen asks for the sheets it is missing one at a time, the nearest to the middle of it first, so that no task draws more than one
       const screen = screenOf(scrollerOf(host));
       const middle = (screen.top + screen.bottom) / 2;
       let nearest: number | undefined;
@@ -746,9 +772,19 @@ export function VexflowRenderer({
           nearestGap = gap;
         }
       }
-      if (nearest === undefined) return;
-      baseDrawing = previewBase;
-      partial = new Set([nearest]);
+      if (nearest === undefined) {
+        // everything the screen asks for is drawn: the drawn sheets far from it are let go, and come back empty (drawn again when the screen returns)
+        const far = new Set<number>();
+        if (zone) previewBase.state.forEach((state, si) => { if (state === 'drawn' && !zone.has(si)) far.add(si); });
+        if (!far.size) return;
+        evicted = far;
+        baseDrawing = previewBase;
+        partial = new Set();
+      } else {
+        baseDrawing = previewBase;
+        // the chunk of the nearest system is drawn whole: every system of its sheet that is not drawn yet
+        partial = new Set(previewBase.sheetOf.flatMap((chunk, si) => (chunk === previewBase.sheetOf[nearest!] && previewBase.state[si] !== 'drawn' ? [si] : [])));
+      }
     } else if (earlier && earlier.width === effectivePageContentWidth && earlier.structure === structure && earlier.drawing.svg === host.querySelector('svg')) {
       const changedSystems = new Set(doc.measures.filter((m) => earlier.signatures.get(m.id) !== signatures.get(m.id)).map((m) => earlier.drawing.systemOf.get(m.id)));
       if (!changedSystems.has(undefined)) {
@@ -775,11 +811,12 @@ export function VexflowRenderer({
         partial = wanted;
       }
     }
-    /** the systems of a drawing from scratch: those near the screen, or the first ones before it is known */
-    const zoneFor = (count: number): ReadonlySet<number> => {
+    /** the systems of a drawing from scratch: those near the screen, or those of the first chunks before it is known.
+     *  `chunkOf`: the chunk (sheet) of each system in this layout */
+    const zoneFor = (chunkOf: readonly number[]): ReadonlySet<number> => {
       const wanted = new Set<number>();
-      for (const si of zone ?? []) if (si < count) wanted.add(si);
-      if (wanted.size === 0) for (let si = 0; si < Math.min(count, DEFAULT_ZONE); si++) wanted.add(si);
+      for (const si of zone ?? []) if (si < chunkOf.length) wanted.add(si);
+      if (wanted.size === 0) chunkOf.forEach((chunk, si) => { if (chunk < DEFAULT_ZONE_CHUNKS) wanted.add(si); });
       return wanted;
     };
     const seed = known ?? (!previewing && earlier && earlier.width === effectivePageContentWidth && earlier.structure === structure ? earlier : null);
@@ -787,10 +824,11 @@ export function VexflowRenderer({
     const stored: LayoutSeed | null = !seed && !previewing ? readSeed(seedKey(structure, effectivePageContentWidth)) : null;
     const horizontal = new Map<string, number>((seed ?? stored)?.horizontal);
     const reaches = new Map<string, number>((seed ?? stored)?.reaches);
-    // a refrain or a volta that starts or ends on a measure line is that barline, drawn by the staves themselves: its sign sits on the line
-    // (at a system start, before the clef), never beside it. One that starts or ends inside a measure is drawn by contextMarks.
+    // a refrain or a volta that starts or ends on a measure line is that barline: its sign sits on the line (at a system start, before
+    // the clef), never beside it, and no plain barline is drawn there. The sign is drawn with the repeat (contextMarks), by `drawBarline`.
     const barlines = repeatBarlines(doc);
     const repeatBeginMeasures = new Set(barlines.beginMeasureIds);
+    const afterRepeatEnd = new Set(doc.measures.filter((_, i) => i > 0 && barlines.endMeasureIds.has(doc.measures[i - 1].id)).map((m) => m.id));
     // the last measure ends the piece with the final barline, unless a repeat ends there (contextMarks draws its sign)
     const endsPiece = (b: Built): boolean => b.measure.id === doc.measures[doc.measures.length - 1]?.id && !barlines.endMeasureIds.has(b.measure.id);
     const inlineWidths = new Map<string, number>((seed ?? stored)?.inlineWidths);
@@ -811,6 +849,8 @@ export function VexflowRenderer({
       let only = requested;
       if (!base) host.innerHTML = '';
       const collisions = new CollisionLayout(STAFF_SPACE * 0.6);
+      // the carriers whose beam spans the staves: what hangs on such a beam stands in the gap between them
+      const bridgedCarriers = new Set<string>();
       let changed = false;
       const emptyRests: { element: SVGGraphicsElement; staffId: string; measureId: string; left: number; right: number; cx: number; cy: number; ids: string[] }[] = [];
 
@@ -846,7 +886,7 @@ export function VexflowRenderer({
           if (spec.timeSignature) probe.addTimeSignature(spec.timeSignature);
         });
         Stave.formatBegModifiers(probes);
-        const noteStartX = Math.max(probes[0].getNoteStartX(), probes[1].getNoteStartX()) + (spec.repeatSign ? REPEAT_SIGN_ROOM : 0);
+        const noteStartX = Math.max(probes[0].getNoteStartX(), probes[1].getNoteStartX());
         noteStartByHeader.set(key, noteStartX);
         return noteStartX;
       };
@@ -868,10 +908,21 @@ export function VexflowRenderer({
         cancelKeys: !isFirst && b.keyChanged ? b.prevKeys : null,
         timeSignature: b.showsTimeSignature ? timeSignatureOf(b.measure) : null,
         repeatSign: repeatBeginMeasures.has(b.measure.id),
+        afterRepeatEnd: afterRepeatEnd.has(b.measure.id),
       });
-      const headerW = (b: Built, isFirst: boolean): number =>
-        probeNoteStartX(headerSpecOf(b, isFirst)) -
-        (isFirst ? 0 : probeNoteStartX({ clefs: null, small: false, keys: null, cancelKeys: null, timeSignature: null }));
+      const plainHeader: HeaderSpec = { clefs: null, small: false, keys: null, cancelKeys: null, timeSignature: null };
+      // the room a repeat sign takes next to the header. At a system start the sign stands after the header, before the first note. Inside a
+      // system it stands on the measure's barline, and whatever follows it (the clef, key or time signature, or the first note) is moved
+      // right to keep a gap clear of its ink; after a `:|` that is the thick bar's edge
+      const repeatRoomOf = (spec: HeaderSpec, isFirst: boolean): number => {
+        if (isFirst) return spec.repeatSign ? REPEAT_SIGN_ROOM : 0;
+        const reach = spec.repeatSign ? REPEAT_SIGN_REACH : spec.afterRepeatEnd ? REPEAT_BAR_HALF : 0;
+        return reach > 0 ? Math.max(0, reach + REPEAT_SIGN_GAP - probeNoteStartX(plainHeader)) : 0;
+      };
+      const headerW = (b: Built, isFirst: boolean): number => {
+        const spec = headerSpecOf(b, isFirst);
+        return probeNoteStartX(spec) - (isFirst ? 0 : probeNoteStartX(plainHeader)) + repeatRoomOf(spec, isFirst);
+      };
 
       // 1) build the notes + voices per measure, then the measure's Gourlay-style onset timeline:
       // the union of onset beats across ALL its voices (both staffs) — a busy voice's fine onsets
@@ -1140,7 +1191,7 @@ export function VexflowRenderer({
         for (const b of built) {
           const isFirst = current.length === 0;
           const addW = b.naturalWidth + headerW(b, isFirst);
-          if (!isFirst && currentW + addW > effectivePageContentWidth) {
+          if (!continuous && !isFirst && currentW + addW > effectivePageContentWidth) {
             systems.push(current);
             current = [b];
             currentW = b.naturalWidth + headerW(b, true);
@@ -1202,17 +1253,68 @@ export function VexflowRenderer({
       // likewise with the reaches between them.
       const placedSystems: Placed[][] = [];
       let totalW = 0;
-      let cursorY = MARGIN_T + Math.max(0, ...systems[0]?.map((b) => reaches.get(`${b.measure.id}:${staffOrder[0]}:above`) ?? 0) ?? [0]);
+      // pages: a sheet is as high as it is wide times the ratio; a system that does not fit on what is left of the sheet starts the next one
+      // the width asked for is the room between the side margins; the margins are a share of the sheet's width, all four alike
+      const sheetW = pageRatio ? effectivePageContentWidth / (1 - 2 * SHEET_MARGIN_RATIO) : effectivePageContentWidth + 2 * MARGIN_L;
+      const sheetH = pageRatio ? sheetW * pageRatio : 0;
+      const marginX = pageRatio ? sheetW * SHEET_MARGIN_RATIO : MARGIN_L;
+      const marginT = pageRatio ? sheetW * SHEET_MARGIN_RATIO : MARGIN_T;
+      // what a sheet keeps free at its foot
+      const marginB = marginT;
+      const sheetStride = sheetH + sheetW * PAGE_GAP_RATIO;
+      let sheet = 0;
+      let systemsOnSheet = 0;
+      // the sheet each system stands on, and where its ink ends (under the bass staff)
+      const sheetOf: number[] = [];
+      const bottoms: number[] = [];
+      // How far a measure's ink reaches past its staff is known once its system is drawn and measured. A measure not measured yet
+      // (its system is not drawn) is planned with what the measures drawn with the same marks needed, so that the lines do not break
+      // again, and the sheets with them, when it is drawn; none like it: the mean of all measured, none measured: nothing.
+      const marksOf = new Map<string, string[]>();
+      for (const c of doc.contexts) marksOf.set(c.measureId, [...(marksOf.get(c.measureId) ?? []), c.kind]);
+      const marksKey = (measureId: string): string => (marksOf.get(measureId) ?? []).sort().join(',');
+      const measuredReaches = new Map<string, { sum: number; count: number }>();
+      const takeReach = (key: string, value: number): void => {
+        const taken = measuredReaches.get(key) ?? { sum: 0, count: 0 };
+        measuredReaches.set(key, { sum: taken.sum + value, count: taken.count + 1 });
+      };
+      for (const measure of doc.measures) {
+        for (const staffId of staffOrder) for (const side of ['above', 'below']) {
+          const value = reaches.get(`${measure.id}:${staffId}:${side}`);
+          if (value === undefined) continue;
+          takeReach(`${marksKey(measure.id)}|${staffId}|${side}`, value);
+          takeReach(`|${staffId}|${side}`, value);
+        }
+      }
+      const reachOf = (measureId: string, staffId: string, side: string): number => {
+        const measuredHere = reaches.get(`${measureId}:${staffId}:${side}`);
+        if (measuredHere !== undefined) return measuredHere;
+        const like = measuredReaches.get(`${marksKey(measureId)}|${staffId}|${side}`) ?? measuredReaches.get(`|${staffId}|${side}`);
+        return like ? like.sum / like.count : 0;
+      };
+      let cursorY = (sheetH ? TITLE_ROOM : 0) + marginT + Math.max(0, ...systems[0]?.map((b) => reachOf(b.measure.id, staffOrder[0], 'above')) ?? [0]);
       systems.forEach((sysMeasures, si) => {
         const ex = extents[si];
-        const measured = (staffId: string, side: string) => Math.max(0, ...sysMeasures.map((b) => reaches.get(`${b.measure.id}:${staffId}:${side}`) ?? 0));
+        const measured = (staffId: string, side: string) => Math.max(0, ...sysMeasures.map((b) => reachOf(b.measure.id, staffId, side)));
         const staffGap =
           STAFF_H +
           Math.max(below(extentOf(ex, staffOrder[0]).min), measured(staffOrder[0], 'below')) +
           Math.max(above(extentOf(ex, staffOrder[1]).max), measured(staffOrder[1], 'above')) +
           STAFF_CLEARANCE;
-        const trebleY = cursorY;
-        const bassY = trebleY + staffGap;
+        let trebleY = cursorY;
+        let bassY = trebleY + staffGap;
+        const reachBelow = Math.max(below(extentOf(ex, staffOrder[1]).min), measured(staffOrder[1], 'below'));
+        if (sheetH) {
+          if (systemsOnSheet > 0 && bassY + STAFF_H + reachBelow > sheet * sheetStride + sheetH - marginB) {
+            sheet++;
+            systemsOnSheet = 0;
+            trebleY = sheet * sheetStride + marginT + Math.max(above(extentOf(ex, staffOrder[0]).max), measured(staffOrder[0], 'above'));
+            bassY = trebleY + staffGap;
+          }
+          systemsOnSheet++;
+          sheetOf.push(sheet);
+          bottoms.push(bassY + STAFF_H + reachBelow);
+        }
 
         // headers (`headerW`) are fixed (never stretched — the clef glyph doesn't scale), so the
         // stretch factor must be solved against the STRETCHABLE (content-only) width, not the
@@ -1224,10 +1326,10 @@ export function VexflowRenderer({
         const contentNaturalW = sysMeasures.reduce((sum, b) => sum + b.naturalWidth, 0);
         const naturalSystemW = contentNaturalW + headersW;
         const stretch =
-          naturalSystemW <= effectivePageContentWidth
+          !continuous && naturalSystemW <= effectivePageContentWidth
             ? (effectivePageContentWidth - headersW) / contentNaturalW
             : 1;
-        let x = MARGIN_L;
+        let x = marginX;
         const placed = sysMeasures.map((b, mi) => {
           const header = headers[mi];
           const w = b.naturalWidth * stretch + header;
@@ -1235,19 +1337,36 @@ export function VexflowRenderer({
           x += w;
           return item;
         });
-        totalW = Math.max(totalW, x + MARGIN_L);
+        totalW = Math.max(totalW, x + marginX);
         placedSystems.push(placed);
 
         const nextTrebleUp =
           si + 1 < extents.length ? Math.max(above(extentOf(extents[si + 1], staffOrder[0]).max),
-            ...systems[si + 1].map((b) => reaches.get(`${b.measure.id}:${staffOrder[0]}:above`) ?? 0)) : 0;
-        cursorY = bassY + STAFF_H + Math.max(below(extentOf(ex, staffOrder[1]).min), measured(staffOrder[1], 'below')) + nextTrebleUp + SYSTEM_GAP;
+            ...systems[si + 1].map((b) => reachOf(b.measure.id, staffOrder[0], 'above'))) : 0;
+        cursorY = bassY + STAFF_H + reachBelow + nextTrebleUp + SYSTEM_GAP;
       });
-      const totalH = cursorY + 20;
+      // the room left under a sheet's last system is shared equally between the gaps of its systems; a gap grows by at most
+      // MAX_GAP_GROWTH and what that does not take stays empty at the foot (a sheet of one system is left as it is)
+      if (sheetH) {
+        for (let onSheet = 0; onSheet <= sheet; onSheet++) {
+          const members = placedSystems.map((_, si) => si).filter((si) => sheetOf[si] === onSheet);
+          if (members.length < 2) continue;
+          const free = onSheet * sheetStride + sheetH - marginB - bottoms[members[members.length - 1]];
+          const growth = Math.min(Math.max(0, free) / (members.length - 1), MAX_GAP_GROWTH);
+          members.forEach((si, k) => {
+            for (const item of placedSystems[si]) {
+              item.trebleY += growth * k;
+              item.bassY += growth * k;
+            }
+          });
+        }
+      }
+      const totalH = sheetH ? sheet * sheetStride + sheetH : cursorY + 20;
       const signature = placedSystems.map((placed) => placed.map((p) => `${p.b.measure.id}:${p.x}:${p.w}`).join(' ')).join('\n');
       // a preview that would move a measure along a system, or into another, draws the whole score
       if (base && only && !sameBreaks(signature, base, only)) { engrave(null, true); return; }
-      if (!base && !only && placedSystems.length > ZONE_MIN_SYSTEMS) only = zoneFor(placedSystems.length);
+      const chunkOf = placedSystems.map((_, si) => (sheetH ? sheetOf[si] : si));
+      if (!base && !only && new Set(chunkOf).size > ZONE_MIN_CHUNKS) only = zoneFor(chunkOf);
       renderer.resize(totalW, totalH);
 
 
@@ -1483,14 +1602,21 @@ export function VexflowRenderer({
             if (clef) staff.addClef(clef, head.small ? 'small' : undefined);
             if (head.keys) { staff.setClef(b.startClefs[i]); createKeySignature(head.keys[i], b.startClefs[i], head.cancelKeys?.[i]).addToStave(staff); }
             if (head.timeSignature) staff.addTimeSignature(head.timeSignature);
-            if (endsPiece(b)) staff.setEndBarType(BarlineType.END);
+            // the barlines are drawn by `drawBarline`, never by the staff (the bar's width in the layout stays)
+            staff.setBegBarType(BarlineType.NONE);
+            staff.setEndBarType(BarlineType.NONE);
           });
           // align both staffs' begin modifiers (treble & bass clefs differ in width) so notes
           // start at the same x → same-beat notes across the grand staff line up vertically
           Stave.formatBegModifiers([treble, bass]);
-          // a repeat sign that begins the system stands after the clef, key and time signature, before the first note: the room for it
-          // is added to where the notes start (contextMarks draws the sign there)
-          const room = head.repeatSign ? REPEAT_SIGN_ROOM : 0;
+          // a repeat sign that begins the system stands after the clef, key and time signature, before the first note; inside a system
+          // the header is moved right of the sign (contextMarks draws the sign). The room is added to where the notes start
+          const room = repeatRoomOf(head, isFirst);
+          if (!isFirst && room > 0) {
+            for (const staff of [treble, bass]) {
+              for (const modifier of staff.getModifiers(StaveModifierPosition.BEGIN)) if (modifier.getCategory() !== 'Barline') modifier.setX(modifier.getX() + room);
+            }
+          }
           const noteStartX = Math.max(treble.getNoteStartX(), bass.getNoteStartX()) + room;
           treble.setNoteStartX(noteStartX);
           bass.setNoteStartX(noteStartX);
@@ -2157,14 +2283,17 @@ export function VexflowRenderer({
 
         // beams, then tuplet brackets — a bracket sits beyond the stems its notes' beam lengthened
         kneedBySystem[si].forEach(({ id, carrierIds, sns, directions }) => {
-          // stems of the notes, each from its chord to the bar; the bar slants from the end of the first stem to the end of the last
+          // stems of the notes, each from its chord to the bar. The bar is level, in the middle of the room the stems leave between the
+          // chords: a stem that goes up reaches at least a stem's length past its highest note, one that goes down past its lowest
           const svgNs = 'http://www.w3.org/2000/svg';
           const noteYs = sns.map((sn) => sn.getYs());
           const xs = sns.map((sn) => sn.getStemX());
           const lastIndex = sns.length - 1;
-          const tipAt = (index: number) => directions[index] === 1 ? Math.min(...noteYs[index]) - VEXFLOW_STEM_HEIGHT : Math.max(...noteYs[index]) + VEXFLOW_STEM_HEIGHT;
-          const y0 = tipAt(0), y1 = tipAt(lastIndex);
-          const lineY = (x: number) => xs[lastIndex] > xs[0] ? y0 + (y1 - y0) * (x - xs[0]) / (xs[lastIndex] - xs[0]) : y0;
+          const ceiling: number = Math.min(...sns.flatMap((_, index) => directions[index] === 1 ? [Math.min(...noteYs[index]) - VEXFLOW_STEM_HEIGHT] : []));
+          const floor: number = Math.max(...sns.flatMap((_, index) => directions[index] === 1 ? [] : [Math.max(...noteYs[index]) + VEXFLOW_STEM_HEIGHT]));
+          // with stems in one direction only there is one limit, and the bar stands on it
+          const limits: number[] = [ceiling, floor].filter(Number.isFinite);
+          const barY: number = limits.reduce((sum, limit) => sum + limit, 0) / limits.length;
           const levels = Math.max(...sns.map((sn) => sn.getGlyphProps().beam_count));
           const group = ctx.openGroup('beam', id) as SVGGElement;
           const bars: string[] = [];
@@ -2173,7 +2302,7 @@ export function VexflowRenderer({
           for (let level = 0; level < levels; level++) {
             const shift = level * toward * KNEED_BEAM_WIDTH * 1.5;
             const thickness = toward * KNEED_BEAM_WIDTH;
-            const d = `M${xs[0]} ${y0 + shift}L${xs[lastIndex]} ${y1 + shift}L${xs[lastIndex]} ${y1 + shift + thickness}L${xs[0]} ${y0 + shift + thickness}Z`;
+            const d = `M${xs[0]} ${barY + shift}L${xs[lastIndex]} ${barY + shift}L${xs[lastIndex]} ${barY + shift + thickness}L${xs[0]} ${barY + shift + thickness}Z`;
             const bar = document.createElementNS(svgNs, 'path');
             bar.setAttribute('d', d);
             bar.setAttribute('fill', inkColor);
@@ -2193,19 +2322,20 @@ export function VexflowRenderer({
               tagVoice(stem, voiceOfCarrier.get(carrierId));
             }
             const line = document.createElementNS(svgNs, 'path');
-            line.setAttribute('d', `M${xs[index]} ${base}L${xs[index]} ${lineY(xs[index])}`);
+            line.setAttribute('d', `M${xs[index]} ${base}L${xs[index]} ${barY}`);
             line.setAttribute('stroke', inkColor);
             line.setAttribute('stroke-width', '1.5');
             line.setAttribute('fill', 'none');
             stem.appendChild(line);
             group.parentNode?.appendChild(stem);
             const handle = stemHandles.find((h) => h.noteId === carrierId);
-            if (handle) { handle.baseY = base; handle.tipY = lineY(xs[index]); handle.draggable = false; }
+            if (handle) { handle.baseY = base; handle.tipY = barY; handle.draggable = false; }
           });
           const firstCarrier = doc.beams.find((bm) => bm.id === id)?.carrierIds[0];
           tagObject(group, id, firstCarrier);
           const member = collisions.items.find((it) => it.element === sns[0].getSVGElement());
           if (member) collisions.add(group, { measureId: member.measureId, staffId: member.staffId, kind: 'bridge' });
+          for (const carrierId of carrierIds) bridgedCarriers.add(carrierId);
           beamShapes.push({ id, paths: bars });
         });
         beamsBySystem[si].forEach(({ id, vf }) => {
@@ -2264,6 +2394,7 @@ export function VexflowRenderer({
           const memberStaffs = new Set(collisions.items.filter((it) => it.kind === 'rhythm' &&
             pieceCarriers.has(it.element.getAttribute('data-note-id'))).map((it) => it.staffId));
           if (member) collisions.add(group, { measureId: member.measureId, staffId: member.staffId, kind: memberStaffs.size > 1 ? 'bridge' : 'attached' });
+          if (memberStaffs.size > 1) for (const carrierId of pieceCarriers) if (carrierId) bridgedCarriers.add(carrierId);
           const paths = [...(group?.querySelectorAll('path') ?? [])].map((el) => el.getAttribute('d') ?? '');
           if (paths.length) beamShapes.push({ id, paths, handles });
         });
@@ -2273,20 +2404,29 @@ export function VexflowRenderer({
           const group = ctx.openGroup('tuplet', id) as SVGGElement;
           vf.draw();
           ctx.closeGroup();
-          tagObject(group, id, doc.tuplets.find((t) => t.id === id)?.carrierIds[0]);
+          const tuplet = doc.tuplets.find((t) => t.id === id);
+          tagObject(group, id, tuplet?.carrierIds[0]);
+          // A tuplet on a beam that spans the staves is drawn at the stems' ends, which reach into the gap: it is a bridge, not the reach of its staff
+          // (that reach would follow the gap and grow it on every pass). A point mark passes beside it.
+          const bridged = !!tuplet?.carrierIds.some((carrierId) => bridgedCarriers.has(carrierId));
           // timed: tuplets one after another share a line; only one over another (a nested tuplet) lifts it
-          collisions.placeOutside(group, { measureId, staffId, kind: 'attached', timed: true }, below ? 1 : -1);
+          collisions.placeOutside(group, { measureId, staffId, kind: bridged ? 'bridge' : 'attached', timed: true }, below ? 1 : -1);
           tupletShapes.push({ id, html: group.innerHTML });
         });
 
         if (sysStaffs.length) {
           const first = sysStaffs[0];
           new StaveConnector(first.treble, first.bass).setType('brace').setContext(ctx).draw();
-          new StaveConnector(first.treble, first.bass).setType('singleLeft').setContext(ctx).draw();
-          // every barline of the system joins the two staves across the gap between them (the signs of a repeat are drawn by contextMarks)
+          // every barline of the system runs through both staves and the gap between them: the line the system starts with, and the line
+          // right of each measure. A repeat's sign is the barline where it stands, and is drawn with the repeat (contextMarks): that is
+          // right of a measure that ends a repeat, or whose next measure in the system begins one
           sysStaffs.forEach((entry, mi) => {
-            const type = endsPiece(placed[mi].b) ? 'boldDoubleRight' : 'singleRight';
-            new StaveConnector(entry.treble, entry.bass).setType(type).setContext(ctx).draw();
+            const { b, x, w } = placed[mi];
+            const top: number = entry.treble.getYForLine(0);
+            const bottom: number = entry.bass.getYForLine(entry.bass.getNumLines() - 1);
+            if (mi === 0) drawBarline({ parent: systemGroup, kind: 'single', x, top, bottom, staffBottoms: [], ink: inkColor });
+            const repeatSign: boolean = barlines.endMeasureIds.has(b.measure.id) || (mi + 1 < placed.length && repeatBeginMeasures.has(placed[mi + 1].b.measure.id));
+            if (!repeatSign) drawBarline({ parent: systemGroup, kind: endsPiece(b) ? 'final' : 'single', x: x + w, top, bottom, staffBottoms: [], ink: inkColor });
           });
         }
         ctx.closeGroup();
@@ -2539,8 +2679,8 @@ export function VexflowRenderer({
           root.append(...hostSvg!.childNodes);
           hostSvg!.appendChild(root);
         }
-        finalW = Math.max(totalW, bounds.x + bounds.width + shiftX + MARGIN_L);
-        finalH = Math.max(totalH, bounds.y + bounds.height + shiftY + MARGIN_T);
+        finalW = Math.max(totalW, bounds.x + bounds.width + shiftX + marginX);
+        finalH = Math.max(totalH, bounds.y + bounds.height + shiftY + marginT);
       }
       if (shiftX || shiftY) shiftLayout(lists, shiftX, shiftY);
       renderer.resize(finalW, finalH);
@@ -2551,6 +2691,7 @@ export function VexflowRenderer({
       // what each system is now: drawn, shown from an earlier document until it comes near the screen, or not drawn yet
       const stateNow: SystemState[] = placedSystems.map((_, si) => {
         if (!only || only.has(si)) return 'drawn';
+        if (evicted.has(si)) return 'blank';
         const was = base?.state[si];
         if (was === 'drawn') return stale.has(si) ? 'stale' : 'drawn';
         return was === 'stale' ? 'stale' : 'blank';
@@ -2574,6 +2715,7 @@ export function VexflowRenderer({
         room.setAttribute('width', String(totalW));
         room.setAttribute('height', String(placed[0].bassY + STAFF_H + SYSTEM_ROOM - top));
         room.setAttribute('fill', 'none');
+        room.setAttribute('stroke', 'none');
         room.setAttribute('pointer-events', 'none');
         group.append(room);
         return group;
@@ -2631,6 +2773,8 @@ export function VexflowRenderer({
       // among them in order
       const kept = (si: number): boolean => Boolean(base && only && !only.has(si) && stateNow[si] !== 'blank');
       const groups: SVGGElement[] = placedSystems.map((_, si) => blankGroups.get(si) ?? (kept(si) ? base!.groups[si] : systemGroups[si]));
+      // a system drawn where an empty band stood comes up by opacity; one drawn again over its own drawing (an edit) does not
+      if (base && only) for (const si of only) if (base.state[si] === 'blank') groups[si]?.classList.add('vf-arrive');
       if (base) {
         placedSystems.forEach((_, si) => {
           if (!kept(si)) base.current[si]?.remove();
@@ -2651,6 +2795,8 @@ export function VexflowRenderer({
         // a drawing in part keeps the groups, tops, layouts and context marks of the systems it did not draw again
         const redrawn = base && only ? only : null;
         const nodes = new Map<ContextShape, Element>(redrawn ? base!.nodes : nodeOfShape);
+        // the marks of a system let go are gone from the drawing: their nodes are not kept
+        if (base) for (const si of evicted) for (const shape of base.layouts[si].contextShapes) nodes.delete(shape);
         if (redrawn) for (const si of redrawn) for (const shape of drawnSystems[si].layout.contextShapes) {
           const node = nodeOfShape.get(shape);
           if (node) nodes.set(shape, node);
@@ -2663,6 +2809,7 @@ export function VexflowRenderer({
             svg: hostSvg!, groups, current: [...groups], signature, state: stateNow,
             tops: placedSystems.map((placed, si) => (kept(si) ? base!.tops[si] : placed[0].trebleY)),
             applied: placedSystems.map((_, si) => (kept(si) ? base!.applied[si] : 0)),
+            sheetOf: placedSystems.map((_, si) => (sheetH ? sheetOf[si] : si)),
             layouts: placedSystems.map((_, si) => (kept(si) ? base!.layouts[si] : drawnSystems[si].layout)),
             nodes, systemOf, shiftX, shiftY, width: finalW, height: finalH, totalH,
             facts: new Map(built.map((b) => [b.measure.id, { ...b, drawn: b.drawn.map((d) => ({ ...d, sns: [], voice: null, tuplets: [] })), graceSets: [] }])),
@@ -2682,6 +2829,10 @@ export function VexflowRenderer({
       onLayout({
         width: finalW,
         height: finalH,
+        pages: sheetH ? Array.from({ length: sheet + 1 }, (_, i) => ({
+          x: 0, y: i * sheetStride + shiftY, w: finalW, h: sheetH,
+          waiting: placedSystems.every((_, si) => sheetOf[si] !== i || stateNow[si] === 'blank'),
+        })) : [],
         engravedFor: effectivePageContentWidth,
         timeMap: published('timeMap'),
         totalBeats: cumBeat,
@@ -2703,7 +2854,7 @@ export function VexflowRenderer({
     // the systems above the screen may be drawn at another height than they were planned: what is in view stays where it is
     const scroller = scrollerOf(host);
     const before = settled.current?.drawing;
-    const anchor = before && scroller && before.tops.length > ZONE_MIN_SYSTEMS ? anchorOf(before, scroller) : null;
+    const anchor = before && scroller && new Set(before.sheetOf).size > ZONE_MIN_CHUNKS ? anchorOf(before, scroller) : null;
     const anchorScrollTop = scroller?.scrollTop;
     // a throw here would unmount the whole editor: the last drawing and its layout stay instead
     const previous: ChildNode[] = [...host.childNodes];
@@ -2736,7 +2887,7 @@ export function VexflowRenderer({
       refreshZoneRef.current();
     });
     return () => cancelAnimationFrame(refresh);
-  }, [doc, scoreActive, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, onEngraveError, zoneVersion]);
+  }, [doc, scoreActive, effectivePageContentWidth, pageRatio, continuous, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, onEngraveError, zoneVersion]);
 
   // the zone follows the screen: once it has stood still, the systems near it that are not drawn yet are drawn one a task, so that a scroll
   // itself never carries a drawing
@@ -2751,7 +2902,7 @@ export function VexflowRenderer({
       timer = 0;
       const drawing = settled.current?.drawing;
       if (!drawing) return;
-      if (drawing.tops.length <= ZONE_MIN_SYSTEMS && !drawing.state.includes('stale')) {
+      if (new Set(drawing.sheetOf).size <= ZONE_MIN_CHUNKS && !drawing.state.includes('stale')) {
         zoneRef.current = null;
         return;
       }
@@ -2767,7 +2918,9 @@ export function VexflowRenderer({
       const left = [...near].filter((si) => drawing.state[si] !== 'drawn').length;
       const progressed = left < leftBefore;
       leftBefore = left;
-      if (left > 0 && (moved || progressed)) setZoneVersion((version) => version + 1);
+      // what the screen asks for is drawn and a drawn system stands far from it: a pass lets that one go
+      const farDrawn = drawing.state.some((state, si) => state === 'drawn' && !near.has(si));
+      if ((left > 0 || farDrawn) && (moved || progressed)) setZoneVersion((version) => version + 1);
     };
     refreshZoneRef.current = () => { if (!timer) timer = window.setTimeout(settle, 0); };
     const onMove = (): void => {
@@ -2839,7 +2992,7 @@ export function VexflowRenderer({
         el.classList.toggle('selected', set.has(el.getAttribute('data-modifier-note') || ''));
       });
     });
-  }, [selectionKey, carrierSelectionKey, doc, scoreActive, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, zoneVersion]);
+  }, [selectionKey, carrierSelectionKey, doc, scoreActive, effectivePageContentWidth, pageRatio, continuous, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, zoneVersion]);
 
   // hover = same DOM-recolour pattern as selection (must re-run whenever the main effect could
   // have rebuilt the DOM) — a light tint on the note glyph itself, per-individual-note like
@@ -2865,7 +3018,7 @@ export function VexflowRenderer({
     host.querySelectorAll<SVGElement>('[data-object-id]').forEach((el) => {
       el.classList.toggle('hovered', set.has(el.getAttribute('data-object-id') || ''));
     });
-  }, [hoverKey, doc, scoreActive, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, zoneVersion]);
+  }, [hoverKey, doc, scoreActive, effectivePageContentWidth, pageRatio, continuous, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, zoneVersion]);
 
   // picked beams / tuplets / time signatures / clefs: the same recolour-in-place as a note's
   useEffect(() => {
@@ -2875,7 +3028,7 @@ export function VexflowRenderer({
     host.querySelectorAll<SVGElement>('[data-object-id]').forEach((el) => {
       el.classList.toggle('selected', set.has(el.getAttribute('data-object-id') || ''));
     });
-  }, [objectSelectionKey, doc, scoreActive, effectivePageContentWidth, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, zoneVersion]);
+  }, [objectSelectionKey, doc, scoreActive, effectivePageContentWidth, pageRatio, continuous, onLayout, voiceColors, stemOverrides, beamPreview, slurPreview, spanPreview, placementPreview, zoneVersion]);
 
   // insert flash: the same DOM-class pattern as hover/selection, applied once per insert (the
   // flash object's identity is the trigger). The class removes itself when its animation ends;
