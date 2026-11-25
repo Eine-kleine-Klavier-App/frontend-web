@@ -1,4 +1,5 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
+import { useWakeLock } from '@/ui/useWakeLock';
 import { animate, useReducedMotion } from 'motion/react';
 import { useLocation, useSearchParams, type Location } from 'react-router-dom';
 import { BrandMark } from '@/ui/icons';
@@ -89,6 +90,13 @@ function useTypedSearchPrompt(scope: string | null): { visiblePrompt: string; ty
 }
 
 /** Shared browse navigation, search and score preview. The editor remains a sibling route. */
+/** Where a browse path stands in the navigation, left to right, deeper pages after them: a screen goes forward to a higher rank and back to a lower one. */
+const NAV_ORDER = ['/explore', '/library', '/you'];
+function navRank(key: string): number {
+  const at = NAV_ORDER.findIndex((path) => key === path || key.startsWith(path + '/') || key.startsWith(path + ':'));
+  return at < 0 ? NAV_ORDER.length : at;
+}
+
 export function AppShell({ renderOutlet }: { renderOutlet: (location: Location) => ReactNode }) {
   const location = useLocation();
   const phase = usePageTransitionPhase();
@@ -101,6 +109,7 @@ export function AppShell({ renderOutlet }: { renderOutlet: (location: Location) 
     return () => transport.dispose();
   }, [transport]);
   useLayoutEffect(() => { if (phase === 'exiting') transport.stop(); }, [phase, transport]);
+  useWakeLock(useSyncExternalStore(transport.subscribe, () => transport.getState().phase === 'playing'));
   const authSceneTransitionActive = useAuthSceneTransitionActive();
   const isLibrary = location.pathname.startsWith('/library');
   const isDrafts = location.pathname === '/library/drafts';
@@ -196,6 +205,7 @@ export function AppShell({ renderOutlet }: { renderOutlet: (location: Location) 
           transitionKey={collectionKey ? `${location.pathname}:${collectionKey}` : location.pathname}
           className="shell-outlet"
           disabled={authSceneTransitionActive}
+          direction={(from, to) => Math.sign(navRank(to) - navRank(from)) as -1 | 0 | 1}
         >
           {renderOutlet(location)}
         </PageTransition>

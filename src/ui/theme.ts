@@ -17,6 +17,12 @@
 // own frame; the copy is built on the next frame, and the light's clock starts once the tug is over AND the copy is
 // there, with every frame's step capped, so a long frame is never spent unseen.
 //
+// The copy stays alive: what moves in the page while the light spreads (a playing waterfall, the line of
+// the notes, a slider, a clock) is carried into the copy as it happens. Every change of the live page is
+// replayed on its clone (attributes, text, nodes added and removed), canvases are drawn into their clones
+// and scroll offsets and slider values are copied on each frame, so the part of the page the light has not
+// reached yet does not stand still. The switch itself is left alone: it is animated by this module.
+//
 // Interrupt: ONE clock `k` (0 = nothing shown … 1 = fully open) and a direction. A click while the
 // light spreads flips the direction, so the circle closes back into the switch from where it is; a
 // click while it closes spreads it again. On each reversal the live page takes the requested theme
@@ -94,39 +100,112 @@ let running: Switch | null = null;
 function buildCopy(
   next: Theme,
   origin: HTMLElement,
-): { copy: HTMLElement; copyOrigin: HTMLElement | null; scrolls: { to: HTMLElement; top: number; left: number }[] } {
-  const scrolls: { to: HTMLElement; top: number; left: number }[] = [];
+): { copy: HTMLElement; copyOrigin: HTMLElement | null; scrolls: { from: HTMLElement; to: HTMLElement; top: number; left: number }[]; pairs: Map<Node, Node>; canvases: [HTMLCanvasElement, HTMLCanvasElement][]; ranges: [HTMLInputElement, HTMLInputElement][] } {
+  const scrolls: { from: HTMLElement; to: HTMLElement; top: number; left: number }[] = [];
+  const pairs = new Map<Node, Node>();
+  const canvases: [HTMLCanvasElement, HTMLCanvasElement][] = [];
+  const ranges: [HTMLInputElement, HTMLInputElement][] = [];
   const copy = document.createElement('div');
   copy.className = 'theme-copy';
   copy.dataset.theme = next;
   copy.setAttribute('aria-hidden', 'true');
   copy.inert = true;
+  pairs.set(document.body, copy);
   let copyOrigin: HTMLElement | null = null;
-  for (const child of Array.from(document.body.children)) {
-    if (!(child instanceof HTMLElement)) continue;
-    if (/^(SCRIPT|STYLE|LINK|NOSCRIPT)$/.test(child.tagName) || child.classList.contains('theme-dim') || child.classList.contains('theme-copy')) continue;
-    const clone = child.cloneNode(true) as HTMLElement;
-    const live = [child, ...Array.from(child.querySelectorAll<HTMLElement>('*'))];
-    const cloned = [clone, ...Array.from(clone.querySelectorAll<HTMLElement>('*'))];
-    for (let i = 0; i < live.length; i++) {
-      const from = live[i];
-      const to = cloned[i];
+  // the two trees are walked in step: what the DOM does not carry in attributes (scroll offsets, form values, canvas pixels) is copied, and every live node is paired with its clone
+  const pair = (from: Node, to: Node) => {
+    pairs.set(from, to);
+    if (from instanceof HTMLElement && to instanceof HTMLElement) {
       if (from === origin) copyOrigin = to;
-      if (from.scrollTop || from.scrollLeft) scrolls.push({ to, top: from.scrollTop, left: from.scrollLeft });
+      if (from.scrollTop || from.scrollLeft) scrolls.push({ from, to, top: from.scrollTop, left: from.scrollLeft });
       if (from instanceof HTMLCanvasElement && to instanceof HTMLCanvasElement) {
         // a cloned canvas is empty; a WebGL one also loses its pixels once presented, so it is asked to draw now
         from.dispatchEvent(new Event('snapshot'));
         to.getContext('2d')?.drawImage(from, 0, 0);
+        canvases.push([from, to]);
       } else if (from instanceof HTMLInputElement && to instanceof HTMLInputElement) {
         to.value = from.value;
         to.checked = from.checked;
+        if (from.type === 'range') ranges.push([from, to]);
       } else if (from instanceof HTMLTextAreaElement && to instanceof HTMLTextAreaElement) {
         to.value = from.value;
       }
     }
+    for (let a = from.firstChild, b = to.firstChild; a && b; a = a.nextSibling, b = b.nextSibling) pair(a, b);
+  };
+  for (const child of Array.from(document.body.children)) {
+    if (!(child instanceof HTMLElement)) continue;
+    if (/^(SCRIPT|STYLE|LINK|NOSCRIPT)$/.test(child.tagName) || child.classList.contains('theme-dim') || child.classList.contains('theme-copy')) continue;
+    const clone = child.cloneNode(true) as HTMLElement;
+    pair(child, clone);
     copy.appendChild(clone);
   }
-  return { copy, copyOrigin, scrolls };
+  return { copy, copyOrigin, scrolls, pairs, canvases, ranges };
+}
+
+/** Keeps a static copy alive: every change of the live page is replayed on its clone, and what a mutation cannot carry is copied on each frame. */
+function mirrorLive(built: ReturnType<typeof buildCopy>, origin: HTMLElement): { sync: () => void; stop: () => void } {
+  const { copy, pairs, canvases, ranges, scrolls } = built;
+  const skipped = (node: Node | null) => !node || origin.contains(node) || (node instanceof HTMLElement && /^(SCRIPT|STYLE|LINK|NOSCRIPT)$/.test(node.tagName)) ||
+    (node instanceof HTMLElement && (node.classList.contains('theme-dim') || node.classList.contains('theme-copy')));
+  const forget = (node: Node) => {
+    pairs.delete(node);
+    node.childNodes.forEach(forget);
+  };
+  const remember = (from: Node, to: Node) => {
+    pairs.set(from, to);
+    if (from instanceof HTMLCanvasElement && to instanceof HTMLCanvasElement) canvases.push([from, to]);
+    else if (from instanceof HTMLInputElement && to instanceof HTMLInputElement && from.type === 'range') ranges.push([from, to]);
+    for (let a = from.firstChild, b = to.firstChild; a && b; a = a.nextSibling, b = b.nextSibling) remember(a, b);
+  };
+  const observer = new MutationObserver((records) => {
+    for (const record of records) {
+      const target = pairs.get(record.target);
+      if (!target || skipped(record.target)) continue;
+      if (record.type === 'attributes' && record.attributeName && target instanceof Element && record.target instanceof Element) {
+        const value = record.target.getAttribute(record.attributeName);
+        if (value === null) target.removeAttribute(record.attributeName);
+        else target.setAttribute(record.attributeName, value);
+      } else if (record.type === 'characterData') {
+        target.nodeValue = record.target.nodeValue;
+      } else if (record.type === 'childList') {
+        record.removedNodes.forEach((node) => {
+          pairs.get(node)?.parentNode?.removeChild(pairs.get(node) as Node);
+          forget(node);
+        });
+        record.addedNodes.forEach((node) => {
+          if (skipped(node) || !node.parentNode || pairs.has(node)) return;
+          const clone = node.cloneNode(true);
+          remember(node, clone);
+          const next = record.nextSibling && pairs.get(record.nextSibling);
+          target.insertBefore(clone, next && next.parentNode === target ? next : null);
+        });
+      }
+    }
+  });
+  observer.observe(document.body, { attributes: true, characterData: true, childList: true, subtree: true });
+  return {
+    sync: () => {
+      for (const [from, to] of canvases) {
+        if (!from.isConnected || !to.isConnected) continue;
+        from.dispatchEvent(new Event('snapshot'));
+        const context = to.getContext('2d');
+        if (to.width !== from.width) to.width = from.width;
+        if (to.height !== from.height) to.height = from.height;
+        context?.drawImage(from, 0, 0);
+      }
+      for (const [from, to] of ranges) if (to.value !== from.value) to.value = from.value;
+      for (const entry of scrolls) {
+        if (entry.to.scrollTop !== entry.from.scrollTop) entry.to.scrollTop = entry.from.scrollTop;
+        if (entry.to.scrollLeft !== entry.from.scrollLeft) entry.to.scrollLeft = entry.from.scrollLeft;
+      }
+    },
+    stop: () => {
+      observer.disconnect();
+      pairs.clear();
+      void copy;
+    },
+  };
 }
 
 export function toggleTheme(origin: HTMLElement, reduce: boolean): void {
@@ -185,6 +264,11 @@ export function toggleTheme(origin: HTMLElement, reduce: boolean): void {
   let lastFrame = performance.now();
   let stopped = false;
   let stopMirror = () => {};
+  let live: { sync: () => void; stop: () => void } | null = null;
+  const stopLive = () => {
+    live?.stop();
+    live = null;
+  };
 
   const setLight = (e: number) => {
     if (!copy) return;
@@ -209,6 +293,8 @@ export function toggleTheme(origin: HTMLElement, reduce: boolean): void {
       to.scrollLeft = left;
     }
     stopMirror();
+    stopLive();
+    live = mirrorLive(built, origin);
     copy?.remove();
     copy = built.copy;
     copyOrigin = built.copyOrigin;
@@ -247,6 +333,7 @@ export function toggleTheme(origin: HTMLElement, reduce: boolean): void {
     abandon: () => {
       if (!stopped) { if (dir === 1) finishForward(); else finishBack(); }
       copy?.remove();
+      stopLive();
       dim.remove();
     },
     lastFrame: () => lastFrame,
@@ -268,6 +355,7 @@ export function toggleTheme(origin: HTMLElement, reduce: boolean): void {
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
         copy?.remove();
+        stopLive();
         dim.remove();
         if (!running) root.classList.remove('theme-switching');
       }),
@@ -280,6 +368,7 @@ export function toggleTheme(origin: HTMLElement, reduce: boolean): void {
     applyTheme(previous);
     const from = Number(getComputedStyle(dim).opacity);
     copy?.remove();
+    stopLive();
     if (!running) root.classList.remove('theme-switching');
     const out = dim.animate([{ opacity: from }, { opacity: 0 }], { duration: FADE_MS, easing: EASE_LIGHT });
     out.onfinish = () => dim.remove();
@@ -291,6 +380,7 @@ export function toggleTheme(origin: HTMLElement, reduce: boolean): void {
     lastFrame = performance.now();
     const dt = Math.min(MAX_STEP_MS, last ? now - last : 0);
     last = now;
+    live?.sync();
     if (!revealing && now >= tugEnd) {
       revealing = true;
       if (dimIn) {

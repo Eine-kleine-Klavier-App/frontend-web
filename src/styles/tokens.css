@@ -91,6 +91,8 @@
   --score-accent: #8a4a7b;
   --score-accent-deep: #5e3155;
   --score-wash: #efe3ec;
+  /* the bar the line is in: a pink on the accent's own hue, strong enough to read as a colour on the paper */
+  --score-active: #e08cc4;
 
   /* Cover plate tints — one low-chroma family, ink stays readable on every one */
   --plate-0: #d9cfdc;
@@ -175,6 +177,9 @@
   --motion-base: 180ms;
   --motion-instant: 0ms; /* a press lands on pointer-down */
   --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  /* the one curve of a move of a screen, a panel or a section (styles/motion.ts EASE_IN_OUT_CSS): ease in, ease out */
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --motion-move: 340ms;
   --ease-exit: cubic-bezier(0.3, 0, 1, 1);
 
   /* The app's left rail — ONE width for browse's rail and the editor's: a fifth of the window,
@@ -183,7 +188,7 @@
 
   /* The sheet (EditorView reads these back as pixels — one source for CSS and layout code) */
   --sheet-gutter: var(--space-7); /* = browse's content gutter */
-  --sheet-max: 60rem; /* a page, not a banner: min(60rem, column − 2 gutters) */
+  --sheet-max: 72rem; /* a page, not a banner: min(72rem, column − 2 gutters) */
   --paper-frame: calc(var(--u) * 12); /* the paper's own padding, both sides, plus slack */
   --title-band: calc(var(--u) * 18); /* the engraved title block above the score */
 

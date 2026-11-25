@@ -10,7 +10,7 @@ import { errorMessage } from '@/core/errorMessage';
 import { Button } from '@/ui/Button';
 import { CloseIcon } from '@/ui/icons';
 
-/** The explicit write entry shared by the preview panel and saved-score reader. */
+/** The explicit write entry of the preview panel: a saved score is opened for editing only from there. */
 export function OpenInEditorButton({ scoreId, disabled = false, active = true }: { scoreId: string; disabled?: boolean; active?: boolean }) {
   const navigate = useNavigate();
   const [busy, setBusy] = useState(false);
