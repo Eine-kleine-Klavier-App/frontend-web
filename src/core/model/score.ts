@@ -166,7 +166,7 @@ export type PitchMode = 'preserve_pitch' | 'preserve_step';
 
 /** Everything the backend keeps beside the notes, "contexts": each starts at a measure position and
  *  the span kinds also end at one. A clef or key signature belongs to a staff, a dynamic, hairpin
- *  and slur to voices, a tempo to the whole score. */
+ *  and slur to one voice, a tempo to the whole score. */
 interface ContextBase {
   id: string;
   measureId: string;
@@ -191,7 +191,7 @@ export interface KeySignatureContext extends ContextBase {
 }
 export interface DynamicContext extends ContextBase {
   kind: 'dynamic';
-  voiceIds: string[];
+  voiceId: string;
   dynamic: Dynamic;
 }
 export interface TempoContext extends ContextBase {
@@ -203,14 +203,16 @@ export interface TempoContext extends ContextBase {
 }
 export interface HairpinContext extends SpanBase {
   kind: 'hairpin';
-  voiceIds: string[];
+  voiceId: string;
   type: 'crescendo' | 'diminuendo';
   steps?: number;
-  levels: { voiceId: string; from: Dynamic; to: Dynamic }[];
+  /** the dynamics of its voice the hairpin goes from and to */
+  from: Dynamic;
+  to: Dynamic;
 }
 export interface SlurContext extends SpanBase {
   kind: 'slur';
-  voiceIds: string[];
+  voiceId: string;
 }
 export interface OctaveContext extends SpanBase {
   kind: 'octave';

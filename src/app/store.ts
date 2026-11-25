@@ -326,7 +326,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const source = get().source;
     const before = get().document;
     const movingContext = command.type === 'moveContextStart' || command.type === 'moveContextEnd';
-    const contextId = command.type === 'moveContextStart' || command.type === 'moveContextEnd' ? command.contextId : null;
+    const contextId = command.type === 'moveContextStart' || command.type === 'moveContextEnd' ? command.contextIds[0] : null;
     const context = before.contexts.find((c) => c.id === contextId);
     let noticeMode: PitchMode | null = null;
     if ('mode' in command && (!movingContext || context?.kind === 'clef' || context?.kind === 'octave')) {

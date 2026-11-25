@@ -126,16 +126,17 @@ type ViewContext = ViewContextBase &
   (
     | { kind: 'clef_change'; staff_id: string; clef: ClefName; octave_transposition: number }
     | { kind: 'key_signature_change'; staff_id: string; alterations: KeyAlteration[] }
-    | { kind: 'dynamic_change'; voice_ids: string[]; dynamic: Dynamic }
+    | { kind: 'dynamic_change'; voice_id: string; dynamic: Dynamic }
     | { kind: 'tempo_change'; beat: { value: number; dots: number } | null; bpm: number | null; label: TempoWord | null; show_label?: boolean }
     | {
         kind: 'hairpin';
         end_measure_id: string | null;
         end_position: ViewFraction | null;
-        voice_ids: string[];
+        voice_id: string;
         steps?: number;
         hairpin_type: 'crescendo' | 'diminuendo';
-        levels: { voice_id: string; from: Dynamic; to: Dynamic }[];
+        from: Dynamic;
+        to: Dynamic;
       }
     | { kind: 'sustain_hold'; end_measure_id: string | null; end_position: ViewFraction | null }
     | { kind: 'refrain'; end_measure_id: string | null; end_position: ViewFraction | null; times: number }
@@ -146,7 +147,7 @@ type ViewContext = ViewContextBase &
         pass_count: number;
         fragments: { end_measure_id: string | null; end_position: ViewFraction | null; passes: number[] }[];
       }
-    | { kind: 'slur'; end_measure_id: string | null; end_position: ViewFraction | null; voice_ids: string[] }
+    | { kind: 'slur'; end_measure_id: string | null; end_position: ViewFraction | null; voice_id: string }
     | { kind: 'octave_transposition'; end_measure_id: string | null; end_position: ViewFraction | null; staff_id: string; octaves: number }
     | {
         kind: 'tempo_transition';
@@ -182,7 +183,7 @@ function toContext(c: ViewContext): ScoreContext {
     case 'key_signature_change':
       return { ...at, kind: 'keySignature', staffId: c.staff_id, alterations: c.alterations };
     case 'dynamic_change':
-      return { ...at, kind: 'dynamic', voiceIds: c.voice_ids, dynamic: c.dynamic };
+      return { ...at, kind: 'dynamic', voiceId: c.voice_id, dynamic: c.dynamic };
     case 'tempo_change':
       return { ...at, kind: 'tempo', beat: c.beat, bpm: c.bpm, label: c.label, showLabel: c.show_label ?? c.label !== null };
     case 'hairpin':
@@ -191,10 +192,11 @@ function toContext(c: ViewContext): ScoreContext {
         kind: 'hairpin',
         endMeasureId: c.end_measure_id,
         endPosition: c.end_position,
-        voiceIds: c.voice_ids,
+        voiceId: c.voice_id,
         type: c.hairpin_type,
         steps: c.steps,
-        levels: c.levels.map((l) => ({ voiceId: l.voice_id, from: l.from, to: l.to })),
+        from: c.from,
+        to: c.to,
       };
     case 'sustain_hold':
       return { ...at, kind: 'sustain', endMeasureId: c.end_measure_id, endPosition: c.end_position };
@@ -210,7 +212,7 @@ function toContext(c: ViewContext): ScoreContext {
         fragments: c.fragments.map((f) => ({ endMeasureId: f.end_measure_id, endPosition: f.end_position, passes: f.passes })),
       };
     case 'slur':
-      return { ...at, kind: 'slur', endMeasureId: c.end_measure_id, endPosition: c.end_position, voiceIds: c.voice_ids };
+      return { ...at, kind: 'slur', endMeasureId: c.end_measure_id, endPosition: c.end_position, voiceId: c.voice_id };
     case 'octave_transposition':
       return {
         ...at,

@@ -71,9 +71,7 @@ export type Command =
   | { type: 'deleteClef'; clefId: string; measureIds: string[]; mode: PitchMode }
   /** one alteration per diatonic step, C to B */
   | { type: 'setKeySignature'; staffId: string; measureId: string; position: Position; alterations: string[] }
-  /** a dynamic, hairpin or slur applies to one more voice, or stops applying to one of its voices */
-  | { type: 'addContextVoice'; contextId: string; voiceId: string }
-  | { type: 'removeContextVoice'; contextId: string; voiceId: string }
+  /** a dynamic, hairpin or slur for `voiceIds` is one context for each voice */
   | { type: 'setDynamic'; measureId: string; position: Position; voiceIds: string[]; dynamic: Dynamic }
   | {
       type: 'createHairpin';
@@ -83,7 +81,7 @@ export type Command =
       /** the level it ends on — whether it opens or closes follows from the level it starts at */
       target: Dynamic;
     }
-  | { type: 'setHairpinTarget'; hairpinId: string; target: Dynamic }
+  | { type: 'setHairpinTarget'; hairpinIds: string[]; target: Dynamic }
   /** a stretch of the score played in `passes`; with no `end` it lasts until the end of the score */
   /** a stretch of the score played `times` times; with no `end` it lasts until the end of the score */
   | { type: 'createRefrain'; start: { measureId: string; position: Position }; end: { measureId: string; position: Position } | null; times: number }
@@ -110,7 +108,7 @@ export type Command =
   | { type: 'appendVoltaFragment'; voltaId: string; end: { measureId: string; position: Position } | null }
   | { type: 'splitVoltaFragment'; voltaId: string; at: { measureId: string; position: Position } }
   /** a span (octave line: its notes by `mode`) lasts until the end of the score */
-  | { type: 'openContextEnd'; contextId: string; mode: PitchMode }
+  | { type: 'openContextEnd'; contextIds: string[]; mode: PitchMode }
   | {
       type: 'createSlur';
       start: { measureId: string; position: Position };
@@ -137,9 +135,9 @@ export type Command =
       targetBpm: number;
     }
   | { type: 'setTempoTransitionTarget'; transitionId: string; targetBpm: number }
-  /** move where a context starts / ends — any span, or a point context's one position; `presentation` changes ride in the same request and are one gesture with it */
-  | { type: 'moveContextStart'; contextId: string; measureId: string; position: Position; mode: PitchMode; presentation?: PresentationChange[] }
-  | { type: 'moveContextEnd'; contextId: string; measureId: string; position: Position; mode: PitchMode; presentation?: PresentationChange[] }
+  /** move where contexts start / end — any span, or a point context's one position; `presentation` changes ride in the same request and are one gesture with it */
+  | { type: 'moveContextStart'; contextIds: string[]; measureId: string; position: Position; mode: PitchMode; presentation?: PresentationChange[] }
+  | { type: 'moveContextEnd'; contextIds: string[]; measureId: string; position: Position; mode: PitchMode; presentation?: PresentationChange[] }
   /** a grace note before or after a carrier, after the grace carrier `afterCarrierId` of that side (first when null);
    *  `graceKind` is the kind of a group it makes, an existing group keeps its own */
   | {

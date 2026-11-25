@@ -101,7 +101,7 @@ export class ContextIndex {
   }
 
   dynamicAt(voiceId: string, measureId: string, beats: number): Dynamic | undefined {
-    return this.lastAt('dynamic', measureId, beats, (c) => c.voiceIds.includes(voiceId))?.dynamic;
+    return this.lastAt('dynamic', measureId, beats, (c) => c.voiceId === voiceId)?.dynamic;
   }
 
   /** contexts that sit exactly at the start of a measure */
@@ -176,4 +176,24 @@ export const KEY_NAMES: { fifths: number; name: string }[] = Array.from({ length
 export function letterOfStep(step: number, clef: ClefName): number {
   const bottom = clef === 'treble' ? 2 : 4;
   return (((bottom + step) % 7) + 7) % 7;
+}
+
+// ---- marks of several voices ------------------------------------------------------------------
+
+/** What makes contexts one mark on the page: a dynamic or a hairpin for several voices is a context
+ *  for each voice, and those of one kind, place and value (a hairpin: and reach) are one mark.
+ *  `null` for any other context, which is a mark of its own. */
+export function markKey(context: ScoreContext): string | null {
+  const place = `${context.kind}|${context.measureId}|${toBeats(context.position)}`;
+  if (context.kind === 'dynamic') return `${place}|${context.dynamic}`;
+  if (context.kind === 'hairpin') {
+    return `${place}|${context.endMeasureId}|${context.endPosition ? toBeats(context.endPosition) : ''}|${context.from}|${context.to}`;
+  }
+  return null;
+}
+
+/** the contexts drawn and edited together with `context`, itself among them */
+export function markGroup<C extends ScoreContext>(doc: ScoreDocument, context: C): C[] {
+  const key = markKey(context);
+  return key === null ? [context] : doc.contexts.filter((other) => markKey(other) === key) as C[];
 }
