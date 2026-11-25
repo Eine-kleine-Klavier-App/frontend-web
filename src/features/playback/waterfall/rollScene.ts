@@ -1,5 +1,7 @@
 import { CONTACT_LIGHT_ROWS, CONTACT_LIGHT_STOPS, CONTACT_LIGHT_TEXELS_HIGH, KeyStage, type KeyLight, type StageKey } from './keyStage';
+import type { KeyMark } from '@/core/keys/KeyMarks';
 import { waterfallSurfaceRatios, type WaterfallWindow, type WaterfallWindowSource } from './waterfallFrameCache';
+import { sizeToDevicePixels } from '@/rendering/deviceCanvas';
 import type { WaterfallNote } from './waterfallNotes';
 import { clamp, hexRgb, readWaterfallPalette, rgba, type Rgb, type VoiceRamp, type WaterfallPalette } from './waterfallPalette';
 import { BLACK_KEY_WIDTH, KEY_RANGE, NATURAL_PITCH_CLASSES, PLANE_HEIGHT, PLANE_WIDTH } from './waterfallProportions';
@@ -9,6 +11,8 @@ import { BLACK_KEY_WIDTH, KEY_RANGE, NATURAL_PITCH_CLASSES, PLANE_HEIGHT, PLANE_
 const OCTAVE_LEAN = 0.0863;
 const MIDDLE_C_LEAN = 0.0193;
 const MIDDLE_C = 60;
+/** A note that starts this close to the time (or later) is the one a marked key is for: a clock that stops on a note's start may stand a rounding short of it. */
+const SAME_MOMENT_SECONDS = 0.002;
 const BED_DEPTH_OF_HEIGHT = 0.215;
 const BED_DEPTH_OF_PITCH = 5;
 /** The pitch the 2D optics (footprints, ridge, grain sizes) were tuned at. */
@@ -41,6 +45,13 @@ const RIBBON_HALO_WINDOW_START = 0.55;
 /** The distance field is sampled this many times per decay length of the near glow, and in at most this many cells. */
 const RIBBON_HALO_CELLS_PER_DECAY = 4;
 const RIBBON_HALO_CELL_BUDGET = 250_000;
+/** The baked glow is worked out once for a stretch of the piece, not in every frame, so it can afford a coarser grid than the per-frame one. */
+const RIBBON_HALO_STRIP_CELL_BUDGET = 62_500;
+/** The strip is baked in slices of this many rows; its canvas holds this many screens of rows. */
+const HALO_STRIP_SLICE_ROWS = 32;
+const HALO_STRIP_SCREENS = 4;
+/** What is baked ahead of a frame without a stall, in milliseconds. */
+const HALO_STRIP_BUDGET_MS = 1.2;
 /** The bright strip along a ribbon: its place and spread across the ribbon, in ribbon widths, and how it is sampled. */
 const RIBBON_CORE_CENTER = -0.10;
 const RIBBON_CORE_SPREAD = 0.18;
@@ -53,6 +64,8 @@ const KEY_ATTACK_SLOW_SECONDS = 0.054;
 const KEY_ATTACK_FAST_SECONDS = 0.026;
 const LIGHT_REACH = 7;
 const KEY_RELEASE_SECONDS = 0.09;
+/** Time the return curve needs to lift a key by 60% of its travel: a repeat is struck on a key raised this far. */
+const KEY_REPEAT_LIFT_SECONDS = 0.051;
 const TAIL_SECONDS = 4.5;
 const HIT_SECONDS = 1.35;
 const FRONT_SECONDS = 0.4;
@@ -77,6 +90,12 @@ type DrawingContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext
 function drawingContext(surface: DrawingSurface, options?: CanvasRenderingContext2DSettings): DrawingContext | null {
   if ('ownerDocument' in surface) return surface.getContext('2d', options);
   return surface.getContext('2d', options);
+}
+
+/** The two canvases that stand under the roll canvas: the sky (drawn once) and the guide lines (drawn on whole device pixels). */
+export interface WaterfallLayers<Surface> {
+  sky: Surface;
+  lines: Surface;
 }
 
 export interface WaterfallLayout {
@@ -118,6 +137,8 @@ interface SceneNote extends WaterfallNote {
   seed: number;
   expiresAt: number;
   startPress: number;
+  /** Seconds from the end of this note to the next strike of the same key; infinite when there is none. */
+  gapToNext: number;
 }
 
 /** Evaluate the pose at score time, including when the frame is reached by a seek. */
@@ -128,9 +149,11 @@ function keyPressAt(note: SceneNote, age: number): number {
     KEY_ATTACK_SLOW_SECONDS + (KEY_ATTACK_FAST_SECONDS - KEY_ATTACK_SLOW_SECONDS) * note.velocity,
   );
   const attack = clamp(age / attackTime, 0, 1);
-  // The key finishes returning exactly when the note ends, so a repeat is struck on a raised key.
-  const returnTime = Math.min(KEY_RELEASE_SECONDS, note.duration * 0.5);
-  const release = clamp((age - (note.duration - returnTime)) / returnTime, 0, 1);
+  // The key starts rising when the sound ends. Only when the same key is struck again sooner does it start rising
+  // early enough to be lifted by `KEY_REPEAT_LIFT_SECONDS` at the strike, and never before half of the note.
+  const earlyReturn = clamp(KEY_REPEAT_LIFT_SECONDS - note.gapToNext, 0, KEY_REPEAT_LIFT_SECONDS);
+  const returnStart = Math.max(note.duration * 0.5, note.duration - earlyReturn);
+  const release = clamp((age - returnStart) / KEY_RELEASE_SECONDS, 0, 1);
   const press = 1 - (1 - note.startPress) * (1 - attack) ** 3;
   return press * (1 - release * release * (3 - 2 * release));
 }
@@ -210,6 +233,55 @@ interface HaloField {
 }
 
 /** One ribbon of the frame: its outline and what painting it needs. */
+/**
+ * The glow of the ribbons, baked in score time: a grid of cells, one row per `rowSeconds` of the piece, so it moves with the notes and a stretch of
+ * the piece is worked out once. The canvas holds the global rows [baseTop - capacity, baseTop), the latest row at the top; `validLo..validHi` is baked.
+ */
+interface HaloStrip {
+  cell: number;
+  columns: number;
+  rowSeconds: number;
+  /** Rows around a slice that are worked on as well, so that a slice is what the whole grid would give: the reach of the glow. */
+  apron: number;
+  capacity: number;
+  behind: number;
+  ahead: number;
+  baseTop: number;
+  validLo: number;
+  validHi: number;
+  canvas: DrawingSurface;
+  context: DrawingContext;
+  spare: DrawingSurface;
+  spareContext: DrawingContext;
+  mask: DrawingSurface;
+  maskContext: DrawingContext;
+  distance: Float32Array;
+  voice: Uint8Array;
+  otherDistance: Float32Array;
+  otherVoice: Uint8Array;
+  /** Slices baked so far; read by the tests. */
+  slices: number;
+}
+
+/** A cell offers the two nearest voices of a neighbour to itself: it keeps its nearest voice and the nearest voice that differs from it. */
+function offerHalo(distance: Float32Array, voice: Uint8Array, otherDistance: Float32Array, otherVoice: Uint8Array, index: number, candidate: number, candidateVoice: number): void {
+  if (!candidateVoice) return;
+  const own = voice[index];
+  if (candidateVoice === own) {
+    if (candidate < distance[index]) distance[index] = candidate;
+  } else if (candidate < distance[index]) {
+    otherDistance[index] = distance[index];
+    otherVoice[index] = own;
+    distance[index] = candidate;
+    voice[index] = candidateVoice;
+  } else if (candidateVoice === otherVoice[index]) {
+    if (candidate < otherDistance[index]) otherDistance[index] = candidate;
+  } else if (candidate < otherDistance[index]) {
+    otherDistance[index] = candidate;
+    otherVoice[index] = candidateVoice;
+  }
+}
+
 interface RibbonShape {
   note: SceneNote;
   age: number;
@@ -254,9 +326,13 @@ function ribbonPaint(ramp: VoiceRamp) {
 export class WaterfallScene {
   private readonly makeCanvas: () => DrawingSurface;
   private readonly sheet: DrawingSurface;
+  private readonly layers: WaterfallLayers<DrawingSurface> | undefined;
+  private skyContext: DrawingContext | undefined;
+  private linesContext: DrawingContext | undefined;
   private readonly ctx: DrawingContext;
   private readonly keyboard: DrawingContext;
   private readonly stage: KeyStage;
+  private keyMarks: readonly KeyMark[] = [];
   private readonly stripVoiceField = new Float32Array(UNDER_STOPS * 3);
   private readonly stripVoiceWeights = new Float32Array(UNDER_STOPS);
   private readonly ridgeField = new Float32Array(CONTACT_LIGHT_STOPS * 3);
@@ -279,6 +355,7 @@ export class WaterfallScene {
   private ribbonFaces: CanvasGradient[] = [];
   private readonly coreGradients = new Map<string, CanvasGradient>();
   private haloField: HaloField | undefined;
+  private halo: HaloStrip | undefined;
   private readonly palette: WaterfallPalette;
   private background: string;
   private stripColor: Rgb;
@@ -301,7 +378,7 @@ export class WaterfallScene {
   private stripY = 1;
   private convergenceX = 0;
   private convergenceDistance = 1;
-  private tilt = 1;
+  private tilt = 0;
   private octaveLines = true;
   private measureLines = true;
   private backgroundDust = true;
@@ -312,18 +389,30 @@ export class WaterfallScene {
   private rollEnd = 1;
   private keyboardTop = 0;
 
-  constructor(canvas: HTMLCanvasElement, palette?: WaterfallPalette, keyboardCanvas?: HTMLCanvasElement);
-  constructor(canvas: OffscreenCanvas, palette: WaterfallPalette, keyboardCanvas?: OffscreenCanvas);
+  /**
+   * With `layers` (and a keyboard canvas) the roll canvas holds only what moves with the notes and is transparent. The sky stands under it,
+   * drawn once, and the guide lines stand between them on a canvas of whole device pixels, so that nothing resamples a line the frame draws.
+   */
+  constructor(canvas: HTMLCanvasElement, palette?: WaterfallPalette, keyboardCanvas?: HTMLCanvasElement, layers?: WaterfallLayers<HTMLCanvasElement>);
+  constructor(canvas: OffscreenCanvas, palette: WaterfallPalette, keyboardCanvas?: OffscreenCanvas, layers?: WaterfallLayers<OffscreenCanvas>);
   constructor(private readonly canvas: DrawingSurface, palette?: WaterfallPalette,
-    private readonly keyboardCanvas?: DrawingSurface) {
+    private readonly keyboardCanvas?: DrawingSurface, layers?: WaterfallLayers<DrawingSurface>) {
     const inDocument = 'ownerDocument' in canvas;
     this.makeCanvas = inDocument ? () => canvas.ownerDocument.createElement('canvas') : () => new OffscreenCanvas(1, 1);
     if (!palette && !inDocument) throw new Error('The offscreen waterfall needs CSS colours from the page');
     this.palette = palette ?? readWaterfallPalette(canvas as HTMLCanvasElement);
     this.sheet = canvas;
-    const context = drawingContext(this.sheet, { alpha: false });
+    this.layers = keyboardCanvas ? layers : undefined;
+    const context = drawingContext(this.sheet, { alpha: this.layers !== undefined });
     if (!context) throw new Error('A 2D canvas is unavailable');
     this.ctx = context;
+    if (this.layers) {
+      const sky = drawingContext(this.layers.sky, { alpha: false });
+      const lines = drawingContext(this.layers.lines);
+      if (!sky || !lines) throw new Error('The sky and guide canvases are unavailable');
+      this.skyContext = sky;
+      this.linesContext = lines;
+    }
     const keyboard = keyboardCanvas ? drawingContext(keyboardCanvas) : context;
     if (!keyboard) throw new Error('The keyboard canvas is unavailable');
     this.keyboard = keyboard;
@@ -356,17 +445,22 @@ export class WaterfallScene {
       seed: index * 13 + 1,
       expiresAt: note.start + Math.max(note.sustainDuration + TAIL_SECONDS, note.duration + HIT_SECONDS),
       startPress: 0,
+      gapToNext: Infinity,
     }));
     this.latestExpiry = new Float64Array(sorted.length);
     let latestExpiry = -Infinity;
     const previousStrike = new Map<number, SceneNote>();
     for (const [index, note] of this.notes.entries()) {
       const previous = previousStrike.get(note.pitch);
-      if (previous) note.startPress = keyPressAt(previous, note.start - previous.start);
+      if (previous) {
+        previous.gapToNext = note.start - (previous.start + previous.duration);
+        note.startPress = keyPressAt(previous, note.start - previous.start);
+      }
       if (note.duration > 0) previousStrike.set(note.pitch, note);
       latestExpiry = Math.max(latestExpiry, note.expiresAt);
       this.latestExpiry[index] = latestExpiry;
     }
+    this.halo = undefined;
     this.bars = bars.slice().sort((a, b) => a - b);
     this.pedals = [];
     for (const pedal of pedals.slice().sort((a, b) => a.down - b.down)) {
@@ -394,6 +488,7 @@ export class WaterfallScene {
     });
     this.coreGradients.clear();
     this.ribbonColors = paints;
+    this.halo = undefined;
     this.prepareRibbonFaces();
     this.ramps = ramps;
     this.stage.setPalette(ramps.filter(Boolean).map(ramp => ramp.glow));
@@ -411,6 +506,7 @@ export class WaterfallScene {
   /** -1 = from sides, 0 = vertical, 1 = the reference fan; only horizontal projection changes. */
   setTilt(value: number): void {
     this.tilt = clamp(value, -1, 1);
+    this.halo = undefined;
   }
 
   /** Independent view flags; neither changes the projection or the playback clock. */
@@ -426,18 +522,23 @@ export class WaterfallScene {
 
   setBackground(color: string): void {
     this.background = color;
-    if (this.sky) this.sky = this.makeSky();
+    if (this.sky) {
+      this.sky = this.makeSky();
+      this.paintSkyLayer();
+    }
   }
 
   dispose(): void {
     this.stage.dispose();
     this.haloField = undefined;
+    this.halo = undefined;
     this.ribbonColors = [];
     this.ribbonFaces = [];
   }
 
   invalidateRasters(): void {
     this.rasterLayout = '';
+    this.halo = undefined;
     this.stage.invalidateRasters();
     this.sprites.clear();
     this.densityMasks.clear();
@@ -497,6 +598,8 @@ export class WaterfallScene {
     this.visibleAhead = this.rail / this.nearSpeed;
     this.stripY = this.rail + this.depth + Math.max(7.5, this.depth * 0.175);
     this.sky = this.makeSky();
+    this.paintSkyLayer();
+    this.halo = undefined;
     this.prepareRibbonFaces();
   }
 
@@ -523,10 +626,35 @@ export class WaterfallScene {
       this.canvas.style.height = `${100 * this.rollEnd / this.height}%`;
       keyboard.style.height = `${100 * (this.height - this.keyboardTop) / this.height}%`;
     }
+    const layers = this.layers;
+    if (!layers) return;
+    // The guide canvas has one pixel per device pixel and is shown at exactly that size, so the browser never resamples what the frame draws on it.
+    const railHeight = this.rail * this.unit;
+    layers.sky.width = Math.max(1, Math.round(width * ratios.roll));
+    layers.sky.height = Math.max(1, Math.round(railHeight * ratios.roll));
+    sizeToDevicePixels(layers.lines, width, railHeight, deviceRatio);
+    if (this.linesContext) this.linesContext.imageSmoothingQuality = 'medium';
+    if ('style' in layers.sky) layers.sky.style.height = `${100 * this.rail / this.height}%`;
+  }
+
+  /** The sky stands still: it is drawn onto its own canvas when it changes, not on every frame. */
+  private paintSkyLayer(): void {
+    if (!this.layers || !this.skyContext || !this.sky) return;
+    this.skyContext.drawImage(this.sky, 0, 0, this.layers.sky.width, this.layers.sky.height);
   }
 
   get lookAheadSeconds(): number {
     return this.visibleAhead;
+  }
+
+  /** How many CSS pixels of the roll one second of the music is, at the keys: the time and the place on the roll are one line. (The scene works in its own units, `unit` pixels each.) */
+  get pixelsPerSecond(): number {
+    return this.nearSpeed * this.unit;
+  }
+
+  /** Where the keys begin, in CSS pixels from the top of the roll's canvas. */
+  get keysTop(): number {
+    return this.rail * this.unit;
   }
 
   windowSource(extent: number): WaterfallWindowSource {
@@ -548,16 +676,27 @@ export class WaterfallScene {
     return [start, end];
   }
 
+  /** Keys the keyboard is asked to show beyond what the notes do to them; they replace the notes' light on their pitch. */
+  setKeyMarks(marks: readonly KeyMark[]): void {
+    this.keyMarks = marks;
+  }
+
   /** Draws the scene at timeSeconds of the piece. */
   render(timeSeconds: number, prepared?: WaterfallWindow): void {
     const g = this.ctx;
     if (!this.sky || !this.ramps.length) return;
     this.time = timeSeconds;
     g.setTransform(this.sheet.width / this.width, 0, 0, this.sheet.height / this.rollEnd, 0, 0);
-    g.drawImage(this.sky, 0, 0, this.width, this.rail);
+    if (this.layers) g.clearRect(0, 0, this.width, this.rollEnd);
+    else g.drawImage(this.sky, 0, 0, this.width, this.rail);
     if (this.keyboardCanvas) {
       g.fillStyle = this.background;
       g.fillRect(0, this.rail, this.width, this.rollEnd - this.rail);
+    }
+    // The back of the roll (the dust, then the guide lines) is drawn on its own canvas under the roll canvas, in the same scene units.
+    if (this.layers && this.linesContext) {
+      this.linesContext.setTransform(this.layers.lines.width / this.width, 0, 0, this.layers.lines.height / this.rail, 0, 0);
+      this.linesContext.clearRect(0, 0, this.width, this.rail);
     }
     g.save();
     g.beginPath();
@@ -596,7 +735,8 @@ export class WaterfallScene {
       const light = note.velocity * (0.95 + 0.48 * Math.exp(-age / 0.16)) * (1 - Math.exp(-age / 0.013)) * Math.exp(-release / 0.205);
       hits.push({ note, age, press, light, x: key.x, rgb });
     }
-    this.drawHalo(shapes);
+    if (this.layers && this.tilt === 0) this.drawHaloStrip(timeSeconds);
+    else this.drawHalo(shapes);
     for (const shape of shapes) this.paintRibbon(shape);
     g.restore();
     // Repeated attacks light one physical key; dust from the earlier attacks stays in flight.
@@ -637,6 +777,27 @@ export class WaterfallScene {
     this.buildContactField(lit);
     const contactLight = this.contact(hits, lit);
     const lights: KeyLight[] = lit.map((emitter) => ({ midi: emitter.note.pitch, light: emitter.light, press: emitter.press, onset: emitter.onset, rgb: emitter.rgb }));
+    for (const mark of this.keyMarks) {
+      let rgb: Rgb;
+      if (mark.colour !== null) {
+        rgb = hexRgb(mark.colour);
+      } else {
+        // The voice of the note this key is for: the next one of this pitch, else the last one before.
+        let found: WaterfallNote | undefined;
+        for (let index = start; index < end; index++) {
+          const note = this.notes[index];
+          if (note.pitch !== mark.pitch) continue;
+          found = note;
+          if (note.start >= timeSeconds - SAME_MOMENT_SECONDS) break;
+        }
+        rgb = (this.ramps[found?.voice ?? 0] ?? this.ramps[0]).glow;
+      }
+      const at = lights.findIndex((light) => light.midi === mark.pitch);
+      if (at >= 0) lights.splice(at, 1);
+      lights.push(mark.shown === 'pressed'
+        ? { midi: mark.pitch, light: 1, press: 1, onset: 0, rgb }
+        : { midi: mark.pitch, light: 0, press: 0, onset: 0, rgb, hint: 1 });
+    }
     this.stage.draw(bed, { width: this.width, rail: this.rail, depth: this.depth, pitch: this.pitch, keys: this.keys, contactPixels: this.contactPixels }, lights);
     // Carry the light across the join of the roll and the keycaps.
     const overlap = 0.043 * this.pitch;
@@ -696,7 +857,7 @@ export class WaterfallScene {
 
   /** A field of faint grains anchored in score time, so they stream towards the keys with the notes. */
   private rollTexture(): void {
-    const g = this.ctx;
+    const g = this.linesContext ?? this.ctx;
     for (const grain of this.grains) {
       let seconds = (grain.when - this.time) % GRAIN_CYCLE;
       if (seconds < 0) seconds += GRAIN_CYCLE;
@@ -711,7 +872,10 @@ export class WaterfallScene {
 
   /** The octave lines running up from the keys, and a line across the roll at every measure start. */
   private guides(): void {
-    const g = this.ctx;
+    const layers = this.layers;
+    const g = this.linesContext ?? this.ctx;
+    // Rows of the surface the lines are drawn on, per unit of the scene. A line stands on whole rows, so every frame draws it the same way.
+    const rows = layers ? layers.lines.height / this.rail : this.sheet.height / this.rollEnd;
     g.lineWidth = Math.max(0.63, 0.54 / this.unit);
     const guide = this.palette.guide;
     g.strokeStyle = gradient(g, 0, this.rail, [[0, rgba(guide.far, 0.15)], [0.75, rgba(guide.mid, 0.23)], [1, rgba(guide.near, 0.36)]]);
@@ -732,13 +896,13 @@ export class WaterfallScene {
       if (seconds >= this.visibleAhead) break;
       const left = this.projectRoll(0, seconds);
       const right = this.projectRoll(this.width, seconds);
-      const pixel = this.rollEnd / this.sheet.height;
-      const thick = Math.max(pixel, (0.92 / this.unit) * left.scale);
+      const top = Math.round(left.y * rows) / rows;
+      const thick = Math.max(1, Math.round((0.92 / this.unit) * left.scale * rows)) / rows;
       g.fillStyle = rgba(this.palette.barLine, 0.3 + (0.12 * left.y) / this.rail);
-      g.fillRect(left.x, left.y, right.x - left.x, thick);
+      g.fillRect(left.x, top, right.x - left.x, thick);
       g.fillStyle = rgba(this.palette.mark, 0.53);
       const end = (5 * left.scale) / this.unit;
-      for (const x of [left.x, right.x - end]) g.fillRect(x, left.y, end, thick);
+      for (const x of [left.x, right.x - end]) g.fillRect(x, top, end, thick);
     }
   }
 
@@ -750,8 +914,9 @@ export class WaterfallScene {
     this.paintRibbon(shape);
   }
 
-  /** The outline of a note's slab at this moment, or nothing when it is not on the screen. */
-  private ribbonShape(note: SceneNote, age: number, key: SceneKey): RibbonShape | undefined {
+  /** The outline of a note's slab at this moment, or nothing when it is not on the screen. `span` is the seconds ahead that are shown and `project` puts a lane and a time on the surface: the screen by default, a baked band of the glow otherwise. */
+  private ribbonShape(note: SceneNote, age: number, key: SceneKey, span = this.visibleAhead,
+    project: (lane: number, seconds: number, offset?: number) => Projected = (lane, seconds, offset) => this.projectRoll(lane, seconds, offset)): RibbonShape | undefined {
     const ramp = this.ramps[note.voice] ?? this.ramps[0];
     const center = key.x;
     const half = key.width * RIBBON_WIDTH_OF_KEY / 2;
@@ -762,11 +927,11 @@ export class WaterfallScene {
     const duration = note.duration - trim;
     const start = -age;
     const end = duration - age;
-    if (duration <= 0 || start > this.visibleAhead || end <= 0) return undefined;
+    if (duration <= 0 || start > span || end <= 0) return undefined;
     const front = Math.max(start, -RIBBON_HEAD_CLIP);
-    const back = Math.min(end, this.visibleAhead + RIBBON_TAIL_CLIP);
-    const head = this.projectRoll(center, front);
-    const tail = this.projectRoll(center, back);
+    const back = Math.min(end, span + RIBBON_TAIL_CLIP);
+    const head = project(center, front);
+    const tail = project(center, back);
     const height = head.y - tail.y;
     const skew = (head.x - tail.x) / height;
     const extent = half + Math.max(RIBBON_RIM_WIDTH / 2, RIBBON_HALO_REACH * this.ribbonUnit);
@@ -784,12 +949,12 @@ export class WaterfallScene {
         else outline.lineTo(point.x, point.y);
         first = false;
       };
-      const corner = this.projectRoll(center, time, side * half);
+      const corner = project(center, time, side * half);
       if (cut) {
         begin(corner);
         continue;
       }
-      const point = (theta: number) => this.projectRoll(center,
+      const point = (theta: number) => project(center,
         time + direction * roundTime - roundTime * Math.sin(theta),
         side * (half - radius) + radius * Math.cos(theta));
       begin(point(last - Math.PI / 2));
@@ -969,6 +1134,7 @@ export class WaterfallScene {
         data[offset + 3] = Math.round(255 * strength);
       }
     }
+    glowContext.clearRect(0, 0, columns, rows);
     glowContext.putImageData(image, firstColumn, firstRow);
     const g = this.ctx;
     g.save();
@@ -977,6 +1143,254 @@ export class WaterfallScene {
     g.drawImage(field.glow, firstColumn, firstRow, boxColumns, boxRows,
       firstColumn * this.width / columns, firstRow * this.rail / rows, boxColumns * this.width / columns, boxRows * this.rail / rows);
     g.restore();
+  }
+
+  /** The baked glow of the roll: made on first use, dropped whenever what it was made from changes (the notes, the colours, the size, the tilt). */
+  private haloStrip(): HaloStrip | undefined {
+    if (this.halo) return this.halo;
+    const unit = this.ribbonUnit;
+    const cell = Math.max(RIBBON_HALO_NEAR.decay * unit / RIBBON_HALO_CELLS_PER_DECAY, Math.sqrt(this.width * this.rail / RIBBON_HALO_STRIP_CELL_BUDGET));
+    const columns = Math.max(1, Math.ceil(this.width / cell));
+    const screenRows = Math.ceil(this.rail / cell) + 3;
+    const apron = Math.ceil((RIBBON_HALO_REACH + RIBBON_HALO_BLEND * RIBBON_HALO_NEAR.decay) * unit / cell) + 2;
+    const capacity = HALO_STRIP_SCREENS * screenRows;
+    const sheet = (rows: number, options?: CanvasRenderingContext2DSettings) => {
+      const surface = this.makeCanvas();
+      surface.width = columns;
+      surface.height = rows;
+      return { surface, context: drawingContext(surface, options) };
+    };
+    const strip = sheet(capacity);
+    const spare = sheet(capacity);
+    const bandRows = HALO_STRIP_SLICE_ROWS + 2 * apron;
+    // The mask is read back on every slice: a canvas kept in memory reads fast and does not depend on a graphics card.
+    const mask = sheet(bandRows, { willReadFrequently: true });
+    if (!strip.context || !spare.context || !mask.context) return undefined;
+    this.halo = {
+      cell, columns, apron, capacity, rowSeconds: cell / this.nearSpeed,
+      behind: Math.ceil(screenRows / 8), ahead: Math.ceil(screenRows / 2),
+      baseTop: 0, validLo: 0, validHi: 0,
+      canvas: strip.surface, context: strip.context, spare: spare.surface, spareContext: spare.context,
+      mask: mask.surface, maskContext: mask.context,
+      distance: new Float32Array(columns * bandRows), voice: new Uint8Array(columns * bandRows),
+      otherDistance: new Float32Array(columns * bandRows), otherVoice: new Uint8Array(columns * bandRows),
+      slices: 0,
+    };
+    return this.halo;
+  }
+
+  /**
+   * Bakes the rows [wantLo, wantHi) of the strip, working outwards from what is baked, for at most `budget` milliseconds. A stretch that lies
+   * apart from what is baked (a seek) starts the strip again there. Returns whether the wanted rows are all baked.
+   */
+  private bakeHalo(strip: HaloStrip, wantLo: number, wantHi: number, budget: number): boolean {
+    if (wantHi > strip.baseTop || wantLo < strip.baseTop - strip.capacity) {
+      // The canvas moves to hold the wanted rows with room above them; what is baked and still held is carried over.
+      const baseTop = Math.min(wantHi + Math.floor(strip.capacity / 4), wantLo + strip.capacity);
+      const kept = strip.validHi > strip.validLo ? { lo: Math.max(strip.validLo, baseTop - strip.capacity), hi: Math.min(strip.validHi, baseTop) } : undefined;
+      if (kept && kept.hi > kept.lo) {
+        strip.spareContext.clearRect(0, 0, strip.columns, strip.capacity);
+        strip.spareContext.drawImage(strip.canvas, 0, baseTop - strip.baseTop);
+        [strip.canvas, strip.spare] = [strip.spare, strip.canvas];
+        [strip.context, strip.spareContext] = [strip.spareContext, strip.context];
+        strip.validLo = kept.lo;
+        strip.validHi = kept.hi;
+      } else {
+        strip.validLo = strip.validHi = 0;
+      }
+      strip.baseTop = baseTop;
+    }
+    if (strip.validHi <= strip.validLo || wantLo >= strip.validHi || wantHi <= strip.validLo) strip.validLo = strip.validHi = wantLo;
+    const started = performance.now();
+    // A bake ahead (a limited budget) takes only whole slices: a slice of a row or two costs as much as a full one for its apron.
+    const whole = budget === Infinity ? 1 : HALO_STRIP_SLICE_ROWS;
+    while (strip.validHi < wantHi && (budget === Infinity || performance.now() - started < budget)) {
+      const to = Math.min(strip.validHi + HALO_STRIP_SLICE_ROWS, wantHi);
+      if (to - strip.validHi < whole) break;
+      this.bakeHaloSlice(strip, strip.validHi, to);
+      strip.validHi = to;
+    }
+    while (strip.validLo > wantLo && (budget === Infinity || performance.now() - started < budget)) {
+      const from = Math.max(strip.validLo - HALO_STRIP_SLICE_ROWS, wantLo);
+      if (strip.validLo - from < whole) break;
+      this.bakeHaloSlice(strip, from, strip.validLo);
+      strip.validLo = from;
+    }
+    return strip.validLo <= wantLo && strip.validHi >= wantHi;
+  }
+
+  /**
+   * The glow of the rows [from, to): the same field as the per-frame one (the distance to the nearest ribbon and the voice of it, by a chamfer
+   * pass over the silhouettes), taken over the slice and an apron of its reach on both sides, so that the slice is what the whole grid would give.
+   */
+  private bakeHaloSlice(strip: HaloStrip, from: number, to: number): void {
+    const { cell, columns, apron, maskContext, distance, voice, otherDistance, otherVoice } = strip;
+    const unit = this.ribbonUnit;
+    const rows = to - from + 2 * apron;
+    const bottomTime = (from - apron) * strip.rowSeconds;
+    const topTime = (to + apron) * strip.rowSeconds;
+    const bandHeight = rows * cell;
+    const project = (lane: number, seconds: number, offset = 0): Projected => ({ x: lane + offset, y: bandHeight - seconds * this.nearSpeed, scale: 1 });
+    const end = lowerBound(this.notes.length, index => this.notes[index].start <= topTime);
+    const begin = lowerBound(end, index => this.latestExpiry[index] < bottomTime);
+    const shapes: RibbonShape[] = [];
+    for (let index = begin; index < end; index++) {
+      const note = this.notes[index];
+      const key = this.byMidi.get(note.pitch);
+      const shape = key && this.ribbonShape(note, bottomTime - note.start, key, topTime - bottomTime, project);
+      if (shape) shapes.push(shape);
+    }
+    strip.slices++;
+    const top = strip.baseTop - to;
+    if (!shapes.length) {
+      strip.context.clearRect(0, top, columns, to - from);
+      return;
+    }
+    const reach = RIBBON_HALO_REACH * unit;
+    let left = Infinity;
+    let right = -Infinity;
+    for (const { head, tail, half } of shapes) {
+      left = Math.min(left, head.x - half, tail.x - half);
+      right = Math.max(right, head.x + half, tail.x + half);
+    }
+    const firstColumn = clamp(Math.floor((left - reach) / cell), 0, columns - 1);
+    const lastColumn = clamp(Math.ceil((right + reach) / cell), 0, columns - 1);
+    const boxColumns = lastColumn - firstColumn + 1;
+    const voices = this.ramps.length;
+    const step = Math.max(1, Math.floor(255 / (voices + 1)));
+    maskContext.setTransform(1, 0, 0, 1, 0, 0);
+    maskContext.clearRect(0, 0, columns, rows);
+    maskContext.setTransform(1 / cell, 0, 0, 1 / cell, 0, 0);
+    for (const shape of shapes) {
+      maskContext.fillStyle = `rgb(${step * (Math.min(shape.note.voice, voices - 1) + 1)},0,0)`;
+      maskContext.fill(shape.outline);
+    }
+    const pixels = maskContext.getImageData(firstColumn, 0, boxColumns, rows).data;
+    const across = cell / unit;
+    const diagonal = Math.hypot(across, across);
+    // A cell the silhouette touches is a source, at the signed distance read from how much of it is covered; a faintly covered cell
+    // takes the voice of the best covered cell next to it.
+    for (let row = 0; row < rows; row++) {
+      for (let column = 0; column < boxColumns; column++) {
+        const box = row * boxColumns + column;
+        const index = row * columns + firstColumn + column;
+        const covered = pixels[box * 4 + 3] / 255;
+        const solid = covered >= RIBBON_HALO_SOURCE_COVERAGE;
+        distance[index] = solid ? (0.5 - covered) * across : Infinity;
+        voice[index] = solid ? Math.round(pixels[box * 4] / step) : 0;
+        otherDistance[index] = Infinity;
+        otherVoice[index] = 0;
+      }
+    }
+    for (let row = 0; row < rows; row++) {
+      for (let column = 0; column < boxColumns; column++) {
+        const covered = pixels[(row * boxColumns + column) * 4 + 3] / 255;
+        if (covered <= 0 || covered >= RIBBON_HALO_SOURCE_COVERAGE) continue;
+        let best = 0;
+        let bestVoice = 0;
+        for (let nextRow = Math.max(0, row - 1); nextRow <= Math.min(rows - 1, row + 1); nextRow++) {
+          for (let nextColumn = Math.max(0, column - 1); nextColumn <= Math.min(boxColumns - 1, column + 1); nextColumn++) {
+            const next = (nextRow * boxColumns + nextColumn) * 4;
+            const nextCovered = pixels[next + 3] / 255;
+            if (nextCovered >= RIBBON_HALO_SOURCE_COVERAGE && nextCovered > best) {
+              best = nextCovered;
+              bestVoice = Math.round(pixels[next] / step);
+            }
+          }
+        }
+        if (best > 0) {
+          distance[row * columns + firstColumn + column] = (0.5 - covered) * across;
+          voice[row * columns + firstColumn + column] = bestVoice;
+        }
+      }
+    }
+    const lastRow = rows - 1;
+    for (let row = 0; row <= lastRow; row++) {
+      for (let column = firstColumn; column <= lastColumn; column++) {
+        const index = row * columns + column;
+        if (column > firstColumn) {
+          offerHalo(distance, voice, otherDistance, otherVoice, index, distance[index - 1] + across, voice[index - 1]);
+          offerHalo(distance, voice, otherDistance, otherVoice, index, otherDistance[index - 1] + across, otherVoice[index - 1]);
+        }
+        if (row > 0) {
+          const above = index - columns;
+          offerHalo(distance, voice, otherDistance, otherVoice, index, distance[above] + across, voice[above]);
+          offerHalo(distance, voice, otherDistance, otherVoice, index, otherDistance[above] + across, otherVoice[above]);
+          if (column > firstColumn) {
+            offerHalo(distance, voice, otherDistance, otherVoice, index, distance[above - 1] + diagonal, voice[above - 1]);
+            offerHalo(distance, voice, otherDistance, otherVoice, index, otherDistance[above - 1] + diagonal, otherVoice[above - 1]);
+          }
+          if (column < lastColumn) {
+            offerHalo(distance, voice, otherDistance, otherVoice, index, distance[above + 1] + diagonal, voice[above + 1]);
+            offerHalo(distance, voice, otherDistance, otherVoice, index, otherDistance[above + 1] + diagonal, otherVoice[above + 1]);
+          }
+        }
+      }
+    }
+    for (let row = lastRow; row >= 0; row--) {
+      for (let column = lastColumn; column >= firstColumn; column--) {
+        const index = row * columns + column;
+        if (column < lastColumn) {
+          offerHalo(distance, voice, otherDistance, otherVoice, index, distance[index + 1] + across, voice[index + 1]);
+          offerHalo(distance, voice, otherDistance, otherVoice, index, otherDistance[index + 1] + across, otherVoice[index + 1]);
+        }
+        if (row < lastRow) {
+          const below = index + columns;
+          offerHalo(distance, voice, otherDistance, otherVoice, index, distance[below] + across, voice[below]);
+          offerHalo(distance, voice, otherDistance, otherVoice, index, otherDistance[below] + across, otherVoice[below]);
+          if (column < lastColumn) {
+            offerHalo(distance, voice, otherDistance, otherVoice, index, distance[below + 1] + diagonal, voice[below + 1]);
+            offerHalo(distance, voice, otherDistance, otherVoice, index, otherDistance[below + 1] + diagonal, otherVoice[below + 1]);
+          }
+          if (column > firstColumn) {
+            offerHalo(distance, voice, otherDistance, otherVoice, index, distance[below - 1] + diagonal, voice[below - 1]);
+            offerHalo(distance, voice, otherDistance, otherVoice, index, otherDistance[below - 1] + diagonal, otherVoice[below - 1]);
+          }
+        }
+      }
+    }
+    // Only the rows of the slice are kept; the apron rows were there for their distances.
+    const strengths = this.haloStrengths;
+    const levels = strengths.length - 1;
+    const image = new ImageData(columns, to - from);
+    const data = image.data;
+    const blendSpan = RIBBON_HALO_BLEND * RIBBON_HALO_NEAR.decay * unit;
+    for (let row = apron; row < apron + to - from; row++) {
+      for (let column = firstColumn; column <= lastColumn; column++) {
+        const index = row * columns + column;
+        const away = distance[index] / RIBBON_HALO_REACH;
+        if (away >= 1 || !voice[index]) continue;
+        const strength = away <= 0 ? 1 : strengths[Math.round(away * levels)];
+        if (strength <= 0) continue;
+        const ink = (this.ribbonColors[voice[index] - 1] ?? this.ribbonColors[0]).ink;
+        const other = otherVoice[index];
+        const share = other ? 0.5 * (1 - smoothStep(0, 1, (otherDistance[index] - distance[index]) / blendSpan)) : 0;
+        const otherInk = (this.ribbonColors[other - 1] ?? this.ribbonColors[0]).ink;
+        const offset = ((row - apron) * columns + column) * 4;
+        data[offset] = ink[0] + (otherInk[0] - ink[0]) * share;
+        data[offset + 1] = ink[1] + (otherInk[1] - ink[1]) * share;
+        data[offset + 2] = ink[2] + (otherInk[2] - ink[2]) * share;
+        data[offset + 3] = Math.round(255 * strength);
+      }
+    }
+    strip.context.putImageData(image, 0, top);
+  }
+
+  /** Draws the baked glow for the rows the roll shows at `timeSeconds`, shifted by how far time has moved; then bakes a little ahead. */
+  private drawHaloStrip(timeSeconds: number): void {
+    const strip = this.haloStrip();
+    if (!strip) return;
+    const first = Math.floor(timeSeconds / strip.rowSeconds) - 1;
+    const rows = Math.ceil(this.rail / strip.cell) + 3;
+    this.bakeHalo(strip, first, first + rows, Infinity);
+    const g = this.ctx;
+    g.save();
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(strip.canvas, 0, strip.baseTop - (first + rows), strip.columns, rows,
+      0, this.rail - ((first + rows) * strip.rowSeconds - timeSeconds) * this.nearSpeed, strip.columns * strip.cell, rows * strip.cell);
+    g.restore();
+    this.bakeHalo(strip, first - strip.behind, first + rows + strip.ahead, HALO_STRIP_BUDGET_MS);
   }
 
   /** `haloStrength` over the reach, tabulated once. */

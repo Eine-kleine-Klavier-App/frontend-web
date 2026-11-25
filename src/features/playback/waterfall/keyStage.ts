@@ -86,6 +86,8 @@ export interface KeyLight {
   press: number;
   onset: number;
   rgb: Rgb;
+  /** A key that stays up wears its lit finish at this strength (0..1); `press` keeps it down. */
+  hint?: number;
 }
 
 interface KeyLightPaint {
@@ -774,7 +776,8 @@ export class KeyStage {
       contactPixels[ridge + 1] - Math.round(0.12 * this.crestIdle[1]),
       contactPixels[ridge + 2] - Math.round(0.12 * this.crestIdle[2]),
     );
-    if (!(leftPower > 1 || rightPower > 1 || ridgePower > 1 || own?.press)) return;
+    const hint = own?.hint ?? 0;
+    if (!(leftPower > 1 || rightPower > 1 || ridgePower > 1 || own?.press || hint > 0)) return;
 
     context.save();
     context.translate(key.x, rail);
@@ -803,26 +806,29 @@ export class KeyStage {
       }
     }
     const paint = own && press > 0 ? this.lightPaint(own.rgb) : undefined;
-    if (leftPower <= 1 && rightPower <= 1 && ridgePower <= 1 && press === 0) {
+    if (leftPower <= 1 && rightPower <= 1 && ridgePower <= 1 && press === 0 && hint === 0) {
       context.restore();
       return;
     }
-    // The unlit key with the light that falls on it; a lit key's finish is laid over this below.
-    context.save();
-    context.clip(sprite.cover);
-    const x = Math.max(0, key.x - pitch / 2);
-    const end = Math.min(width, key.x + pitch / 2);
-    const depthRows = WASH_DEPTH * (key.black ? BLACK_LENGTH / WHITE_LENGTH : 1);
-    const washTop = key.black ? ELEVATED_WASH_TOP : 0;
-    context.globalCompositeOperation = 'screen';
-    if (key.black) context.globalAlpha = 0.40 + 0.60 * press;
-    context.drawImage(this.wash, x * WASH_COLUMNS / width, washTop, (end - x) * WASH_COLUMNS / width, depthRows,
-      x - key.x, sprite.y, end - x, sprite.length);
-    context.restore();
+    // The unlit key with the light that falls on it; a lit key's finish is laid over this below. The light the
+    // neighbours throw is built only while a key is down, so a key that only stays lit has none.
+    if (press > 0 || leftPower > 1 || rightPower > 1 || ridgePower > 1) {
+      context.save();
+      context.clip(sprite.cover);
+      const x = Math.max(0, key.x - pitch / 2);
+      const end = Math.min(width, key.x + pitch / 2);
+      const depthRows = WASH_DEPTH * (key.black ? BLACK_LENGTH / WHITE_LENGTH : 1);
+      const washTop = key.black ? ELEVATED_WASH_TOP : 0;
+      context.globalCompositeOperation = 'screen';
+      if (key.black) context.globalAlpha = 0.40 + 0.60 * press;
+      context.drawImage(this.wash, x * WASH_COLUMNS / width, washTop, (end - x) * WASH_COLUMNS / width, depthRows,
+        x - key.x, sprite.y, end - x, sprite.length);
+      context.restore();
+    }
     // The lit finish over the unlit key and its light: how much it shows is how strongly the key is lit, so a key on its
     // way up passes evenly from one to the other.
-    if (own && lit > 0) {
-      context.globalAlpha = lit;
+    if (own && Math.max(lit, hint) > 0) {
+      context.globalAlpha = Math.max(lit, hint);
       this.drawSprite(context, 0, -this.padTop, variant, pose, this.litAtlas(own.rgb));
       context.globalAlpha = 1;
     }
