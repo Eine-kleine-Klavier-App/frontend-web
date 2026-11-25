@@ -1,0 +1,10 @@
+<!doctype html><html lang="en"><head><meta charset="UTF-8"/><meta name="viewport" content="width=device-width, initial-scale=1.0"/><title>Demo practice</title>
+<script>
+  (function () {
+    var root = document.documentElement;
+    var theme = new URLSearchParams(location.search).get('theme') === 'light' ? 'light' : 'dark';
+    root.dataset.theme = theme; root.style.colorScheme = theme;
+    root.style.backgroundColor = theme === 'dark' ? '#17141a' : '#e8e5ea';
+  })();
+</script></head>
+<body><div id="root"></div><script type="module" src="/src/demo-practice.tsx"></script></body></html>
