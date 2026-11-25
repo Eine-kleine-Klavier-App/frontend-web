@@ -216,7 +216,7 @@ await test('HTTP gateway sends exactly one flat beam-split request', async () =>
   assert.equal(requests[0].url, '/api/drafts/d/edit/beams/split'); assert.equal(requests[0].method, 'POST');
   assert.deepEqual(plain(requests[0].body), { beam_id: 'beam', before_carrier_id: 'b' });
 });
-await test('HTTP gateway adds and removes a voice of a context through the two universal routes', async () => {
+await test('HTTP gateway moves, opens and retargets the contexts of one mark together', async () => {
   const requests = [];
   stubs['@/core/model/fromView'] = { fromView: view => view };
   stubs['./apiBase'] = { API_BASE: '/api' };
