@@ -1,0 +1,291 @@
+/* The practice screen wears the editor's own chrome (bar, panel, toast: index.css). What is its own is the stage: keys above, notes below, one divider between them. */
+
+/* the groups of settings in the left panel: one open at a time, a closed one says what it is set to */
+.rail-accordion {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+.rail-group {
+  border-bottom: 1px solid var(--color-border);
+}
+.rail-group-head {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  background: transparent;
+  color: var(--color-ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+.rail-group-head:hover {
+  background: color-mix(in srgb, var(--color-ink) 5%, transparent);
+}
+.rail-group-head:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: calc(var(--u) * -0.5);
+}
+.rail-group-icon svg,
+.rail-group-chevron svg {
+  display: block;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  color: var(--color-ink-muted);
+}
+.rail-group-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.rail-group-text .rail-label {
+  margin: 0;
+}
+.rail-group-summary {
+  display: grid;
+  grid-template-rows: 1fr;
+  font-size: var(--text-sm);
+  color: var(--color-ink);
+  transition:
+    grid-template-rows var(--motion-move) var(--ease-in-out),
+    opacity var(--motion-move) var(--ease-in-out);
+}
+.rail-group-summary > span {
+  min-height: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* an open group shows its content instead of what it is set to: the line folds away on the body's own curve, so the head does not jump */
+.rail-group[data-open='true'] .rail-group-summary {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+.rail-group-chevron svg {
+  transition: transform var(--motion-move) var(--ease-in-out);
+}
+.rail-group[data-open='true'] .rail-group-chevron svg {
+  transform: rotate(90deg);
+}
+.rail-group-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  visibility: hidden;
+  transition:
+    grid-template-rows var(--motion-move) var(--ease-in-out),
+    visibility 0s linear var(--motion-move);
+}
+.rail-group[data-open='true'] .rail-group-body {
+  grid-template-rows: 1fr;
+  visibility: visible;
+  transition: grid-template-rows var(--motion-move) var(--ease-in-out);
+}
+.rail-group-inner {
+  min-height: 0;
+  overflow: hidden;
+}
+.rail-group-content {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+.rail-group-content .waterfall-panel {
+  flex: none;
+  overflow: visible;
+  padding: 0;
+}
+.rail-keyboard {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--text-sm);
+  color: var(--color-ink);
+}
+.rail-keyboard svg {
+  flex: none;
+  width: var(--icon-size);
+  height: var(--icon-size);
+  color: var(--color-ink-muted);
+}
+.rail-keyboard[data-ok='true'] svg {
+  color: var(--color-accent-deep);
+}
+.rail-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.rail-field .rail-label {
+  margin: 0;
+}
+.rail-field-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+.rail-field-row .choice {
+  flex: 1;
+}
+.rail-field-reset {
+  flex: none;
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+  padding: 0;
+}
+.rail-field-reset:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+.practice-hint {
+  margin: calc(var(--space-2) * -1) 0 0;
+  font-size: var(--text-xs);
+  color: var(--color-ink-muted);
+}
+
+/* the stage: under the bar, the whole width, laid out the same whether the panel is open or not; the inner box is pushed to the right by the panel as it is,
+   and what goes past the right edge of the stage is cut off */
+.practice-stage {
+  position: absolute;
+  top: var(--editor-bar-h);
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  background: var(--color-backdrop);
+}
+.practice-stage-inner {
+  position: absolute;
+  inset: 0;
+}
+.practice-keys {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  overflow: hidden;
+  background: var(--sky-now, var(--waterfall-sky-black));
+}
+.practice-fit {
+  position: absolute;
+  inset: auto 0 0;
+  isolation: isolate;
+}
+.practice-keys[data-form='keys'] .waterfall-canvas,
+.practice-keys[data-form='keys'] .waterfall-sky,
+.practice-keys[data-form='keys'] .waterfall-lines,
+.practice-keys[data-form='keys'] .waterfall-message {
+  visibility: hidden;
+}
+.practice-notes {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  overflow: hidden;
+  background: var(--color-backdrop);
+}
+/* the strip of notes: a paper band, with the engraving's own ink */
+.practice-strip {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--color-paper);
+  /* the strip is dragged along like the page's line, so the browser must not scroll or select under the finger */
+  touch-action: none;
+  user-select: none;
+  cursor: grab;
+  --color-ink: var(--score-ink);
+  --color-ink-muted: var(--score-ink-muted);
+  --color-accent: var(--score-accent);
+  --color-accent-deep: var(--score-accent-deep);
+}
+.practice-strip[data-grabbing='true'] {
+  cursor: grabbing;
+}
+.practice-strip-sheet {
+  position: absolute;
+  left: 0;
+  top: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
+/* the bar the line is in and the notes that are waited for are drawn on the playback layers (PlaybackLayers.ts), over the sheet and under the pinned head,
+   the copy of what comes next and the line; the box of the bar in the sheet is only the anchor the browser places and the layer reads */
+.practice-strip .playback-layer {
+  z-index: 1;
+}
+.practice-strip-wash {
+  position: absolute;
+  display: none;
+  pointer-events: none;
+}
+/* the clef, key and time signature of the bar the line is in, pinned at the left once the engraving's own have moved off; paper under it hides the notes that pass beneath */
+.practice-strip-head {
+  z-index: 2;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  display: none;
+  overflow: hidden;
+  background: var(--color-paper);
+  box-shadow: 0 0 var(--space-2) color-mix(in srgb, var(--score-ink) 18%, transparent);
+  pointer-events: none;
+}
+.practice-strip-head-art {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+/* what the route plays after a repeat or a volta, shown ahead of the line: grey, over the music that stands there and is not played next. It is drawn in the sheet's own
+   coordinates (the same move as the sheet), its clip begins where the line will be when it jumps. */
+.practice-strip-ghost {
+  z-index: 2;
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: none;
+  transform-origin: 0 0;
+  pointer-events: none;
+}
+.practice-strip-ghost-clip {
+  position: absolute;
+  top: 0;
+  overflow: hidden;
+  background: var(--color-paper);
+}
+.practice-strip-ghost-art {
+  position: absolute;
+  top: 0;
+  left: 0;
+  filter: grayscale(1);
+  opacity: 0.45;
+}
+.practice-strip-cursor {
+  z-index: 2;
+  position: absolute;
+  width: 0.125rem;
+  background: var(--score-accent);
+  opacity: 0.9;
+  pointer-events: none;
+}
+
+.practice-count {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  font-size: calc(var(--u) * 36);
+  font-weight: 600;
+  color: #fff;
+  text-shadow: 0 0 2rem rgba(0, 0, 0, 0.6);
+  z-index: 8;
+}

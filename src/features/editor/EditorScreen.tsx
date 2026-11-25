@@ -3,8 +3,8 @@ import { UndoIcon, RedoIcon, AlertIcon, CloseIcon, LockIcon, CollapsePanelIcon }
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useMotionValue, useReducedMotion, useTransform, type MotionStyle } from 'motion/react';
 import { PANEL_CLEARED, reducedFade, settleMotion, springSnappy, useSidePanelMotion } from '@/styles/motion';
-import { ChoiceGroup } from '@/ui/ChoiceGroup';
-import { useParams } from 'react-router-dom';
+import { ViewTabs } from '@/features/editor/ViewTabs';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import { useAuthStore } from '@/core/auth/authStore';
 import { PanelToolbar, PanelToolbarControl } from '@/ui/PanelToolbar';
 import { EditorDocumentActions } from './EditorDocumentActions';
@@ -42,10 +42,6 @@ import {
 } from '@/core/model/query';
 
 type EditorView = 'editor' | 'waterfall';
-const VIEW_OPTIONS: { value: EditorView; label: string }[] = [
-  { value: 'editor', label: 'Score' },
-  { value: 'waterfall', label: 'Waterfall' },
-];
 /** While the waterfall plays untouched, the bar leaves the roll alone after this long. */
 const BAR_IDLE_MS = 3000;
 /** how often the idle bar checks whether it should rest */
@@ -129,8 +125,13 @@ export default function EditorScreen() {
   // The waterfall is a view of the desk. The left panel belongs to both views — the tools in the
   // editor, what the waterfall lets you set in the waterfall — and either view can hide it; the
   // bar is the same in both, so nothing in it moves when the view changes.
-  const [view, setView] = useState<EditorView>('editor');
-  const [requestedView, requestView] = useState<EditorView>('editor');
+  // The practice screen's tabs come back here with the view they name.
+  const location = useLocation();
+  const navigate = useNavigate();
+  // the practice's own tabs come back here with the view they name
+  const openingView: EditorView = (location.state as { view?: string } | null)?.view === 'waterfall' ? 'waterfall' : 'editor';
+  const [view, setView] = useState<EditorView>(openingView);
+  const [requestedView, requestView] = useState<EditorView>(openingView);
   const [paintedScore, setPaintedScore] = useState<ScoreDocument | null>(null);
   const [paintedWaterfall, setPaintedWaterfall] = useState(false);
   const onScorePaint = useCallback((ready: boolean) => {
@@ -569,7 +570,14 @@ export default function EditorScreen() {
           {/* where the panel's own foot is not on screen, the light switch is in the bar */}
           {!wide && <LightSwitch />}
           {/* the view switch is the bar's last item: it stays where it is whichever view is shown */}
-          <ChoiceGroup value={requestedView} onChange={requestView} options={VIEW_OPTIONS} ariaLabel="View" variant="tabs" />
+          <ViewTabs
+            value={requestedView}
+            practice={reading}
+            onChange={(next) => {
+              if (next === 'practice') navigate(`/scores/${encodeURIComponent(activeId ?? '')}/practice`, { state: { returnTo: (location.state as { returnTo?: string } | null)?.returnTo } });
+              else requestView(next);
+            }}
+          />
         </div>
       </motion.header>
       <motion.aside

@@ -212,6 +212,13 @@ export function PreviewPanel({
       });
     }
   };
+  const practiceScore = () => {
+    if (score && ready && !busy) {
+      navigate(`/scores/${encodeURIComponent(score.id)}/practice`, {
+        state: { returnTo: `${location.pathname}${location.search}` },
+      });
+    }
+  };
   const selectBranch = (branch: BranchSummary) => {
     if (!id) return;
     setError(null);
@@ -293,6 +300,9 @@ export function PreviewPanel({
               {shown && track && <PreviewPlayButton score={track} transport={transport} size="lg" label disabled={!ready} />}
               <Button variant="secondary" onClick={openScore} disabled={!ready || !score || busy}>
                 Open score
+              </Button>
+              <Button variant="secondary" onClick={practiceScore} disabled={!ready || !score || busy}>
+                Practice
               </Button>
               {editingScoreId && <OpenInEditorButton scoreId={editingScoreId} disabled={!ready || !score || busy} active={open} />}
             </div>

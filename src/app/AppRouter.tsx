@@ -7,6 +7,7 @@ import CollectionView from '@/features/library/CollectionView';
 import { COLLECTION_PARAM } from '@/features/library/collectionParam';
 import LibraryScreen from '@/features/library/LibraryScreen';
 import EditorScreen from '@/features/editor/EditorScreen';
+import PracticeScreen from '@/features/practice/PracticeScreen';
 import AuthorProfileScreen from '@/features/browse/AuthorProfileScreen';
 import YouScreen from '@/features/browse/YouScreen';
 import { useAuthStore } from '@/core/auth/authStore';
@@ -14,6 +15,7 @@ import { useAuthPrompt } from '@/core/auth/authPrompt';
 import { withPreview } from '@/features/browse/previewRoute';
 import { PageReadinessScope, PageTransition, TransitionLoading, usePageReady, usePageTransitionPhase, useScreenOpacity } from '@/ui/PageTransition';
 import { usePlaybackValue } from '@/core/playback/PlaybackController';
+import { usePractice } from '@/core/practice/PracticeSession';
 import { useWakeLock } from '@/ui/useWakeLock';
 
 function RootRoute() {
@@ -158,6 +160,7 @@ function WorkspaceRoutes({ location }: { location: Location }) {
         <div className="workspace-route-content" ref={content}>
           <Routes location={routed}>
             <Route path="/scores/:scoreId" element={<EditorRoute />} />
+            <Route path="/scores/:scoreId/practice" element={<PracticeScreen />} />
             <Route path="/edit/:draftId" element={<EditorRoute />} />
           </Routes>
         </div>
@@ -172,13 +175,15 @@ function WorkspaceRoutes({ location }: { location: Location }) {
  * owns a second transition inside its persistent shell. */
 function RoutedApp() {
   const location = useLocation();
-  // The waterfall is a view of the editor and plays through the same playback.
+  // The waterfall is a view of the editor and plays through the same playback; a practice session
+  // can run with no sound at all, so it is asked for on its own.
   const playing = usePlaybackValue((state) => state.playing);
-  useWakeLock(playing);
+  const practising = usePractice().phase !== 'idle';
+  useWakeLock(playing || practising);
   // Browse views animate inside AppShell so its navigation remains persistent. Crossing the
   // browse/editor boundary replaces the whole application surface with the same default
   // lifecycle. Auth stays outside this layer and owns its separate welcome/reveal sequence.
-  const routeFamily = /^\/(?:edit|scores)\/[^/]+\/?$/i.test(location.pathname) ? 'editor' : 'browse';
+  const routeFamily = /^\/(?:edit|scores)\/[^/]+(?:\/practice)?\/?$/i.test(location.pathname) ? 'editor' : 'browse';
   const collection = location.pathname === '/library' ? new URLSearchParams(location.search).get(COLLECTION_PARAM) : null;
   const requestKey = collection ? `${location.pathname}:${collection}` : location.pathname;
 
