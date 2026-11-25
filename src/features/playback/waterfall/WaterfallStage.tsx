@@ -3,7 +3,11 @@ import { useReducedMotion } from 'motion/react';
 import { useEditor } from '@/app/store';
 import { resolveVoiceColor } from '@/core/model/voiceColors';
 import { playback, usePlaybackValue } from '@/core/playback/PlaybackController';
+import { navigation, useNavigationValue } from '@/core/navigation/ScoreNavigation';
+import { keyMarks } from '@/core/keys/KeyMarks';
 import { WaterfallScene, type PedalInterval, type WaterfallLayout } from './rollScene';
+import { attachRollScrub } from './rollScrub';
+import type { TransportScrub } from '../Transport';
 import WaterfallPrerenderWorker from './WaterfallPrerender.worker?worker';
 import {
   prepareWaterfallWindow, waterfallWindowId,
@@ -25,7 +29,6 @@ interface RenderSettings {
   pedals: PedalInterval[];
   ramps: VoiceRamp[];
   sky: WaterfallSky;
-  tilt: number;
   octaveLines: boolean;
   measureLines: boolean;
   backgroundDust: boolean;
@@ -82,36 +85,41 @@ export function WaterfallStage({
   preparingView = false,
   onFirstFrame,
   stripColor,
-  tilt,
   viewportRef,
   octaveLines,
   measureLines,
   backgroundDust,
+  scrub,
 }: {
   sky: WaterfallSky;
   active: boolean;
   preparingView?: boolean;
   onFirstFrame?: (ready: boolean) => void;
   stripColor: string;
-  tilt: number;
   viewportRef: RefObject<HTMLDivElement>;
   octaveLines: boolean;
   measureLines: boolean;
   backgroundDust: boolean;
+  /** What moves the position by hand; the roll is scrolled with it (the wheel, a trackpad, a drag along it). */
+  scrub?: TransportScrub;
 }) {
   const document = useEditor((s) => s.document);
   const sourceIdentity = useEditor((s) => s.source);
   const voiceColors = useEditor((s) => s.voiceColors);
-  const map = usePlaybackValue((state) => state.map);
+  const map = useNavigationValue((state) => state.map);
   const mapLoading = usePlaybackValue((state) => state.mapLoading);
   const [unavailable, setUnavailable] = useState(false);
   const [mapFailure, setMapFailure] = useState(false);
   const [preparing, setPreparing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const keyboardRef = useRef<HTMLCanvasElement>(null);
+  const skyRef = useRef<HTMLCanvasElement>(null);
+  const linesRef = useRef<HTMLCanvasElement>(null);
   const updateSettings = useRef<(settings: RenderSettings) => void>(() => {});
   const activeRef = useRef(active);
   activeRef.current = active;
+  const scrubRef = useRef(scrub);
+  scrubRef.current = scrub;
   const renderIntent = useRef(preparingView);
   renderIntent.current = preparingView;
   const reportFirstFrame = useRef(onFirstFrame);
@@ -135,7 +143,7 @@ export function WaterfallStage({
     if (!needsMap || !sourceIdentity) return;
     let current = true;
     void playback.prepareMap().then(() => {
-      if (current && !playback.getState().map) setMapFailure(true);
+      if (current && !navigation.getState().map) setMapFailure(true);
     });
     return () => { current = false; };
   }, [needsMap, sourceIdentity, document]);
@@ -148,16 +156,24 @@ export function WaterfallStage({
   useEffect(() => {
     const canvas = canvasRef.current;
     const keyboard = keyboardRef.current;
+    const sky = skyRef.current;
+    const lines = linesRef.current;
     const surface = canvas?.parentElement;
-    if (!canvas || !keyboard || !surface) return;
+    if (!canvas || !keyboard || !sky || !lines || !surface) return;
     let scene: WaterfallScene;
     try {
-      scene = new WaterfallScene(canvas, undefined, keyboard);
+      scene = new WaterfallScene(canvas, undefined, keyboard, { sky, lines });
     } catch {
       setUnavailable(true);
       return;
     }
 
+    const detachScrub = attachRollScrub(canvas, {
+      scrub: () => scrubRef.current,
+      pixelsPerSecond: () => scene.pixelsPerSecond,
+      keysTop: () => scene.keysTop,
+      totalMs: () => navigation.getState().map?.extentMs ?? 0,
+    });
     const cache = new WaterfallWindowCache();
     let worker: Worker | undefined;
     let useWorker = typeof Worker !== 'undefined';
@@ -179,7 +195,7 @@ export function WaterfallStage({
     let readinessFrame = 0;
     let firstFrameReported = false;
 
-    const playhead = () => Math.max(0, playback.getTimeMs());
+    const playhead = () => Math.max(0, navigation.getTimeMs());
 
     const clearPreparation = () => {
       const target = preparation;
@@ -229,6 +245,7 @@ export function WaterfallStage({
       if (!contextAvailable || !layout || !settings?.ramps.length) return false;
       const seconds = timeMs / MS_PER_SECOND;
       const prepared = source && cache.get(waterfallWindowId(source, seconds));
+      scene.setKeyMarks(keyMarks.get());
       scene.render(seconds, prepared);
       presented = timeMs;
       dirty = false;
@@ -378,6 +395,10 @@ export function WaterfallStage({
     canvas.addEventListener('contextrestored', onContextRestored);
     keyboard.addEventListener('contextlost', onContextLost);
     keyboard.addEventListener('contextrestored', onContextRestored);
+    sky.addEventListener('contextlost', onContextLost);
+    sky.addEventListener('contextrestored', onContextRestored);
+    lines.addEventListener('contextlost', onContextLost);
+    lines.addEventListener('contextrestored', onContextRestored);
 
     updateSettings.current = (next) => {
       if (settings?.notes !== next.notes || settings.bars !== next.bars || settings.pedals !== next.pedals) {
@@ -389,7 +410,6 @@ export function WaterfallStage({
       if (settings?.sky !== next.sky) {
         scene.setBackground(readCssToken(canvas, next.sky === 'black' ? '--waterfall-sky-black' : '--waterfall-sky-grey'));
       }
-      if (settings?.tilt !== next.tilt) scene.setTilt(next.tilt);
       if (settings?.octaveLines !== next.octaveLines || settings?.measureLines !== next.measureLines) {
         scene.setGuides(next.octaveLines, next.measureLines);
       }
@@ -433,11 +453,19 @@ export function WaterfallStage({
       }
       const audioMs = playhead();
       if (dirty || audioMs !== presented) draw(audioMs);
+      // A stage that is on screen from the start (a screen that opens in the waterfall) reports its first frame here: it is never prepared out of view.
+      if (!firstFrameReported && settings?.map && presented !== undefined) {
+        firstFrameReported = true;
+        reportFirstFrame.current?.(true);
+      }
       refill(audioMs);
     };
     frame = requestAnimationFrame(tick);
+    const unsubscribeKeyMarks = keyMarks.subscribe(() => { dirty = true; });
 
     return () => {
+      unsubscribeKeyMarks();
+      detachScrub();
       cancelAnimationFrame(frame);
       detachBuffer();
       cancelAnimationFrame(readinessFrame);
@@ -449,6 +477,10 @@ export function WaterfallStage({
       canvas.removeEventListener('contextrestored', onContextRestored);
       keyboard.removeEventListener('contextlost', onContextLost);
       keyboard.removeEventListener('contextrestored', onContextRestored);
+      sky.removeEventListener('contextlost', onContextLost);
+      sky.removeEventListener('contextrestored', onContextRestored);
+      lines.removeEventListener('contextlost', onContextLost);
+      lines.removeEventListener('contextrestored', onContextRestored);
       clearPreparation();
       stopWorker();
       cache.clear();
@@ -458,15 +490,17 @@ export function WaterfallStage({
 
   useEffect(() => {
     updateSettings.current({
-      notes, bars, pedals, ramps, sky, tilt, octaveLines, measureLines, backgroundDust, stripColor, map,
+      notes, bars, pedals, ramps, sky, octaveLines, measureLines, backgroundDust, stripColor, map,
     });
-  }, [notes, bars, pedals, ramps, sky, tilt, octaveLines, measureLines, backgroundDust, stripColor, map]);
+  }, [notes, bars, pedals, ramps, sky, octaveLines, measureLines, backgroundDust, stripColor, map]);
 
   return (
     <>
       <canvas ref={canvasRef} className="waterfall-canvas" role="img" aria-label="Notes falling onto a piano keyboard, each in the colour of its voice" />
       <canvas ref={keyboardRef} className="waterfall-keyboard-canvas" aria-hidden="true"
         style={{ position: 'absolute', left: 0, bottom: 0, display: 'block', width: '100%', pointerEvents: 'none' }} />
+      <canvas ref={skyRef} className="waterfall-sky" aria-hidden="true" />
+      <canvas ref={linesRef} className="waterfall-lines" aria-hidden="true" />
       {unavailable && <p className="waterfall-message" role="alert">The waterfall could not start its drawing surface.</p>}
       {!unavailable && mapFailure && !map && <p className="waterfall-message" role="alert">The playback map could not be loaded.</p>}
       {!unavailable && mapLoading && !preparing && <p className="waterfall-message" role="status">Loading the playback map…</p>}

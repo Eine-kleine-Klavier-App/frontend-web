@@ -1,57 +1,20 @@
-import { useId, useMemo, type CSSProperties } from 'react';
+import { useId, useMemo, useState, type CSSProperties } from 'react';
 import { useEditor } from '@/app/store';
 import { DEFAULT_VOICE_COLORS, resolveVoiceColor } from '@/core/model/voiceColors';
-import { ChoiceGroup, ChoiceThumb } from '@/ui/ChoiceGroup';
-import { RangeField } from '@/ui/RangeField';
-import { VoiceColorField } from '@/ui/VoiceColorField';
+import { ChoiceThumb } from '@/ui/ChoiceGroup';
+import { VoiceColorEditor } from '@/ui/VoiceColorEditor';
+import { VoicePicker } from '@/ui/VoicePicker';
 import { voiceRamp, rgba } from './waterfallPalette';
 import { ListeningControls } from '../ListeningControls';
 import { WATERFALL_SKIES, type WaterfallSky } from './WaterfallStage';
 
-const TILT_OPTIONS = [
-  { value: '-1', label: 'Sides', ariaLabel: 'From sides', title: 'From sides' },
-  { value: '0', label: 'Vertical' },
-  { value: '1', label: 'Centre', ariaLabel: 'From centre', title: 'From centre' },
-];
-
-/** Session controls for the falling notes, keyboard light, voice colours and sky. */
-export function WaterfallPanel({
-  listening = false,
-  sky,
-  onSky,
-  stripColor,
-  onStripColor,
-  tilt,
-  onTilt,
-  octaveLines,
-  onOctaveLines,
-  measureLines,
-  onMeasureLines,
-  backgroundDust,
-  onBackgroundDust,
-}: {
-  listening?: boolean;
-  sky: WaterfallSky;
-  onSky: (sky: WaterfallSky) => void;
-  stripColor: string;
-  onStripColor: (color: string) => void;
-  tilt: number;
-  onTilt: (tilt: number) => void;
-  octaveLines: boolean;
-  onOctaveLines: (visible: boolean) => void;
-  measureLines: boolean;
-  onMeasureLines: (visible: boolean) => void;
-  backgroundDust: boolean;
-  onBackgroundDust: (visible: boolean) => void;
-}) {
+/** The colour of each voice: which voice, then how it looks in the waterfall (its ramp and how many notes it has), then the colour itself as in the Score. */
+export function VoiceColourSection({ label = true }: { label?: boolean }) {
   const measures = useEditor((s) => s.document.measures);
   const voices = useEditor((s) => s.document.voices);
   const voiceColors = useEditor((s) => s.voiceColors);
   const setVoiceColor = useEditor((s) => s.setVoiceColor);
-  const tiltPercent = Math.round(tilt * 100);
-  const tiltText = tilt === 0 ? 'Vertical' : `${Math.abs(tiltPercent)}% from ${tilt < 0 ? 'sides' : 'centre'}`;
-  const swatchGroup = useId();
-  const skyGroup = useId();
+  const [voiceId, setVoiceId] = useState<string | null>(null);
   const noteCounts = useMemo(() => {
     const counts = new Map<string, number>();
     for (const measure of measures) {
@@ -61,6 +24,63 @@ export function WaterfallPanel({
     }
     return counts;
   }, [measures]);
+  const active = voices.find((voice) => voice.id === voiceId) ?? voices[0];
+  if (!active) return null;
+  const color = resolveVoiceColor(active.id, active.index, voiceColors);
+  const ramp = voiceRamp(color);
+  const count = noteCounts.get(active.id) ?? 0;
+  return (
+    <section className="waterfall-section" aria-label="Voice colour">
+      {label && <span className="rail-label">Voice colour</span>}
+      {voices.length > 1 && (
+        <VoicePicker
+          voices={voices.map((voice) => ({ id: voice.id, number: voice.index + 1, color: resolveVoiceColor(voice.id, voice.index, voiceColors), label: `Voice ${voice.index + 1}` }))}
+          value={active.id}
+          onChange={setVoiceId}
+        />
+      )}
+      <div className="waterfall-voice" role="group" aria-label={`Voice ${active.index + 1} colour`}>
+        <div className="waterfall-voice-head">
+          <span>Voice {active.index + 1}</span>
+          <small>{count} {count === 1 ? 'note' : 'notes'}</small>
+        </div>
+        <div className="voice-ramp" style={{ '--near': rgba(ramp.near), '--far': rgba(ramp.far) } as CSSProperties} aria-hidden="true" />
+        <VoiceColorEditor voiceId={active.id} voiceNumber={active.index + 1} color={color} onChange={(next) => setVoiceColor(active.id, next)} />
+      </div>
+    </section>
+  );
+}
+
+/** Session controls for the falling notes, keyboard light, voice colours and sky. */
+export function WaterfallPanel({
+  listening = false,
+  voices = true,
+  sky,
+  onSky,
+  stripColor,
+  onStripColor,
+  octaveLines,
+  onOctaveLines,
+  measureLines,
+  onMeasureLines,
+  backgroundDust,
+  onBackgroundDust,
+}: {
+  listening?: boolean;
+  /** the colours of the voices are a part of this panel; practice shows them as a group of their own */
+  voices?: boolean;
+  sky: WaterfallSky;
+  onSky: (sky: WaterfallSky) => void;
+  stripColor: string;
+  onStripColor: (color: string) => void;
+  octaveLines: boolean;
+  onOctaveLines: (visible: boolean) => void;
+  measureLines: boolean;
+  onMeasureLines: (visible: boolean) => void;
+  backgroundDust: boolean;
+  onBackgroundDust: (visible: boolean) => void;
+}) {
+  const skyGroup = useId();
   return (
     <div className="waterfall-panel">
       {listening && <ListeningControls />}
@@ -69,20 +89,6 @@ export function WaterfallPanel({
         <label className="waterfall-guide"><span>Octave lines</span><input type="checkbox" checked={octaveLines} onChange={(event) => onOctaveLines(event.target.checked)} /></label>
         <label className="waterfall-guide"><span>Measure lines</span><input type="checkbox" checked={measureLines} onChange={(event) => onMeasureLines(event.target.checked)} /></label>
       </section>
-      <section className="waterfall-section waterfall-tilt" aria-label="Note tilt">
-        <span className="rail-label">Note tilt</span>
-        <ChoiceGroup value={TILT_OPTIONS.some((option) => Number(option.value) === tilt) ? String(tilt) : null} onChange={(value) => onTilt(Number(value))} options={TILT_OPTIONS} ariaLabel="Note tilt presets" />
-        <RangeField
-          label="Manual tilt"
-          output={`${tiltPercent > 0 ? '+' : ''}${tiltPercent}%`}
-          min={-100}
-          max={100}
-          step={1}
-          value={tiltPercent}
-          aria-valuetext={tiltText}
-          onChange={(event) => onTilt(Number(event.target.value) / 100)}
-        />
-      </section>
       <section className="waterfall-section" aria-label="Pedal light">
         <span className="rail-label">Pedal light</span>
         <label className="waterfall-strip-color">
@@ -90,40 +96,7 @@ export function WaterfallPanel({
           <input type="color" value={stripColor} aria-label="Pedal light base colour" onChange={(event) => onStripColor(event.target.value)} />
         </label>
       </section>
-      <section className="waterfall-section" aria-label="Voices">
-        <span className="rail-label">Voices</span>
-        {voices.map((voice) => {
-          const chosen = resolveVoiceColor(voice.id, voice.index, voiceColors);
-          const ramp = voiceRamp(chosen);
-          const count = noteCounts.get(voice.id) ?? 0;
-          return (
-            <div key={voice.id} className="waterfall-voice" role="group" aria-label={`Voice ${voice.index + 1} colour`}>
-              <div className="waterfall-voice-head">
-                <span>Voice {voice.index + 1}</span>
-                <small>{count} {count === 1 ? 'note' : 'notes'}</small>
-              </div>
-              <div className="voice-ramp" style={{ '--near': rgba(ramp.near), '--far': rgba(ramp.far) } as CSSProperties} aria-hidden="true" />
-              <div className="voice-swatch-row keycap-grid">
-                {DEFAULT_VOICE_COLORS.map((color) => (
-                  <button
-                    key={color}
-                    type="button"
-                    className="voice-swatch"
-                    style={{ '--vc': color } as CSSProperties}
-                    title={color}
-                    aria-label={`Voice ${voice.index + 1} colour ${color}`}
-                    aria-pressed={color === chosen}
-                    onClick={() => setVoiceColor(voice.id, color)}
-                  >
-                    {color === chosen && <ChoiceThumb groupId={`${swatchGroup}-${voice.id}`} />}
-                  </button>
-                ))}
-              </div>
-              <VoiceColorField value={chosen} label={`Voice ${voice.index + 1}`} onChange={(color) => setVoiceColor(voice.id, color)} />
-            </div>
-          );
-        })}
-      </section>
+      {voices && <VoiceColourSection />}
       <section className="waterfall-section" aria-label="Sky">
         <span className="rail-label">Sky</span>
         <div className="sky-row keycap-grid" role="radiogroup" aria-label="Sky">

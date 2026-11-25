@@ -1,6 +1,6 @@
 import { measureBeats } from '@/core/model/contexts';
 import type { ScoreDocument } from '@/core/model/score';
-import { timeInSegment } from '@/core/playback/PlaybackController';
+import { timeInSegment } from '@/core/navigation/ScoreNavigation';
 import type { PlaybackMap } from '@/core/playback/PlaybackGateway';
 
 const MS_PER_SECOND = 1000;
