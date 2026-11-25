@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from 'react';
 import { playback, usePlaybackValue } from '@/core/playback/PlaybackController';
+import { useNavigationValue } from '@/core/navigation/ScoreNavigation';
 import { DEFAULT_PLAYBACK_SETTINGS, type PlaybackSettings } from '@/core/playback/PlaybackSettings';
 import { useEditor } from '@/app/store';
 import { errorMessage } from '@/core/errorMessage';
@@ -14,7 +15,9 @@ const RANGE_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', '
 export function ListeningControls() {
   const source = useEditor((state) => state.source);
   const settings = usePlaybackValue((state) => state.listening);
-  const ready = usePlaybackValue((state) => !!state.map && !state.mapLoading);
+  const hasMap = useNavigationValue((state) => !!state.map);
+  const mapLoading = usePlaybackValue((state) => state.mapLoading);
+  const ready = hasMap && !mapLoading;
   const [draft, setDraft] = useState<PlaybackSettings>(settings);
   const [error, setError] = useState<string | null>(null);
   const hintId = useId();
