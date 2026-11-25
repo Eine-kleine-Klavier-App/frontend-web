@@ -8,8 +8,7 @@ import { useDismiss } from '@/ui/useDismiss';
 import { DEFAULT_VOICE_COLORS, resolveVoiceColor } from '@/core/model/voiceColors';
 import { voiceCarrierIds, orderedVoiceCarrierIds } from '@/core/model/query';
 import { PitchModePrompt } from './PitchModePrompt';
-import { VoiceColorField } from '@/ui/VoiceColorField';
-import { VoiceColorSliders } from '@/ui/VoiceColorSliders';
+import { VoiceColorEditor } from '@/ui/VoiceColorEditor';
 
 function staffLabel(staffOrder: string[], id: string): string {
   const i = staffOrder.indexOf(id);
@@ -240,28 +239,7 @@ export function ContextStrip({ readOnly = false }: { readOnly?: boolean }) {
               Select all notes
             </button>
             <span className="strip-menu-label">Colour</span>
-            <div className="voice-swatch-row keycap-grid">
-              {DEFAULT_VOICE_COLORS.map((c) => (
-                <button
-                  key={c}
-                  type="button"
-                  className="voice-swatch"
-                  style={{ '--vc': c } as CSSProperties}
-                  title={c}
-                  aria-label={`Voice colour ${c}`}
-                  aria-pressed={c === voiceColor}
-                  onClick={() => setVoiceColor(voice.id, c)}
-                >
-                  {c === voiceColor && <ChoiceThumb groupId={swatchGroupId} />}
-                </button>
-              ))}
-            </div>
-            <VoiceColorField value={voiceColor} label={`Voice ${voice.index + 1}`} onChange={(c) => setVoiceColor(voice.id, c)} />
-            <VoiceColorSliders
-              key={voice.id}
-              value={voiceColor}
-              onChange={(hex) => setVoiceColor(voice.id, hex)}
-            />
+            <VoiceColorEditor voiceId={voice.id} voiceNumber={voice.index + 1} color={voiceColor} onChange={(c) => setVoiceColor(voice.id, c)} />
           </motion.div>
         )}
       </AnimatePresence>
