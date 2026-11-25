@@ -6,8 +6,7 @@ import { KeySignatureChoices } from './icons';
 import { VoltaPassesTable } from './VoltaPassesTable';
 import { CloseIcon } from '@/ui/icons';
 import { ChoiceGroup } from '@/ui/ChoiceGroup';
-import { MultiChoice } from '@/ui/MultiChoice';
-import { alterationsOfFifths, keyOfAlterations, ContextIndex, toBeats } from '@/core/model/contexts';
+import { alterationsOfFifths, keyOfAlterations, ContextIndex, markGroup, toBeats } from '@/core/model/contexts';
 import { derivedEnding } from '@/core/model/repeats';
 import type {
   ClefContext,
@@ -111,28 +110,26 @@ function ContextBody({ context }: { context: ScoreContext }) {
 
   const setFactor = useEditor((s) => s.setContextFactor);
   const removable = !isOpening(doc, context);
-  const [dynamicUpdating, setDynamicUpdating] = useState(false);
+  // a mark for several voices is one context for each voice: it is edited and removed together
+  const marks = markGroup(doc, context);
   const dynamicPending = useRef(false);
-  const setSharedDynamic = async (dynamic: Dynamic, voiceIds: string[]) => {
+  const setMarkDynamic = async (dynamic: Dynamic) => {
     if (context.kind !== 'dynamic' || dynamicPending.current) return;
     dynamicPending.current = true;
-    setDynamicUpdating(true);
     try {
-      await dispatch({ type: 'setDynamic', measureId: context.measureId, position: context.position, voiceIds, dynamic });
+      await dispatch({ type: 'setDynamic', measureId: context.measureId, position: context.position, voiceIds: marks.map((mark) => (mark as DynamicContext).voiceId), dynamic });
       const state = useEditor.getState();
       if (state.error) return;
       const replacement = state.document.contexts.find((c) => c.kind === 'dynamic' && c.measureId === context.measureId
-        && toBeats(c.position) === toBeats(context.position) && c.dynamic === dynamic
-        && voiceIds.every((id) => c.voiceIds.includes(id)));
+        && toBeats(c.position) === toBeats(context.position) && c.dynamic === dynamic && c.voiceId === context.voiceId);
       if (replacement) state.selectStructure(replacement.id, false);
     } finally {
       dynamicPending.current = false;
-      setDynamicUpdating(false);
     }
   };
   const remove = () => {
     select(null);
-    void dispatch({ type: 'deleteBatch', entityIds: [context.id] });
+    void dispatch({ type: 'deleteBatch', entityIds: marks.map((mark) => mark.id) });
   };
   const resetHeight = bodyFactor(doc.presentation, context.id) !== 1 ? (
     <div className="props-section">
@@ -146,7 +143,7 @@ function ContextBody({ context }: { context: ScoreContext }) {
     case 'dynamic':
       return (
         <>
-          <ObjectHeader title={`Dynamic ${context.dynamic}`} sub={voiceLabel(doc, context.voiceIds)} />
+          <ObjectHeader title={`Dynamic ${context.dynamic}`} sub={voiceLabel(doc, marks.map((mark) => (mark as DynamicContext).voiceId))} />
           <div className="props-section">
             <div className="props-section-label">Level</div>
             <ChoiceGroup<Dynamic>
@@ -154,16 +151,15 @@ function ContextBody({ context }: { context: ScoreContext }) {
               variant="wrap"
               value={context.dynamic}
               options={DYNAMICS.map((d) => ({ value: d, label: <i className="dynamic-label">{d}</i> }))}
-              onChange={(dynamic) => void setSharedDynamic(dynamic, context.voiceIds)}
+              onChange={(dynamic) => void setMarkDynamic(dynamic)}
             />
           </div>
-          <ContextVoices context={context} busy={dynamicUpdating} onShareDynamic={voiceIds => setSharedDynamic(context.dynamic, voiceIds)} />
           {resetHeight}
           {removable && <RemoveButton label="Remove dynamic" onClick={remove} />}
         </>
       );
     case 'hairpin':
-      return <HairpinBody context={context} resetHeight={resetHeight} onRemove={remove} />;
+      return <HairpinBody context={context} marks={marks as HairpinContext[]} resetHeight={resetHeight} onRemove={remove} />;
     case 'refrain':
       return <RefrainBody context={context} onRemove={remove} />;
     case 'volta':
@@ -173,8 +169,7 @@ function ContextBody({ context }: { context: ScoreContext }) {
     case 'slur':
       return (
         <>
-          <ObjectHeader title="Slur" sub={voiceLabel(doc, context.voiceIds)} />
-          <ContextVoices context={context} />
+          <ObjectHeader title="Slur" sub={voiceLabel(doc, [context.voiceId])} />
           <RemoveButton label="Remove slur" onClick={remove} />
         </>
       );
@@ -189,44 +184,6 @@ function ContextBody({ context }: { context: ScoreContext }) {
     case 'keySignature':
       return <KeyBody context={context} removable={removable} onRemove={remove} />;
   }
-}
-
-/** The last voice stays; opening dynamics keep every voice they already cover. */
-function ContextVoices({ context, busy = false, onShareDynamic }: {
-  context: DynamicContext | HairpinContext | SlurContext;
-  busy?: boolean;
-  onShareDynamic?: (voiceIds: string[]) => Promise<void>;
-}) {
-  const doc = useEditor((s) => s.document);
-  const dispatch = useEditor((s) => s.dispatch);
-  const [updating, setUpdating] = useState(false);
-  const pending = useRef(false);
-  const opening: boolean = context.kind === 'dynamic' && isOpening(doc, context);
-  const reason: string = context.voiceIds.length <= 1 ? 'A context keeps at least one voice.'
-    : opening ? 'The dynamic the score opens with keeps its voices.' : '';
-  const change = async (voiceIds: string[]) => {
-    if (pending.current || busy) return;
-    const added = voiceIds.find(id => !context.voiceIds.includes(id));
-    const removed = context.voiceIds.find(id => !voiceIds.includes(id));
-    const voiceId = added ?? removed;
-    if (!voiceId) return;
-    pending.current = true;
-    setUpdating(true);
-    try {
-      if (context.kind === 'dynamic' && added && onShareDynamic) await onShareDynamic(voiceIds);
-      else await dispatch({ type: added ? 'addContextVoice' : 'removeContextVoice', contextId: context.id, voiceId });
-    } finally {
-      pending.current = false;
-      setUpdating(false);
-    }
-  };
-  return <fieldset className="editor-fields">
-    <legend>Voices</legend>
-    <MultiChoice ariaLabel="Voices" value={context.voiceIds} disabled={updating || busy} onChange={voiceIds => void change(voiceIds)}
-      options={doc.voices.map(voice => ({ value: voice.id, label: `Voice ${voice.index + 1}`,
-        disabled: context.voiceIds.includes(voice.id) && !!reason, title: context.voiceIds.includes(voice.id) && reason ? reason : undefined }))} />
-    {reason && <p className="hp-note">{reason}</p>}
-  </fieldset>;
 }
 
 /** A repeat: how many times its stretch is played. The signs and the words over them are engraved in the score. */
@@ -300,25 +257,22 @@ function voiceLabel(doc: ScoreDocument, voiceIds: string[]): string {
   return names.length ? `Voice ${names.join(', ')}` : '';
 }
 
-function HairpinBody({ context, resetHeight, onRemove }: { context: HairpinContext; resetHeight: ReactNode; onRemove: () => void }) {
+function HairpinBody({ context, marks, resetHeight, onRemove }: { context: HairpinContext; marks: HairpinContext[]; resetHeight: ReactNode; onRemove: () => void }) {
   const dispatch = useEditor((s) => s.dispatch);
-  const level = context.levels[0];
   const doc = useEditor((s) => s.document);
-  const sameTarget = context.levels.every((item) => item.to === level?.to);
   return (
     <>
-      <ObjectHeader title={context.type === 'crescendo' ? 'Crescendo' : 'Diminuendo'} sub={context.levels.map((item) => `${voiceLabel(doc, [item.voiceId])}: ${item.from} → ${item.to}`).join(" · ")} />
+      <ObjectHeader title={context.type === 'crescendo' ? 'Crescendo' : 'Diminuendo'} sub={`${voiceLabel(doc, marks.map((mark) => mark.voiceId))}: ${context.from} → ${context.to}`} />
       <div className="props-section">
         <div className="props-section-label">Ends on</div>
         <ChoiceGroup<Dynamic>
           ariaLabel="Hairpin target"
           variant="wrap"
-          value={sameTarget ? level?.to ?? null : null}
+          value={context.to}
           options={DYNAMICS.map((d) => ({ value: d, label: <i className="dynamic-label">{d}</i> }))}
-          onChange={(target) => void dispatch({ type: 'setHairpinTarget', hairpinId: context.id, target })}
+          onChange={(target) => void dispatch({ type: 'setHairpinTarget', hairpinIds: marks.map((mark) => mark.id), target })}
         />
       </div>
-      <ContextVoices context={context} />
       {resetHeight}
       <RemoveButton label="Remove hairpin" onClick={onRemove} />
     </>
