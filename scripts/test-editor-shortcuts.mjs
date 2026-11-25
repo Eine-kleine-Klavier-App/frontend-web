@@ -27,7 +27,7 @@ const rest = { id: 'rest', kind: 'rest', duration: '16', dots: 1, articulations:
 const document = { measures: [{ id: 'm', voices: [{ id: 'v', items: [item, rest] }] }], contexts: [
   { id: 'clef', kind: 'clef', clef: 'bass', octaveTransposition: -1 },
   { id: 'key', kind: 'keySignature', alterations: ['sharp', 'natural', 'flat', 'natural', 'natural', 'natural', 'sharp'] },
-  { id: 'dynamic', kind: 'dynamic', dynamic: 'ff', voiceIds: ['v'] },
+  { id: 'dynamic', kind: 'dynamic', dynamic: 'ff', voiceId: 'v' },
   { id: 'tempo', kind: 'tempo', bpm: 120, beat: { value: 8, dots: 1 }, label: 'allegro', showLabel: true },
   { id: 'word', kind: 'tempo', bpm: null, beat: null, label: 'adagio', showLabel: true },
   { id: 'span', kind: 'slur' },
