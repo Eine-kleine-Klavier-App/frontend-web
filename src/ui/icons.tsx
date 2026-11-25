@@ -228,6 +228,54 @@ export function StopIcon() {
   return glyph(<rect width="18" height="18" x="3" y="3" rx="2" {...STROKE} />);
 }
 
+// lucide 1.8.0: skip-back, skip-forward, rewind, fast-forward, repeat — the playback island
+export function SkipBackIcon() {
+  return glyph(
+    <>
+      <path d="M17.971 4.285A2 2 0 0 1 21 6v12a2 2 0 0 1-3.029 1.715l-9.997-5.998a2 2 0 0 1-.003-3.432z" {...STROKE} />
+      <path d="M3 20V4" {...STROKE} />
+    </>,
+  );
+}
+
+export function SkipForwardIcon() {
+  return glyph(
+    <>
+      <path d="M21 4v16" {...STROKE} />
+      <path d="M6.029 4.285A2 2 0 0 0 3 6v12a2 2 0 0 0 3.029 1.715l9.997-5.998a2 2 0 0 0 .003-3.432z" {...STROKE} />
+    </>,
+  );
+}
+
+export function RewindIcon() {
+  return glyph(
+    <>
+      <path d="M12 6a2 2 0 0 0-3.414-1.414l-6 6a2 2 0 0 0 0 2.828l6 6A2 2 0 0 0 12 18z" {...STROKE} />
+      <path d="M22 6a2 2 0 0 0-3.414-1.414l-6 6a2 2 0 0 0 0 2.828l6 6A2 2 0 0 0 22 18z" {...STROKE} />
+    </>,
+  );
+}
+
+export function FastForwardIcon() {
+  return glyph(
+    <>
+      <path d="M12 6a2 2 0 0 1 3.414-1.414l6 6a2 2 0 0 1 0 2.828l-6 6A2 2 0 0 1 12 18z" {...STROKE} />
+      <path d="M2 6a2 2 0 0 1 3.414-1.414l6 6a2 2 0 0 1 0 2.828l-6 6A2 2 0 0 1 2 18z" {...STROKE} />
+    </>,
+  );
+}
+
+export function RepeatIcon() {
+  return glyph(
+    <>
+      <path d="m17 2 4 4-4 4" {...STROKE} />
+      <path d="M3 11v-1a4 4 0 0 1 4-4h14" {...STROKE} />
+      <path d="m7 22-4-4 4-4" {...STROKE} />
+      <path d="M21 13v1a4 4 0 0 1-4 4H3" {...STROKE} />
+    </>,
+  );
+}
+
 export function ReplayIcon() {
   return glyph(
     <>
@@ -358,6 +406,114 @@ export function MoonIcon() {
     />,
   );
 }
+// Lucide `piano`, `unplug`, `file-text`, `rotate-ccw`
+export function PianoIcon() {
+  return glyph(
+    <>
+      <path d="M10 13v4" {...STROKE} />
+      <path d="M14 13v4" {...STROKE} />
+      <path d="M18 13v4" {...STROKE} />
+      <path d="M2 13h20" {...STROKE} />
+      <path d="M22 11.5A3.5 3.5 0 0 0 18.5 8a3.52 3.52 0 0 1-3.173-2A7 7 0 0 0 2 9v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2z" {...STROKE} />
+      <path d="M6 13v4" {...STROKE} />
+    </>,
+  );
+}
+
+export function UnplugIcon() {
+  return glyph(
+    <>
+      <path d="m19 5 3-3" {...STROKE} />
+      <path d="m2 22 3-3" {...STROKE} />
+      <path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z" {...STROKE} />
+      <path d="M7.5 13.5 10 11" {...STROKE} />
+      <path d="M10.5 16.5 13 14" {...STROKE} />
+      <path d="m12 6 6 6 2.3-2.3a2.4 2.4 0 0 0 0-3.4l-2.6-2.6a2.4 2.4 0 0 0-3.4 0Z" {...STROKE} />
+    </>,
+  );
+}
+
+/** Lucide `chart-no-axes-gantt` turned a quarter turn: bars of different lengths in columns, as notes fall in the waterfall. */
+export function WaterfallIcon() {
+  return glyph(
+    <>
+      <path d="M19 6v12" {...STROKE} />
+      <path d="M12 4v10" {...STROKE} />
+      <path d="M5 12v8" {...STROKE} />
+    </>,
+  );
+}
+
+export function FileTextIcon() {
+  return glyph(
+    <>
+      <path d="M6 22a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.704.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2z" {...STROKE} />
+      <path d="M14 2v5a1 1 0 0 0 1 1h5" {...STROKE} />
+      <path d="M10 9H8" {...STROKE} />
+      <path d="M16 13H8" {...STROKE} />
+      <path d="M16 17H8" {...STROKE} />
+    </>,
+  );
+}
+
+export function WandSparklesIcon() {
+  return glyph(
+    <>
+      <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72" {...STROKE} />
+      <path d="m14 7 3 3" {...STROKE} />
+      <path d="M5 6v4" {...STROKE} />
+      <path d="M19 14v4" {...STROKE} />
+      <path d="M10 2v2" {...STROKE} />
+      <path d="M7 8H3" {...STROKE} />
+      <path d="M21 16h-4" {...STROKE} />
+      <path d="M11 3H9" {...STROKE} />
+    </>,
+  );
+}
+
+export function PlugZapIcon() {
+  return glyph(
+    <>
+      <path d="M6.3 20.3a2.4 2.4 0 0 0 3.4 0L12 18l-6-6-2.3 2.3a2.4 2.4 0 0 0 0 3.4Z" {...STROKE} />
+      <path d="m2 22 3-3" {...STROKE} />
+      <path d="M7.5 13.5 10 11" {...STROKE} />
+      <path d="M10.5 16.5 13 14" {...STROKE} />
+      <path d="m18 3-4 4h6l-4 4" {...STROKE} />
+    </>,
+  );
+}
+
+export function GalleryHorizontalIcon() {
+  return glyph(
+    <>
+      <path d="M2 3v18" {...STROKE} />
+      <rect width="12" height="18" x="6" y="3" rx="2" {...STROKE} />
+      <path d="M22 3v18" {...STROKE} />
+    </>,
+  );
+}
+
+export function PaletteIcon() {
+  return glyph(
+    <>
+      <path d="M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z" {...STROKE} />
+      <circle cx="13.5" cy="6.5" r=".5" {...STROKE} fill="currentColor" />
+      <circle cx="17.5" cy="10.5" r=".5" {...STROKE} fill="currentColor" />
+      <circle cx="6.5" cy="12.5" r=".5" {...STROKE} fill="currentColor" />
+      <circle cx="8.5" cy="7.5" r=".5" {...STROKE} fill="currentColor" />
+    </>,
+  );
+}
+
+export function RotateCcwIcon() {
+  return glyph(
+    <>
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" {...STROKE} />
+      <path d="M3 3v5h5" {...STROKE} />
+    </>,
+  );
+}
+
 // Lucide `pin` (lucide-static 1.61.0)
 export function PinIcon() {
   return glyph(
